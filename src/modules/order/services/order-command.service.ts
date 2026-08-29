@@ -18,13 +18,19 @@ import { ProductClient } from "../clients/product.client";
 import {
   EmptyCartError,
   IdempotencyConflictError,
+  OrderCancellationConflictError,
 } from "../errors/order.errors";
 import { OrderRepository } from "../repositories/order.repository";
 import { OrderStatus } from "../enums/order-status.enum";
 import { PaymentMethod } from "../enums/payment-method.enum";
 import type { CreateCodOrderDto } from "../dto/create-cod-order.dto";
-import type { OrderResponse } from "../types/order-response.type";
+import type {
+  OrderListResponse,
+  OrderResponse,
+} from "../types/order-response.type";
 import type { CheckoutQuoteItem } from "../types/external-contracts.type";
+import type { OrderListQueryDto } from "../dto/order-list-query.dto";
+import type { CancelOrderDto } from "../dto/cancel-order.dto";
 import { fromCents, toCents } from "../utils/order-money.util";
 import { OrderResponseMapper } from "./order-response-mapper.service";
 
@@ -52,7 +58,10 @@ export class OrderCommandService {
     }
 
     const fingerprint = this.createFingerprint(dto);
-    const previousOrder = await this.orderRepository.findByIdempotency(ownerId, idempotencyKey);
+    const previousOrder = await this.orderRepository.findByIdempotency(
+      ownerId,
+      idempotencyKey,
+    );
     if (previousOrder) {
       if (previousOrder.requestFingerprint !== fingerprint) {
         throw new IdempotencyConflictError();
@@ -63,7 +72,10 @@ export class OrderCommandService {
     const cart = await this.cartClient.getActiveCart(ownerId);
     if (cart.items.length === 0) throw new EmptyCartError();
 
-    const address = await this.authClient.getOwnedAddress(ownerId, dto.shippingAddressId);
+    const address = await this.authClient.getOwnedAddress(
+      ownerId,
+      dto.shippingAddressId,
+    );
     const reservation = await this.productClient.reserve(
       idempotencyKey,
       cart.items.map((item) => ({
@@ -92,18 +104,29 @@ export class OrderCommandService {
         items: reservation.items,
       });
     } catch (error) {
-      // Compensation chỉ chạy sau khi Product Service đã xác nhận reserve thành công.
-      await this.productClient.release(
-        idempotencyKey,
-        reservation.items.map((item) => ({ variantId: item.variantId, quantity: item.quantity })),
-      ).catch(() => undefined);
-
       if (this.isUniqueViolation(error)) {
-        const concurrentOrder = await this.orderRepository.findByIdempotency(ownerId, idempotencyKey);
-        if (concurrentOrder && concurrentOrder.requestFingerprint === fingerprint) {
+        const concurrentOrder = await this.orderRepository.findByIdempotency(
+          ownerId,
+          idempotencyKey,
+        );
+        if (
+          concurrentOrder &&
+          concurrentOrder.requestFingerprint === fingerprint
+        ) {
           return this.responseMapper.toResponse(concurrentOrder);
         }
       }
+
+      // Compensation chỉ chạy khi chưa có order concurrent sở hữu reservation này.
+      await this.productClient
+        .release(
+          idempotencyKey,
+          reservation.items.map((item) => ({
+            variantId: item.variantId,
+            quantity: item.quantity,
+          })),
+        )
+        .catch(() => undefined);
       throw error;
     }
 
@@ -119,10 +142,112 @@ export class OrderCommandService {
   }
 
   // Đọc order theo owner để trang kết quả không thể xem đơn của tài khoản khác.
-  async getOwnedOrder(ownerId: string, orderId: string): Promise<OrderResponse> {
+  async getOwnedOrder(
+    ownerId: string,
+    orderId: string,
+  ): Promise<OrderResponse> {
     const order = await this.orderRepository.findOwnedById(ownerId, orderId);
     if (!order) throw new NotFoundException("Không tìm thấy đơn hàng.");
     return this.responseMapper.toResponse(order);
+  }
+
+  // Trả danh sách order theo owner, filter trạng thái và phân trang server-side.
+  async listOwnedOrders(
+    ownerId: string,
+    query: OrderListQueryDto,
+  ): Promise<OrderListResponse> {
+    if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 10;
+    const [orders, total] = await this.orderRepository.findOwnedPage(
+      ownerId,
+      page,
+      pageSize,
+      query.status,
+    );
+    return {
+      items: orders.map((order) => ({
+        id: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        paymentMethod: order.paymentMethod,
+        totalAmount: order.totalAmount,
+        itemCount:
+          order.items?.reduce((count, item) => count + item.quantity, 0) ?? 0,
+        previewItems: (order.items ?? []).slice(0, 2).map((item) => ({
+          productId: item.productId,
+          variantId: item.variantId,
+          productName: item.productName,
+          variantName: item.variantName,
+          imageUrl: item.imageUrl,
+          quantity: item.quantity,
+        })),
+        createdAt: order.createdAt.toISOString(),
+      })),
+      total,
+      page,
+      pageSize,
+      totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
+    };
+  }
+
+  // Release reservation trước, sau đó khóa order để hai request hủy đồng thời chỉ chuyển trạng thái một lần.
+  async cancelOwnedOrder(
+    ownerId: string,
+    orderId: string,
+    dto: CancelOrderDto,
+  ): Promise<OrderResponse> {
+    if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
+    const order = await this.orderRepository.findOwnedById(ownerId, orderId);
+    if (!order) throw new NotFoundException("Không tìm thấy đơn hàng.");
+    if (order.status === OrderStatus.CANCELLED)
+      return this.responseMapper.toResponse(order);
+    if (order.status !== OrderStatus.CONFIRMED) {
+      throw new OrderCancellationConflictError(order.status);
+    }
+
+    await this.productClient.release(
+      order.idempotencyKey,
+      (order.items ?? []).map((item) => ({
+        variantId: item.variantId,
+        quantity: item.quantity,
+      })),
+    );
+
+    await this.dataSource.transaction(async (manager) => {
+      const lockedOrder = await manager
+        .getRepository(Order)
+        .createQueryBuilder("order")
+        .where("order.id = :orderId", { orderId })
+        .andWhere("order.owner_id = :ownerId", { ownerId })
+        .setLock("pessimistic_write")
+        .getOne();
+      if (!lockedOrder) throw new NotFoundException("Không tìm thấy đơn hàng.");
+      if (lockedOrder.status === OrderStatus.CANCELLED) return;
+      if (lockedOrder.status !== OrderStatus.CONFIRMED) {
+        throw new OrderCancellationConflictError(lockedOrder.status);
+      }
+      lockedOrder.status = OrderStatus.CANCELLED;
+      lockedOrder.cancelReason = dto.reason?.trim() || null;
+      lockedOrder.cancelledAt = new Date();
+      await manager.getRepository(Order).save(lockedOrder);
+      await manager.getRepository(OrderStatusHistory).save(
+        manager.getRepository(OrderStatusHistory).create({
+          orderId,
+          fromStatus: OrderStatus.CONFIRMED,
+          toStatus: OrderStatus.CANCELLED,
+          reason: lockedOrder.cancelReason ?? "Khách hàng hủy đơn.",
+        }),
+      );
+    });
+
+    const cancelledOrder = await this.orderRepository.findOwnedById(
+      ownerId,
+      orderId,
+    );
+    if (!cancelledOrder)
+      throw new NotFoundException("Không tìm thấy đơn hàng.");
+    return this.responseMapper.toResponse(cancelledOrder);
   }
 
   // Lưu aggregate, item snapshot và audit history trong cùng một transaction database.
@@ -137,7 +262,8 @@ export class OrderCommandService {
     return this.dataSource.transaction(async (manager) => {
       const repository = manager.getRepository(Order);
       const subtotalCents = input.items.reduce(
-        (total, item) => total + toCents(item.unitPrice) * BigInt(item.quantity),
+        (total, item) =>
+          total + toCents(item.unitPrice) * BigInt(item.quantity),
         0n,
       );
       const subtotal = fromCents(subtotalCents);
@@ -152,6 +278,8 @@ export class OrderCommandService {
         shippingFee: "0.00",
         totalAmount: subtotal,
         note: input.dto.note?.trim() || null,
+        cancelReason: null,
+        cancelledAt: null,
         idempotencyKey: input.idempotencyKey,
         requestFingerprint: input.fingerprint,
       });
@@ -196,10 +324,19 @@ export class OrderCommandService {
   }
 
   // Kiểm tra context do Gateway inject trước khi chạm vào database hoặc service downstream.
-  private validateRequestContext(ownerId: string, idempotencyKey: string): void {
+  private validateRequestContext(
+    ownerId: string,
+    idempotencyKey: string,
+  ): void {
     if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
-    if (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 128) {
-      throw new BadRequestException("Idempotency-Key phải dài từ 8 đến 128 ký tự.");
+    if (
+      !idempotencyKey ||
+      idempotencyKey.length < 8 ||
+      idempotencyKey.length > 128
+    ) {
+      throw new BadRequestException(
+        "Idempotency-Key phải dài từ 8 đến 128 ký tự.",
+      );
     }
   }
 

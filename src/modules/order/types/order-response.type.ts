@@ -15,7 +15,50 @@ export interface OrderResponse {
   note: string | null;
   shippingAddress: Record<string, string>;
   items: OrderItemResponse[];
+  cancelReason: string | null;
+  cancelledAt: string | null;
+  statusHistory: OrderStatusHistoryResponse[];
   warnings: string[];
+  createdAt: string;
+}
+
+// Summary nhẹ dùng cho danh sách để không tải snapshot chi tiết không cần thiết.
+export interface OrderListItemResponse {
+  id: string;
+  orderNumber: string;
+  status: OrderStatus;
+  paymentMethod: PaymentMethod;
+  totalAmount: string;
+  itemCount: number;
+  previewItems: OrderListPreviewItemResponse[];
+  createdAt: string;
+}
+
+// Preview nhỏ của snapshot sản phẩm để card lịch sử có ảnh và tên mà không gọi detail từng order.
+export interface OrderListPreviewItemResponse {
+  productId: string;
+  variantId: string;
+  productName: string;
+  variantName: string;
+  imageUrl: string | null;
+  quantity: number;
+}
+
+// Metadata phân trang do Order Service tính từ dữ liệu thuộc owner hiện tại.
+export interface OrderListResponse {
+  items: OrderListItemResponse[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+// Timeline public chỉ trả các thay đổi trạng thái, không lộ owner hay khóa nội bộ.
+export interface OrderStatusHistoryResponse {
+  id: string;
+  fromStatus: OrderStatus | null;
+  toStatus: OrderStatus;
+  reason: string;
   createdAt: string;
 }
 

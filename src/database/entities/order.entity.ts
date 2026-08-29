@@ -18,7 +18,9 @@ import { OrderStatusHistory } from "./order-status-history.entity";
 
 // Lưu một đơn hàng và khóa idempotency theo từng owner.
 @Entity({ name: "orders" })
-@Index("uq_orders_owner_idempotency_key", ["ownerId", "idempotencyKey"], { unique: true })
+@Index("uq_orders_owner_idempotency_key", ["ownerId", "idempotencyKey"], {
+  unique: true,
+})
 @Index("idx_orders_owner_created_at", ["ownerId", "createdAt"])
 export class Order {
   @PrimaryGeneratedColumn("uuid")
@@ -55,7 +57,13 @@ export class Order {
   @Column({ type: "numeric", precision: 14, scale: 2 })
   subtotal!: string;
 
-  @Column({ name: "shipping_fee", type: "numeric", precision: 14, scale: 2, default: 0 })
+  @Column({
+    name: "shipping_fee",
+    type: "numeric",
+    precision: 14,
+    scale: 2,
+    default: 0,
+  })
   shippingFee!: string;
 
   @Column({ name: "total_amount", type: "numeric", precision: 14, scale: 2 })
@@ -63,6 +71,17 @@ export class Order {
 
   @Column({ type: "varchar", length: 500, nullable: true })
   note!: string | null;
+
+  @Column({
+    name: "cancel_reason",
+    type: "varchar",
+    length: 500,
+    nullable: true,
+  })
+  cancelReason!: string | null;
+
+  @Column({ name: "cancelled_at", type: "timestamptz", nullable: true })
+  cancelledAt!: Date | null;
 
   @Column({ name: "idempotency_key", type: "varchar", length: 128 })
   idempotencyKey!: string;
@@ -73,7 +92,9 @@ export class Order {
   @OneToMany(() => OrderItem, (item) => item.order, { cascade: true })
   items!: OrderItem[];
 
-  @OneToMany(() => OrderStatusHistory, (history) => history.order, { cascade: true })
+  @OneToMany(() => OrderStatusHistory, (history) => history.order, {
+    cascade: true,
+  })
   statusHistory!: OrderStatusHistory[];
 
   @CreateDateColumn({ name: "created_at", type: "timestamptz" })

@@ -41,3 +41,10 @@ export class CheckoutResourceNotFoundError extends NotFoundException {
     super(message);
   }
 }
+
+// Chặn hủy các trạng thái không còn cho phép thay đổi và giữ lỗi nghiệp vụ ở HTTP 409.
+export class OrderCancellationConflictError extends ConflictException {
+  constructor(status: string) {
+    super(`Không thể hủy đơn ở trạng thái ${status}.`);
+  }
+}

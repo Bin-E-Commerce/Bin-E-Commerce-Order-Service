@@ -32,6 +32,19 @@ export class OrderResponseMapper {
         quantity: item.quantity,
         lineTotal: item.lineTotal,
       })),
+      cancelReason: order.cancelReason,
+      cancelledAt: order.cancelledAt?.toISOString() ?? null,
+      statusHistory: [...(order.statusHistory ?? [])]
+        .sort(
+          (left, right) => left.createdAt.getTime() - right.createdAt.getTime(),
+        )
+        .map((history) => ({
+          id: history.id,
+          fromStatus: history.fromStatus,
+          toStatus: history.toStatus,
+          reason: history.reason,
+          createdAt: history.createdAt.toISOString(),
+        })),
       warnings,
       createdAt: order.createdAt.toISOString(),
     };
