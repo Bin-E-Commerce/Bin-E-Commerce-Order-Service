@@ -8,7 +8,7 @@
 
 `Order Service` is the transaction boundary for checkout, order snapshots, order state, and the first reliable hand-off from shopping to fulfillment.
 
-![Status](https://img.shields.io/badge/status-Phase%201%20scaffold-111827?style=flat-square)
+![Status](https://img.shields.io/badge/status-Phase%201%20implemented-16a34a?style=flat-square)
 ![Runtime](https://img.shields.io/badge/runtime-Node.js%2020%2B-339933?style=flat-square&logo=node.js&logoColor=white)
 ![Framework](https://img.shields.io/badge/framework-NestJS-E0234E?style=flat-square&logo=nestjs&logoColor=white)
 ![Database](https://img.shields.io/badge/database-PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white)
@@ -20,7 +20,7 @@
 ---
 
 > [!NOTE]
-> This repository currently contains the service README only. The implementation is intentionally introduced after the contract and ownership boundaries are reviewed and committed.
+> Phase 1 is implemented as a complete vertical slice: checkout COD, stock reservation, immutable order snapshots, idempotent retry and cart cleanup.
 
 ## The problem
 
@@ -57,7 +57,7 @@ Order Service does not query another service's database. Cross-service data is a
                     JWT + permission context
                              │
                              ▼
-                    Order Service :3004
+                    Order Service :3011 (local) / :3004 (Docker)
                  PostgreSQL — order ownership
                     │         │          │
            read cart│         │address  │quote + reserve
@@ -263,31 +263,37 @@ The Gateway authenticates the public request and forwards the user context. Inte
 
 ## Local development
 
-The runtime scaffold is intentionally not available yet. After Phase 1 implementation, the service will follow the repository's NestJS conventions:
+The service follows the repository's NestJS conventions and can run independently:
 
 ```bash
 cd services/order-service
 npm install
-npm run start:dev
+npm run dev
 ```
 
 Expected local configuration:
 
 ```env
-PORT=3004
+PORT=3011
 NODE_ENV=development
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_USER=bin_ecommerce
 POSTGRES_PASSWORD=changeme_postgres
 POSTGRES_DB=bin_ecommerce_order
-CART_SERVICE_URL=http://localhost:3003
-AUTH_SERVICE_URL=http://localhost:3001
+CART_SERVICE_URL=http://localhost:3010
+AUTH_SERVICE_URL=http://localhost:3002
 PRODUCT_SERVICE_URL=http://localhost:3008
-INTERNAL_SERVICE_TOKEN=replace-with-local-secret
+INTERNAL_SERVICE_TOKEN=dev-media-auth-internal-secret
 ```
 
-The service will be enabled in the application Docker Compose only when its implementation, healthcheck and migration path are ready.
+For the full local stack, start PostgreSQL and the dependent services, then run:
+
+```bash
+docker compose up -d postgres auth-service product-service cart-service order-service api-gateway
+```
+
+The service exposes `GET /api/health` for readiness and runs pending PostgreSQL migrations on startup. Production uses `synchronize: false`.
 
 ## Verification plan
 

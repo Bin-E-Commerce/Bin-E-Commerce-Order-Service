@@ -1,0 +1,6 @@
+# Local dependencies and generated output are never committed with the service source.
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
