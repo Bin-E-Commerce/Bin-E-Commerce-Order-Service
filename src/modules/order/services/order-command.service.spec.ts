@@ -11,8 +11,12 @@ import { AuthClient } from "../clients/auth.client";
 import { CartClient } from "../clients/cart.client";
 import { ProductClient } from "../clients/product.client";
 import { CreateCodOrderDto } from "../dto/create-cod-order.dto";
-import { EmptyCartError, IdempotencyConflictError } from "../errors/order.errors";
+import {
+  EmptyCartError,
+  IdempotencyConflictError,
+} from "../errors/order.errors";
 import { PaymentMethod } from "../enums/payment-method.enum";
+import { OrderStatus } from "../enums/order-status.enum";
 import { OrderRepository } from "../repositories/order.repository";
 import { OrderResponseMapper } from "./order-response-mapper.service";
 import { OrderCommandService } from "./order-command.service";
@@ -142,7 +146,11 @@ describe("OrderCommandService", () => {
       mockResponseMapper.toResponse.mockReturnValue(expectedResponse as never);
 
       // Act
-      const result = await target.createCodOrder(ownerId, createDto(), idempotencyKey);
+      const result = await target.createCodOrder(
+        ownerId,
+        createDto(),
+        idempotencyKey,
+      );
 
       // Assert
       expect(result).toEqual(expectedResponse);
@@ -160,9 +168,9 @@ describe("OrderCommandService", () => {
       mockOrderRepository.findByIdempotency.mockResolvedValue(existingOrder);
 
       // Act & Assert
-      await expect(target.createCodOrder(ownerId, createDto(), idempotencyKey)).rejects.toBeInstanceOf(
-        IdempotencyConflictError,
-      );
+      await expect(
+        target.createCodOrder(ownerId, createDto(), idempotencyKey),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError);
       expect(mockCartClient.getActiveCart).not.toHaveBeenCalled();
       expect(mockProductClient.reserve).not.toHaveBeenCalled();
     });
@@ -171,12 +179,15 @@ describe("OrderCommandService", () => {
     it("should reject an empty cart before reserving inventory", async () => {
       // Arrange
       mockOrderRepository.findByIdempotency.mockResolvedValue(null);
-      mockCartClient.getActiveCart.mockResolvedValue({ ...createCart(), items: [] });
+      mockCartClient.getActiveCart.mockResolvedValue({
+        ...createCart(),
+        items: [],
+      });
 
       // Act & Assert
-      await expect(target.createCodOrder(ownerId, createDto(), idempotencyKey)).rejects.toBeInstanceOf(
-        EmptyCartError,
-      );
+      await expect(
+        target.createCodOrder(ownerId, createDto(), idempotencyKey),
+      ).rejects.toBeInstanceOf(EmptyCartError);
       expect(mockProductClient.reserve).not.toHaveBeenCalled();
       expect(mockAuthClient.getOwnedAddress).not.toHaveBeenCalled();
     });
@@ -187,7 +198,10 @@ describe("OrderCommandService", () => {
       const reservation = createReservation();
       const savedOrder = { id: "order-1", createdAt: new Date() } as Order;
       const orderRepository = {
-        create: jest.fn((input: Partial<Order>) => ({ ...input, id: savedOrder.id })),
+        create: jest.fn((input: Partial<Order>) => ({
+          ...input,
+          id: savedOrder.id,
+        })),
         save: jest.fn(async (input: Order) => ({ ...input, ...savedOrder })),
       };
       const itemRepository = {
@@ -205,7 +219,9 @@ describe("OrderCommandService", () => {
           return historyRepository;
         }),
       };
-      mockDataSource.transaction.mockImplementation(async (callback: any) => callback(manager));
+      mockDataSource.transaction.mockImplementation(async (callback: any) =>
+        callback(manager),
+      );
       mockOrderRepository.findByIdempotency.mockResolvedValue(null);
       mockCartClient.getActiveCart.mockResolvedValue(createCart());
       mockAuthClient.getOwnedAddress.mockResolvedValue({
@@ -219,10 +235,16 @@ describe("OrderCommandService", () => {
         street: "1 Nguyễn Huệ",
       });
       mockProductClient.reserve.mockResolvedValue(reservation);
-      mockResponseMapper.toResponse.mockReturnValue({ id: savedOrder.id } as never);
+      mockResponseMapper.toResponse.mockReturnValue({
+        id: savedOrder.id,
+      } as never);
 
       // Act
-      const result = await target.createCodOrder(ownerId, createDto(), idempotencyKey);
+      const result = await target.createCodOrder(
+        ownerId,
+        createDto(),
+        idempotencyKey,
+      );
 
       // Assert
       expect(result).toEqual({ id: savedOrder.id });
@@ -254,9 +276,195 @@ describe("OrderCommandService", () => {
       const dto = createDto();
 
       // Act & Assert
-      await expect(target.createCodOrder("", dto, idempotencyKey)).rejects.toThrow("Thiếu user context");
-      await expect(target.createCodOrder(ownerId, dto, "short")).rejects.toThrow("Idempotency-Key");
+      await expect(
+        target.createCodOrder("", dto, idempotencyKey),
+      ).rejects.toThrow("Thiếu user context");
+      await expect(
+        target.createCodOrder(ownerId, dto, "short"),
+      ).rejects.toThrow("Idempotency-Key");
       expect(mockOrderRepository.findByIdempotency).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("listOwnedOrders", () => {
+    it("should return paginated summaries for the current owner", async () => {
+      // Arrange
+      const createdAt = new Date("2026-08-30T08:00:00.000Z");
+      mockOrderRepository.findOwnedPage.mockResolvedValue([
+        [
+          {
+            id: "order-1",
+            orderNumber: "ORD-001",
+            status: OrderStatus.CONFIRMED,
+            paymentMethod: PaymentMethod.COD,
+            totalAmount: "44000.00",
+            items: [
+              {
+                quantity: 2,
+                productName: "Áo thể thao",
+                variantName: "Đen - XL",
+                imageUrl: "https://cdn.example.com/product.jpg",
+              },
+            ],
+            createdAt,
+          } as Order,
+        ],
+        11,
+      ]);
+
+      // Act
+      const result = await target.listOwnedOrders(ownerId, {
+        page: 2,
+        pageSize: 10,
+      });
+
+      // Assert
+      expect(result).toEqual({
+        items: [
+          {
+            id: "order-1",
+            orderNumber: "ORD-001",
+            status: OrderStatus.CONFIRMED,
+            paymentMethod: PaymentMethod.COD,
+            totalAmount: "44000.00",
+            itemCount: 2,
+            previewItems: [
+              {
+                productName: "Áo thể thao",
+                variantName: "Đen - XL",
+                imageUrl: "https://cdn.example.com/product.jpg",
+                quantity: 2,
+              },
+            ],
+            createdAt: createdAt.toISOString(),
+          },
+        ],
+        total: 11,
+        page: 2,
+        pageSize: 10,
+        totalPages: 2,
+      });
+      expect(mockOrderRepository.findOwnedPage).toHaveBeenCalledWith(
+        ownerId,
+        2,
+        10,
+        undefined,
+      );
+    });
+  });
+
+  describe("cancelOwnedOrder", () => {
+    it("should release inventory and append cancellation history for a confirmed order", async () => {
+      // Arrange
+      const order = {
+        id: "order-1",
+        ownerId,
+        status: OrderStatus.CONFIRMED,
+        idempotencyKey,
+        items: [{ variantId, quantity: 2 }],
+      } as Order;
+      const cancelledOrder = {
+        ...order,
+        status: OrderStatus.CANCELLED,
+      } as Order;
+      const lockQueryBuilder = {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        setLock: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(order),
+      };
+      const orderRepository = {
+        findOne: jest.fn().mockResolvedValue(order),
+        createQueryBuilder: jest.fn().mockReturnValue(lockQueryBuilder),
+        save: jest.fn().mockImplementation(async (value: Order) => value),
+      };
+      const historyRepository = {
+        create: jest
+          .fn()
+          .mockImplementation((value: Partial<OrderStatusHistory>) => value),
+        save: jest.fn().mockResolvedValue(undefined),
+      };
+      const manager = {
+        getRepository: jest.fn((entity: unknown) =>
+          entity === Order ? orderRepository : historyRepository,
+        ),
+      };
+      mockOrderRepository.findOwnedById
+        .mockResolvedValueOnce(order)
+        .mockResolvedValueOnce(cancelledOrder);
+      mockProductClient.release.mockResolvedValue(undefined);
+      mockDataSource.transaction.mockImplementation(async (callback: any) =>
+        callback(manager),
+      );
+      mockResponseMapper.toResponse.mockReturnValue({
+        id: "order-1",
+        status: OrderStatus.CANCELLED,
+      } as never);
+
+      // Act
+      const result = await target.cancelOwnedOrder(ownerId, "order-1", {
+        reason: "Đổi ý",
+      });
+
+      // Assert
+      expect(result).toEqual({ id: "order-1", status: OrderStatus.CANCELLED });
+      expect(mockProductClient.release).toHaveBeenCalledWith(idempotencyKey, [
+        { variantId, quantity: 2 },
+      ]);
+      expect(orderRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: OrderStatus.CANCELLED,
+          cancelReason: "Đổi ý",
+        }),
+      );
+      expect(historyRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fromStatus: OrderStatus.CONFIRMED,
+          toStatus: OrderStatus.CANCELLED,
+          reason: "Đổi ý",
+        }),
+      );
+    });
+
+    it("should keep confirmed order when inventory release fails", async () => {
+      // Arrange
+      const order = {
+        id: "order-1",
+        ownerId,
+        status: OrderStatus.CONFIRMED,
+        idempotencyKey,
+        items: [{ variantId, quantity: 1 }],
+      } as Order;
+      mockOrderRepository.findOwnedById.mockResolvedValue(order);
+      mockProductClient.release.mockRejectedValue(
+        new Error("Product Service unavailable"),
+      );
+
+      // Act & Assert
+      await expect(
+        target.cancelOwnedOrder(ownerId, "order-1", {}),
+      ).rejects.toThrow("Product Service unavailable");
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it("should return cancelled order without releasing inventory on a repeated request", async () => {
+      // Arrange
+      const order = {
+        id: "order-1",
+        ownerId,
+        status: OrderStatus.CANCELLED,
+      } as Order;
+      const expected = { id: "order-1", status: OrderStatus.CANCELLED };
+      mockOrderRepository.findOwnedById.mockResolvedValue(order);
+      mockResponseMapper.toResponse.mockReturnValue(expected as never);
+
+      // Act
+      const result = await target.cancelOwnedOrder(ownerId, "order-1", {});
+
+      // Assert
+      expect(result).toEqual(expected);
+      expect(mockProductClient.release).not.toHaveBeenCalled();
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
     });
   });
 });

@@ -10,10 +10,21 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
 } from "@nestjs/common";
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from "@nestjs/swagger";
 import { CreateCodOrderDto } from "../dto/create-cod-order.dto";
-import type { OrderResponse } from "../types/order-response.type";
+import { CancelOrderDto } from "../dto/cancel-order.dto";
+import { OrderListQueryDto } from "../dto/order-list-query.dto";
+import type {
+  OrderListResponse,
+  OrderResponse,
+} from "../types/order-response.type";
 import { OrderCommandService } from "../services/order-command.service";
 
 // Endpoint public của service được Gateway bảo vệ bằng JWT và permission order.create.
@@ -33,7 +44,26 @@ export class OrderController {
     @Headers("idempotency-key") idempotencyKey: string,
     @Body() dto: CreateCodOrderDto,
   ): Promise<OrderResponse> {
-    return this.orderCommandService.createCodOrder(ownerId, dto, idempotencyKey);
+    return this.orderCommandService.createCodOrder(
+      ownerId,
+      dto,
+      idempotencyKey,
+    );
+  }
+
+  // Trả lịch sử order của chính user từ x-user-id do Gateway inject.
+  @Get()
+  @ApiOperation({ summary: "List owned orders" })
+  @ApiResponse({
+    status: 200,
+    description: "Paginated order summaries",
+    type: Object,
+  })
+  listOwnedOrders(
+    @Headers("x-user-id") ownerId: string,
+    @Query() query: OrderListQueryDto,
+  ): Promise<OrderListResponse> {
+    return this.orderCommandService.listOwnedOrders(ownerId, query);
   }
 
   // Trả chi tiết order sau khi redirect từ checkout, có ownership filter ở repository.
@@ -46,5 +76,19 @@ export class OrderController {
     @Param("orderId", new ParseUUIDPipe()) orderId: string,
   ): Promise<OrderResponse> {
     return this.orderCommandService.getOwnedOrder(ownerId, orderId);
+  }
+
+  // Hủy order COD đã xác nhận; service sẽ release tồn kho trước khi đổi trạng thái.
+  @Post(":orderId/cancel")
+  @ApiOperation({ summary: "Cancel an owned COD order" })
+  @ApiResponse({ status: 200, description: "Order cancelled", type: Object })
+  @ApiResponse({ status: 409, description: "Order cannot be cancelled" })
+  @ApiResponse({ status: 503, description: "Inventory service unavailable" })
+  cancelOwnedOrder(
+    @Headers("x-user-id") ownerId: string,
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+    @Body() dto: CancelOrderDto,
+  ): Promise<OrderResponse> {
+    return this.orderCommandService.cancelOwnedOrder(ownerId, orderId, dto);
   }
 }
