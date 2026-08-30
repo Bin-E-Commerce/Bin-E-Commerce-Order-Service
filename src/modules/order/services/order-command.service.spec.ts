@@ -10,6 +10,7 @@ import { OrderStatusHistory } from "../../../database/entities/order-status-hist
 import { AuthClient } from "../clients/auth.client";
 import { CartClient } from "../clients/cart.client";
 import { ProductClient } from "../clients/product.client";
+import { SellerShopClient } from "../clients/seller-shop.client";
 import { CreateCodOrderDto } from "../dto/create-cod-order.dto";
 import {
   EmptyCartError,
@@ -20,6 +21,8 @@ import { OrderStatus } from "../enums/order-status.enum";
 import { OrderRepository } from "../repositories/order.repository";
 import { OrderResponseMapper } from "./order-response-mapper.service";
 import { OrderCommandService } from "./order-command.service";
+import { SellerOrderAccessService } from "./seller-order-access.service";
+import { OrderEventsService } from "./order-events.service";
 
 // Logger tối giản dùng cho TestingModule, không làm nhiễu output của unit test.
 class MockLoggerService {
@@ -48,6 +51,9 @@ describe("OrderCommandService", () => {
   let mockCartClient: DeepMocked<CartClient>;
   let mockAuthClient: DeepMocked<AuthClient>;
   let mockProductClient: DeepMocked<ProductClient>;
+  let mockSellerShopClient: DeepMocked<SellerShopClient>;
+  let mockSellerOrderAccess: DeepMocked<SellerOrderAccessService>;
+  let mockOrderEvents: DeepMocked<OrderEventsService>;
   let mockResponseMapper: DeepMocked<OrderResponseMapper>;
   let mockDataSource: DeepMocked<DataSource>;
 
@@ -91,7 +97,8 @@ describe("OrderCommandService", () => {
       {
         productId,
         variantId,
-        sellerShopId: null,
+        sellerShopId: "shop-1",
+        sellerOwnerId: "seller-1",
         sku: "SKU-001",
         productName: "Áo thể thao chính thức",
         variantName: "Đen - XL",
@@ -109,6 +116,9 @@ describe("OrderCommandService", () => {
     mockCartClient = createMock<CartClient>();
     mockAuthClient = createMock<AuthClient>();
     mockProductClient = createMock<ProductClient>();
+    mockSellerShopClient = createMock<SellerShopClient>();
+    mockSellerOrderAccess = createMock<SellerOrderAccessService>();
+    mockOrderEvents = createMock<OrderEventsService>();
     mockResponseMapper = createMock<OrderResponseMapper>();
     mockDataSource = createMock<DataSource>();
 
@@ -119,6 +129,9 @@ describe("OrderCommandService", () => {
         { provide: CartClient, useValue: mockCartClient },
         { provide: AuthClient, useValue: mockAuthClient },
         { provide: ProductClient, useValue: mockProductClient },
+        { provide: SellerShopClient, useValue: mockSellerShopClient },
+        { provide: SellerOrderAccessService, useValue: mockSellerOrderAccess },
+        { provide: OrderEventsService, useValue: mockOrderEvents },
         { provide: OrderResponseMapper, useValue: mockResponseMapper },
         { provide: DataSource, useValue: mockDataSource },
       ],
@@ -267,6 +280,10 @@ describe("OrderCommandService", () => {
       expect(mockProductClient.reserve).toHaveBeenCalledWith(idempotencyKey, [
         { productId, variantId, quantity: 2 },
       ]);
+      expect(mockOrderEvents.publishCreated).toHaveBeenCalledWith(
+        expect.objectContaining({ id: savedOrder.id }),
+        reservation.items,
+      );
       expect(mockCartClient.checkoutCart).toHaveBeenCalledWith(ownerId);
     });
 
@@ -353,6 +370,68 @@ describe("OrderCommandService", () => {
     });
   });
 
+  describe("seller orders", () => {
+    // Seller order luôn resolve shop từ user context và chỉ map dữ liệu đã được repository scope theo shop.
+    it("should list shop-scoped orders without accepting a client shop id", async () => {
+      const currentUser = {
+        userId: "seller-user-1",
+        email: "seller@example.com",
+        permissions: ["seller.order.read"],
+      };
+      const order = {
+        id: "order-1",
+        orderNumber: "BIN-ORDER-1",
+        items: [{ quantity: 2 }],
+      } as Order;
+      const expected = {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        shopItemTotal: "44000.00",
+      };
+      mockSellerOrderAccess.ensureCanRead.mockReturnValue(currentUser);
+      mockSellerShopClient.getOwnedShopId.mockResolvedValue("shop-1");
+      mockOrderRepository.findSellerPage.mockResolvedValue([[order], 1]);
+      mockResponseMapper.toSellerListItem.mockReturnValue(expected as never);
+
+      const result = await target.listSellerOrders(currentUser, {
+        page: 1,
+        pageSize: 10,
+      });
+
+      expect(result.items).toEqual([expected]);
+      expect(mockSellerShopClient.getOwnedShopId).toHaveBeenCalledWith(
+        currentUser,
+      );
+      expect(mockOrderRepository.findSellerPage).toHaveBeenCalledWith(
+        "shop-1",
+        1,
+        10,
+        { page: 1, pageSize: 10 },
+      );
+    });
+
+    // Order không chứa item của shop phải trả not-found để không làm lộ order của seller khác.
+    it("should hide an order that has no item for the current shop", async () => {
+      const currentUser = {
+        userId: "seller-user-1",
+        email: "seller@example.com",
+        permissions: ["seller.order.read"],
+      };
+      mockSellerOrderAccess.ensureCanRead.mockReturnValue(currentUser);
+      mockSellerShopClient.getOwnedShopId.mockResolvedValue("shop-1");
+      mockOrderRepository.findSellerById.mockResolvedValue(null);
+
+      await expect(
+        target.getSellerOrder(currentUser, "order-other-shop"),
+      ).rejects.toThrow("Không tìm thấy đơn hàng");
+      expect(mockOrderRepository.findSellerById).toHaveBeenCalledWith(
+        "shop-1",
+        "order-other-shop",
+      );
+      expect(mockResponseMapper.toSellerResponse).not.toHaveBeenCalled();
+    });
+  });
+
   describe("cancelOwnedOrder", () => {
     it("should release inventory and append cancellation history for a confirmed order", async () => {
       // Arrange
@@ -423,6 +502,9 @@ describe("OrderCommandService", () => {
           toStatus: OrderStatus.CANCELLED,
           reason: "Đổi ý",
         }),
+      );
+      expect(mockOrderEvents.publishCancelled).toHaveBeenCalledWith(
+        cancelledOrder,
       );
     });
 

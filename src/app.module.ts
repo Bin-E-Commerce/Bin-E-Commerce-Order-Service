@@ -7,6 +7,7 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { HealthModule } from "./modules/health/health.module";
 import { OrderModule } from "./modules/order/order.module";
+import { KafkaModule } from "./kafka/kafka.module";
 
 // Lắp các module hạ tầng và bounded context vào một dependency graph rõ ràng.
 @Module({
@@ -36,6 +37,7 @@ import { OrderModule } from "./modules/order/order.module";
       }),
     }),
     HealthModule,
+    KafkaModule,
     OrderModule,
   ],
 })

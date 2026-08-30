@@ -15,6 +15,7 @@ import { OrderStatusHistory } from "../../../database/entities/order-status-hist
 import { CartClient } from "../clients/cart.client";
 import { AuthClient } from "../clients/auth.client";
 import { ProductClient } from "../clients/product.client";
+import { SellerShopClient } from "../clients/seller-shop.client";
 import {
   EmptyCartError,
   IdempotencyConflictError,
@@ -27,12 +28,18 @@ import type { CreateCodOrderDto } from "../dto/create-cod-order.dto";
 import type {
   OrderListResponse,
   OrderResponse,
+  SellerOrderListResponse,
+  SellerOrderResponse,
 } from "../types/order-response.type";
 import type { CheckoutQuoteItem } from "../types/external-contracts.type";
 import type { OrderListQueryDto } from "../dto/order-list-query.dto";
 import type { CancelOrderDto } from "../dto/cancel-order.dto";
+import type { SellerOrderListQueryDto } from "../dto/seller-order-list-query.dto";
+import type { SellerOrderUserContext } from "../types/seller-order-user-context.type";
 import { fromCents, toCents } from "../utils/order-money.util";
 import { OrderResponseMapper } from "./order-response-mapper.service";
+import { SellerOrderAccessService } from "./seller-order-access.service";
+import { OrderEventsService } from "./order-events.service";
 
 // Điều phối transaction boundary và giữ mọi kiểm tra ownership ở server-side.
 @Injectable()
@@ -42,6 +49,9 @@ export class OrderCommandService {
     private readonly cartClient: CartClient,
     private readonly authClient: AuthClient,
     private readonly productClient: ProductClient,
+    private readonly sellerShopClient: SellerShopClient,
+    private readonly sellerOrderAccess: SellerOrderAccessService,
+    private readonly orderEvents: OrderEventsService,
     private readonly responseMapper: OrderResponseMapper,
     private readonly dataSource: DataSource,
   ) {}
@@ -51,6 +61,7 @@ export class OrderCommandService {
     ownerId: string,
     dto: CreateCodOrderDto,
     idempotencyKey: string,
+    ownerEmail?: string,
   ): Promise<OrderResponse> {
     this.validateRequestContext(ownerId, idempotencyKey);
     if (dto.paymentMethod !== PaymentMethod.COD) {
@@ -130,6 +141,17 @@ export class OrderCommandService {
       throw error;
     }
 
+    // Phát event sau khi order và item đã commit; notification lỗi không làm checkout thất bại vì producer xử lý best-effort.
+    if (ownerEmail?.trim()) {
+      await this.orderEvents.publishCreated(
+        savedOrder,
+        reservation.items,
+        ownerEmail.trim().toLowerCase(),
+      );
+    } else {
+      await this.orderEvents.publishCreated(savedOrder, reservation.items);
+    }
+
     try {
       await this.cartClient.checkoutCart(ownerId);
       return this.responseMapper.toResponse(savedOrder);
@@ -192,10 +214,50 @@ export class OrderCommandService {
   }
 
   // Release reservation trước, sau đó khóa order để hai request hủy đồng thời chỉ chuyển trạng thái một lần.
+  // Trả danh sách order có item của shop hiện tại; shop scope được resolve từ user context trước khi query database.
+  async listSellerOrders(
+    currentUser: SellerOrderUserContext,
+    query: SellerOrderListQueryDto,
+  ): Promise<SellerOrderListResponse> {
+    const user = this.sellerOrderAccess.ensureCanRead(currentUser);
+    const shopId = await this.sellerShopClient.getOwnedShopId(user);
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 10;
+    const [orders, total] = await this.orderRepository.findSellerPage(
+      shopId,
+      page,
+      pageSize,
+      query,
+    );
+
+    return {
+      items: orders.map((order) =>
+        this.responseMapper.toSellerListItem(order),
+      ),
+      total,
+      page,
+      pageSize,
+      totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
+    };
+  }
+
+  // Trả detail Seller sau khi xác minh shop thuộc user; order không có item của shop sẽ được che dưới dạng not-found.
+  async getSellerOrder(
+    currentUser: SellerOrderUserContext,
+    orderId: string,
+  ): Promise<SellerOrderResponse> {
+    const user = this.sellerOrderAccess.ensureCanRead(currentUser);
+    const shopId = await this.sellerShopClient.getOwnedShopId(user);
+    const order = await this.orderRepository.findSellerById(shopId, orderId);
+    if (!order) throw new NotFoundException("Không tìm thấy đơn hàng.");
+    return this.responseMapper.toSellerResponse(order);
+  }
+
   async cancelOwnedOrder(
     ownerId: string,
     orderId: string,
     dto: CancelOrderDto,
+    ownerEmail?: string,
   ): Promise<OrderResponse> {
     if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
     const order = await this.orderRepository.findOwnedById(ownerId, orderId);
@@ -214,7 +276,7 @@ export class OrderCommandService {
       })),
     );
 
-    await this.dataSource.transaction(async (manager) => {
+    const didCancel = await this.dataSource.transaction(async (manager) => {
       const lockedOrder = await manager
         .getRepository(Order)
         .createQueryBuilder("order")
@@ -223,7 +285,7 @@ export class OrderCommandService {
         .setLock("pessimistic_write")
         .getOne();
       if (!lockedOrder) throw new NotFoundException("Không tìm thấy đơn hàng.");
-      if (lockedOrder.status === OrderStatus.CANCELLED) return;
+      if (lockedOrder.status === OrderStatus.CANCELLED) return false;
       if (lockedOrder.status !== OrderStatus.CONFIRMED) {
         throw new OrderCancellationConflictError(lockedOrder.status);
       }
@@ -239,6 +301,7 @@ export class OrderCommandService {
           reason: lockedOrder.cancelReason ?? "Khách hàng hủy đơn.",
         }),
       );
+      return true;
     });
 
     const cancelledOrder = await this.orderRepository.findOwnedById(
@@ -247,6 +310,16 @@ export class OrderCommandService {
     );
     if (!cancelledOrder)
       throw new NotFoundException("Không tìm thấy đơn hàng.");
+    if (didCancel) {
+      if (ownerEmail?.trim()) {
+        await this.orderEvents.publishCancelled(
+          cancelledOrder,
+          ownerEmail.trim().toLowerCase(),
+        );
+      } else {
+        await this.orderEvents.publishCancelled(cancelledOrder);
+      }
+    }
     return this.responseMapper.toResponse(cancelledOrder);
   }
 
@@ -292,6 +365,7 @@ export class OrderCommandService {
           productId: item.productId,
           variantId: item.variantId,
           sellerShopId: item.sellerShopId,
+          sellerOwnerId: item.sellerOwnerId,
           sku: item.sku,
           productName: item.productName,
           variantName: item.variantName,
