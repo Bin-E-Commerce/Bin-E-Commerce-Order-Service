@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "build": "tsc -p tsconfig.build.json --incremental false",
-    "start": "node --max-old-space-size=128 dist/main.js",
-    "dev": "npm run build && node --watch dist/main.js",
+    "start": "node --max-old-space-size=128 dist/services/order-service/src/main.js",
+    "dev": "npm run build && node --watch dist/services/order-service/src/main.js",
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit",
     "test": "jest"
@@ -20,6 +20,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "helmet": "^8.1.0",
+    "kafkajs": "^2.2.4",
     "pg": "^8.13.3",
     "reflect-metadata": "^0.2.2",
     "typeorm": "^0.3.22"

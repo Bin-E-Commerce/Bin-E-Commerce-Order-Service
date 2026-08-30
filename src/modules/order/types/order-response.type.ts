@@ -53,6 +53,65 @@ export interface OrderListResponse {
   totalPages: number;
 }
 
+// Summary Seller chỉ chứa item thuộc shop hiện tại và không leak tổng tiền của các shop khác trong cùng order.
+export interface SellerOrderListItemResponse {
+  id: string;
+  orderNumber: string;
+  status: OrderStatus;
+  paymentMethod: PaymentMethod;
+  shopItemTotal: string;
+  itemCount: number;
+  previewItems: SellerOrderPreviewItemResponse[];
+  createdAt: string;
+}
+
+// Preview nhẹ dùng cho card Seller để hiển thị ảnh, tên và số lượng mà không cần gọi detail.
+export interface SellerOrderPreviewItemResponse {
+  productId: string;
+  productName: string;
+  variantName: string;
+  imageUrl: string | null;
+  quantity: number;
+  lineTotal: string;
+}
+
+// Response phân trang Seller được tính trên các order có ít nhất một item thuộc shop hiện tại.
+export interface SellerOrderListResponse {
+  items: SellerOrderListItemResponse[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+// Chi tiết Seller chỉ map item của shop, giữ nguyên snapshot giao hàng và timeline order cấp hệ thống.
+export interface SellerOrderResponse {
+  id: string;
+  orderNumber: string;
+  status: OrderStatus;
+  paymentMethod: PaymentMethod;
+  shopItemTotal: string;
+  shippingAddress: Record<string, string>;
+  items: SellerOrderItemResponse[];
+  cancelReason: string | null;
+  cancelledAt: string | null;
+  statusHistory: OrderStatusHistoryResponse[];
+  createdAt: string;
+}
+
+// Item Seller được loại bỏ sellerShopId và SKU nội bộ vì shop scope đã được kiểm tra ở server.
+export interface SellerOrderItemResponse {
+  id: string;
+  productId: string;
+  variantId: string;
+  productName: string;
+  variantName: string;
+  imageUrl: string | null;
+  unitPrice: string;
+  quantity: number;
+  lineTotal: string;
+}
+
 // Timeline public chỉ trả các thay đổi trạng thái, không lộ owner hay khóa nội bộ.
 export interface OrderStatusHistoryResponse {
   id: string;

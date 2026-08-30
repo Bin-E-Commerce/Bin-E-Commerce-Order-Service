@@ -41,6 +41,7 @@ export class OrderController {
   @ApiResponse({ status: 409, description: "Stock or idempotency conflict" })
   async createCodOrder(
     @Headers("x-user-id") ownerId: string,
+    @Headers("x-user-email") ownerEmail: string | undefined,
     @Headers("idempotency-key") idempotencyKey: string,
     @Body() dto: CreateCodOrderDto,
   ): Promise<OrderResponse> {
@@ -48,6 +49,7 @@ export class OrderController {
       ownerId,
       dto,
       idempotencyKey,
+      ownerEmail,
     );
   }
 
@@ -86,9 +88,15 @@ export class OrderController {
   @ApiResponse({ status: 503, description: "Inventory service unavailable" })
   cancelOwnedOrder(
     @Headers("x-user-id") ownerId: string,
+    @Headers("x-user-email") ownerEmail: string | undefined,
     @Param("orderId", new ParseUUIDPipe()) orderId: string,
     @Body() dto: CancelOrderDto,
   ): Promise<OrderResponse> {
-    return this.orderCommandService.cancelOwnedOrder(ownerId, orderId, dto);
+    return this.orderCommandService.cancelOwnedOrder(
+      ownerId,
+      orderId,
+      dto,
+      ownerEmail,
+    );
   }
 }

@@ -35,6 +35,7 @@ export interface CheckoutQuoteItem {
   productId: string;
   variantId: string;
   sellerShopId: string | null;
+  sellerOwnerId?: string | null;
   sku: string;
   productName: string;
   variantName: string;

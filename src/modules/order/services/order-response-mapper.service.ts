@@ -2,7 +2,12 @@
 
 import { Injectable } from "@nestjs/common";
 import { Order } from "../../../database/entities/order.entity";
-import type { OrderResponse } from "../types/order-response.type";
+import { fromCents, toCents } from "../utils/order-money.util";
+import type {
+  OrderResponse,
+  SellerOrderListItemResponse,
+  SellerOrderResponse,
+} from "../types/order-response.type";
 
 // Không leak idempotency key, fingerprint hay ownerId ra public response.
 @Injectable()
@@ -48,5 +53,72 @@ export class OrderResponseMapper {
       warnings,
       createdAt: order.createdAt.toISOString(),
     };
+  }
+
+  // Map summary Seller chỉ lấy item thuộc shop đã được repository lọc sẵn và tính tổng bằng tiền snapshot.
+  toSellerListItem(order: Order): SellerOrderListItemResponse {
+    const items = order.items ?? [];
+    return {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      status: order.status,
+      paymentMethod: order.paymentMethod,
+      shopItemTotal: this.sumLineTotals(items),
+      itemCount: items.reduce((count, item) => count + item.quantity, 0),
+      previewItems: items.slice(0, 2).map((item) => ({
+        productId: item.productId,
+        productName: item.productName,
+        variantName: item.variantName,
+        imageUrl: item.imageUrl,
+        quantity: item.quantity,
+        lineTotal: item.lineTotal,
+      })),
+      createdAt: order.createdAt.toISOString(),
+    };
+  }
+
+  // Map detail Seller mà không trả ownerId, SKU hoặc item của shop khác dù entity có thể chứa toàn bộ order.
+  toSellerResponse(order: Order): SellerOrderResponse {
+    const items = order.items ?? [];
+    return {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      status: order.status,
+      paymentMethod: order.paymentMethod,
+      shopItemTotal: this.sumLineTotals(items),
+      shippingAddress: order.shippingAddress,
+      items: items.map((item) => ({
+        id: item.id,
+        productId: item.productId,
+        variantId: item.variantId,
+        productName: item.productName,
+        variantName: item.variantName,
+        imageUrl: item.imageUrl,
+        unitPrice: item.unitPrice,
+        quantity: item.quantity,
+        lineTotal: item.lineTotal,
+      })),
+      cancelReason: order.cancelReason,
+      cancelledAt: order.cancelledAt?.toISOString() ?? null,
+      statusHistory: [...(order.statusHistory ?? [])]
+        .sort(
+          (left, right) => left.createdAt.getTime() - right.createdAt.getTime(),
+        )
+        .map((history) => ({
+          id: history.id,
+          fromStatus: history.fromStatus,
+          toStatus: history.toStatus,
+          reason: history.reason,
+          createdAt: history.createdAt.toISOString(),
+        })),
+      createdAt: order.createdAt.toISOString(),
+    };
+  }
+
+  // Cộng lineTotal từ Product snapshot để Seller không nhìn thấy tổng tiền toàn bộ order nhiều shop.
+  private sumLineTotals(items: Array<{ lineTotal: string }>): string {
+    return fromCents(
+      items.reduce((total, item) => total + toCents(item.lineTotal), 0n),
+    );
   }
 }
