@@ -26,8 +26,14 @@ export interface ShippingAddressResponse {
   fullName: string;
   phone: string;
   province: string;
+  ghnProvinceId: number | null;
+  ghnProvinceName: string | null;
   district: string;
+  ghnDistrictId: number | null;
+  ghnDistrictName: string | null;
   ward: string;
+  ghnWardCode: string | null;
+  ghnWardName: string | null;
   street: string;
 }
 
@@ -43,6 +49,10 @@ export interface CheckoutQuoteItem {
   unitPrice: string;
   quantity: number;
   lineTotal: string;
+  packageWeightGrams: number;
+  packageLengthCm: number;
+  packageWidthCm: number;
+  packageHeightCm: number;
 }
 
 export interface CheckoutReservationResponse {

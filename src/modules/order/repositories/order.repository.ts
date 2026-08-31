@@ -4,7 +4,8 @@ import { Injectable } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { FindOptionsWhere, Repository } from "typeorm";
 import { Order } from "../../../database/entities/order.entity";
-import { OrderStatus } from "../enums/order-status.enum";
+import { OrderStatus } from "../../../database/enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
 import type { SellerOrderListQueryDto } from "../dto/seller-order-list-query.dto";
 
 // Cung cấp các query theo ownership và idempotency, không cho caller truyền owner tùy ý vào service khác.
@@ -39,10 +40,13 @@ export class OrderRepository {
     page: number,
     pageSize: number,
     status?: OrderStatus,
+    stage?: OrderFulfillmentStatus,
   ): Promise<[Order[], number]> {
-    const where: FindOptionsWhere<Order> = status
-      ? { ownerId, status }
-      : { ownerId };
+    const where: FindOptionsWhere<Order> = stage
+      ? { ownerId, fulfillmentStatus: stage }
+      : status
+        ? { ownerId, status }
+        : { ownerId };
     return this.repository.findAndCount({
       where,
       relations: { items: true },
@@ -128,21 +132,25 @@ export class OrderRepository {
     shopId: string,
     query: SellerOrderListQueryDto,
   ) {
-    const filterQuery = this.repository
-      .createQueryBuilder("order")
-      .where(
-        `EXISTS (
+    const filterQuery = this.repository.createQueryBuilder("order").where(
+      `EXISTS (
           SELECT 1
           FROM order_items seller_item
           WHERE seller_item.order_id = "order"."id"
             AND seller_item.seller_shop_id = :shopId
         )`,
-        { shopId },
-      );
+      { shopId },
+    );
 
     if (query.status) {
       filterQuery.andWhere("order.status = :status", {
         status: query.status,
+      });
+    }
+
+    if (query.stage) {
+      filterQuery.andWhere("order.fulfillment_status = :stage", {
+        stage: query.stage,
       });
     }
 

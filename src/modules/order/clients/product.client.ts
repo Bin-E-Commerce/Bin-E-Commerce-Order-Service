@@ -36,6 +36,17 @@ export class ProductClient {
     );
   }
 
+  // Đọc giá và package snapshot authoritative cho quote mà không thay đổi tồn kho.
+  async quote(
+    reservationKey: string,
+    items: Array<{ productId: string; variantId: string; quantity: number }>,
+  ): Promise<CheckoutReservationResponse> {
+    return this.post<CheckoutReservationResponse>(
+      "/api/v1/internal/checkout/quote",
+      { reservationKey, items },
+    );
+  }
+
   // Compensation được gọi khi Order Service đã reserve nhưng không thể commit order.
   async release(reservationKey: string, items: ReservationLine[]): Promise<void> {
     await this.post<{ released: boolean }>(

@@ -2,6 +2,9 @@
 
 import { Injectable } from "@nestjs/common";
 import { Order } from "../../../database/entities/order.entity";
+import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../../../database/enums/payment-status.enum";
+import { OrderStatus } from "../../../database/enums/order-status.enum";
 import { fromCents, toCents } from "../utils/order-money.util";
 import type {
   OrderResponse,
@@ -18,9 +21,14 @@ export class OrderResponseMapper {
       id: order.id,
       orderNumber: order.orderNumber,
       status: order.status,
+      fulfillmentStatus:
+        order.fulfillmentStatus ?? this.legacyFulfillment(order.status),
+      paymentStatus:
+        order.paymentStatus ?? PaymentStatus.COD_PENDING_COLLECTION,
       paymentMethod: order.paymentMethod,
       subtotal: order.subtotal,
       shippingFee: order.shippingFee,
+      shippingFeeBreakdown: order.shippingFeeBreakdown ?? [],
       totalAmount: order.totalAmount,
       note: order.note,
       shippingAddress: order.shippingAddress,
@@ -62,8 +70,14 @@ export class OrderResponseMapper {
       id: order.id,
       orderNumber: order.orderNumber,
       status: order.status,
+      fulfillmentStatus:
+        order.fulfillmentStatus ?? this.legacyFulfillment(order.status),
+      paymentStatus:
+        order.paymentStatus ?? PaymentStatus.COD_PENDING_COLLECTION,
       paymentMethod: order.paymentMethod,
       shopItemTotal: this.sumLineTotals(items),
+      shippingFee: order.shippingFee,
+      shippingFeeBreakdown: order.shippingFeeBreakdown ?? [],
       itemCount: items.reduce((count, item) => count + item.quantity, 0),
       previewItems: items.slice(0, 2).map((item) => ({
         productId: item.productId,
@@ -84,8 +98,14 @@ export class OrderResponseMapper {
       id: order.id,
       orderNumber: order.orderNumber,
       status: order.status,
+      fulfillmentStatus:
+        order.fulfillmentStatus ?? this.legacyFulfillment(order.status),
+      paymentStatus:
+        order.paymentStatus ?? PaymentStatus.COD_PENDING_COLLECTION,
       paymentMethod: order.paymentMethod,
       shopItemTotal: this.sumLineTotals(items),
+      shippingFee: order.shippingFee,
+      shippingFeeBreakdown: order.shippingFeeBreakdown ?? [],
       shippingAddress: order.shippingAddress,
       items: items.map((item) => ({
         id: item.id,
@@ -120,5 +140,14 @@ export class OrderResponseMapper {
     return fromCents(
       items.reduce((total, item) => total + toCents(item.lineTotal), 0n),
     );
+  }
+
+  // Map dữ liệu Phase 1-3 chưa có cột mới để response vẫn ổn định trong lúc migration chạy dần.
+  private legacyFulfillment(status: OrderStatus): OrderFulfillmentStatus {
+    if (status === OrderStatus.CANCELLED)
+      return OrderFulfillmentStatus.CANCELLED;
+    if (status === OrderStatus.FAILED)
+      return OrderFulfillmentStatus.DELIVERY_FAILED;
+    return OrderFulfillmentStatus.TO_SHIP;
   }
 }

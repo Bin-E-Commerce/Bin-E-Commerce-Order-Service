@@ -8,7 +8,7 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from "typeorm";
-import { OrderStatus } from "../../modules/order/enums/order-status.enum";
+import { OrderStatus } from "../enums/order-status.enum";
 import { Order } from "./order.entity";
 
 // Mỗi lần đổi trạng thái tạo một bản ghi append-only thay vì ghi đè lịch sử.

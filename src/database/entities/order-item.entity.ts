@@ -57,4 +57,16 @@ export class OrderItem {
 
   @Column({ name: "line_total", type: "numeric", precision: 14, scale: 2 })
   lineTotal!: string;
+
+  @Column({ name: "package_weight_grams", type: "int", nullable: true })
+  packageWeightGrams!: number | null;
+
+  @Column({ name: "package_length_cm", type: "numeric", precision: 10, scale: 2, nullable: true })
+  packageLengthCm!: string | null;
+
+  @Column({ name: "package_width_cm", type: "numeric", precision: 10, scale: 2, nullable: true })
+  packageWidthCm!: string | null;
+
+  @Column({ name: "package_height_cm", type: "numeric", precision: 10, scale: 2, nullable: true })
+  packageHeightCm!: string | null;
 }
