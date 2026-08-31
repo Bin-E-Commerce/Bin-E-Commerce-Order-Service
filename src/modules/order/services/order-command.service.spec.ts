@@ -1,6 +1,6 @@
 // Unit test cho use case checkout COD của Order Service.
 // Các dependency HTTP và transaction được mock để kiểm tra business rule mà không cần chạy database thật.
-
+/// <reference types="jest" />
 import { Test, type TestingModule } from "@nestjs/testing";
 import { createMock, type DeepMocked } from "@golevelup/ts-jest";
 import { DataSource } from "typeorm";
@@ -16,8 +16,8 @@ import {
   EmptyCartError,
   IdempotencyConflictError,
 } from "../errors/order.errors";
-import { PaymentMethod } from "../enums/payment-method.enum";
-import { OrderStatus } from "../enums/order-status.enum";
+import { PaymentMethod } from "../../../database/enums/payment-method.enum";
+import { OrderStatus } from "../../../database/enums/order-status.enum";
 import { OrderRepository } from "../repositories/order.repository";
 import { OrderResponseMapper } from "./order-response-mapper.service";
 import { OrderCommandService } from "./order-command.service";
@@ -106,6 +106,10 @@ describe("OrderCommandService", () => {
         unitPrice: "22000.00",
         quantity,
         lineTotal: "44000.00",
+        packageWeightGrams: 500,
+        packageLengthCm: 20,
+        packageWidthCm: 15,
+        packageHeightCm: 10,
       },
     ],
   });
@@ -243,8 +247,14 @@ describe("OrderCommandService", () => {
         fullName: "Nguyễn Văn A",
         phone: "0900000000",
         province: "Hồ Chí Minh",
+        ghnProvinceId: 202,
+        ghnProvinceName: "Hồ Chí Minh",
         district: "Quận 1",
+        ghnDistrictId: 1442,
+        ghnDistrictName: "Quận 1",
         ward: "Bến Nghé",
+        ghnWardCode: "20106",
+        ghnWardName: "Phường Bến Nghé",
         street: "1 Nguyễn Huệ",
       });
       mockProductClient.reserve.mockResolvedValue(reservation);

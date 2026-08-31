@@ -1,5 +1,5 @@
 // File test cho utility tiền tệ của Order Service, tập trung vào độ chính xác khi cộng subtotal.
-
+/// <reference types="jest" />
 import { fromCents, toCents } from "./order-money.util";
 
 describe("order-money.util", () => {
