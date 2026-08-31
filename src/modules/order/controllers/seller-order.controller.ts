@@ -4,10 +4,12 @@
 import {
   Controller,
   Get,
+  Body,
   Headers,
   Param,
   ParseUUIDPipe,
   Query,
+  Post,
 } from "@nestjs/common";
 import {
   ApiBearerAuth,
@@ -22,6 +24,9 @@ import type {
 } from "../types/order-response.type";
 import { OrderCommandService } from "../services/order-command.service";
 import { SellerOrderAccessService } from "../services/seller-order-access.service";
+import { OrderReturnService } from "../services/order-return.service";
+import { ReviewOrderReturnDto } from "../dto/order-return.dto";
+import { OrderReturnStatus } from "../../../database/enums/order-return-status.enum";
 
 @ApiTags("seller-orders")
 @ApiBearerAuth()
@@ -31,12 +36,17 @@ export class SellerOrderController {
   constructor(
     private readonly orderCommandService: OrderCommandService,
     private readonly sellerOrderAccess: SellerOrderAccessService,
+    private readonly orderReturnService: OrderReturnService,
   ) {}
 
   // List Seller chỉ gồm order có item thuộc shop được resolve từ user context.
   @Get()
   @ApiOperation({ summary: "List seller orders" })
-  @ApiResponse({ status: 200, description: "Paginated seller orders", type: Object })
+  @ApiResponse({
+    status: 200,
+    description: "Paginated seller orders",
+    type: Object,
+  })
   listSellerOrders(
     @Headers() headers: Record<string, unknown>,
     @Query() query: SellerOrderListQueryDto,
@@ -50,7 +60,11 @@ export class SellerOrderController {
   // Detail Seller không trả order nếu shop hiện tại không có item trong order đó.
   @Get(":orderId")
   @ApiOperation({ summary: "Get a seller order" })
-  @ApiResponse({ status: 200, description: "Seller order detail", type: Object })
+  @ApiResponse({
+    status: 200,
+    description: "Seller order detail",
+    type: Object,
+  })
   @ApiResponse({ status: 404, description: "Order not found for this shop" })
   getSellerOrder(
     @Headers() headers: Record<string, unknown>,
@@ -59,6 +73,40 @@ export class SellerOrderController {
     return this.orderCommandService.getSellerOrder(
       this.sellerOrderAccess.buildCurrentUserFromHeaders(headers),
       orderId,
+    );
+  }
+
+  // Seller approve request return chỉ trong shop được resolve từ user context.
+  @Post(":orderId/returns/:returnId/approve")
+  approveReturn(
+    @Headers() headers: Record<string, unknown>,
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+    @Param("returnId", new ParseUUIDPipe()) returnId: string,
+    @Body() dto: ReviewOrderReturnDto,
+  ) {
+    return this.orderReturnService.review(
+      this.sellerOrderAccess.buildCurrentUserFromHeaders(headers),
+      orderId,
+      returnId,
+      dto,
+      OrderReturnStatus.APPROVED,
+    );
+  }
+
+  // Seller reject request return với ghi chú tùy chọn để customer biết lý do.
+  @Post(":orderId/returns/:returnId/reject")
+  rejectReturn(
+    @Headers() headers: Record<string, unknown>,
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+    @Param("returnId", new ParseUUIDPipe()) returnId: string,
+    @Body() dto: ReviewOrderReturnDto,
+  ) {
+    return this.orderReturnService.review(
+      this.sellerOrderAccess.buildCurrentUserFromHeaders(headers),
+      orderId,
+      returnId,
+      dto,
+      OrderReturnStatus.REJECTED,
     );
   }
 }

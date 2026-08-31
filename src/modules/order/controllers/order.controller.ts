@@ -1,102 +1,65 @@
-// Controller này công bố API checkout và chi tiết order cho Gateway.
-// Controller chỉ đọc header context, validate route parameter và gọi application service.
-// Ownership luôn lấy từ x-user-id do Gateway inject, không nhận ownerId từ body hoặc query.
-
-import {
-  Body,
-  Controller,
-  Get,
-  Headers,
-  Param,
-  ParseUUIDPipe,
-  Post,
-  Query,
-} from "@nestjs/common";
-import {
-  ApiBearerAuth,
-  ApiOperation,
-  ApiResponse,
-  ApiTags,
-} from "@nestjs/swagger";
-import { CreateCodOrderDto } from "../dto/create-cod-order.dto";
+// Controller này công bố checkout, quote và order API; ownership luôn lấy từ x-user-id do Gateway xác thực.
+import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
 import { CancelOrderDto } from "../dto/cancel-order.dto";
+import { CreateCodOrderDto } from "../dto/create-cod-order.dto";
+import { CreateOrderQuoteDto } from "../dto/create-order-quote.dto";
+import { CreateOrderReturnDto } from "../dto/order-return.dto";
 import { OrderListQueryDto } from "../dto/order-list-query.dto";
-import type {
-  OrderListResponse,
-  OrderResponse,
-} from "../types/order-response.type";
 import { OrderCommandService } from "../services/order-command.service";
+import { OrderReturnService } from "../services/order-return.service";
+import type { OrderListResponse, OrderResponse } from "../types/order-response.type";
 
-// Endpoint public của service được Gateway bảo vệ bằng JWT và permission order.create.
+// Public Order API được Gateway bảo vệ bằng JWT và permission tương ứng.
 @ApiTags("orders")
 @ApiBearerAuth()
 @Controller({ path: "orders", version: "1" })
 export class OrderController {
-  constructor(private readonly orderCommandService: OrderCommandService) {}
+  constructor(private readonly orderCommandService: OrderCommandService, private readonly orderReturnService: OrderReturnService) {}
 
-  // Tạo COD order từ active cart hiện tại, hỗ trợ retry an toàn qua Idempotency-Key.
+  // Tính phí trước checkout từ cart/address server-side, không nhận item hoặc coupon từ browser.
+  @Post("quote")
+  quote(@Headers("x-user-id") ownerId: string, @Body() dto: CreateOrderQuoteDto) {
+    return this.orderCommandService.quoteOrder(ownerId, dto.shippingAddressId, dto.paymentMethod);
+  }
+
+  // Tạo order COD idempotent từ cart đang hoạt động.
   @Post()
   @ApiOperation({ summary: "Create a COD order from the active cart" })
   @ApiResponse({ status: 201, description: "COD order created", type: Object })
-  @ApiResponse({ status: 409, description: "Stock or idempotency conflict" })
-  async createCodOrder(
-    @Headers("x-user-id") ownerId: string,
-    @Headers("x-user-email") ownerEmail: string | undefined,
-    @Headers("idempotency-key") idempotencyKey: string,
-    @Body() dto: CreateCodOrderDto,
-  ): Promise<OrderResponse> {
-    return this.orderCommandService.createCodOrder(
-      ownerId,
-      dto,
-      idempotencyKey,
-      ownerEmail,
-    );
+  createCodOrder(@Headers("x-user-id") ownerId: string, @Headers("x-user-email") ownerEmail: string | undefined, @Headers("idempotency-key") idempotencyKey: string, @Body() dto: CreateCodOrderDto): Promise<OrderResponse> {
+    return this.orderCommandService.createCodOrder(ownerId, dto, idempotencyKey, ownerEmail);
   }
 
-  // Trả lịch sử order của chính user từ x-user-id do Gateway inject.
+  // Customer gửi yêu cầu return cho item của chính order, service kiểm tra thời hạn và ownership.
+  @Post(":orderId/returns")
+  createReturn(@Headers("x-user-id") ownerId: string, @Param("orderId", new ParseUUIDPipe()) orderId: string, @Body() dto: CreateOrderReturnDto) {
+    return this.orderReturnService.create(ownerId, orderId, dto);
+  }
+
+  // Customer xem lịch sử return request thuộc order của mình.
+  @Get(":orderId/returns")
+  listReturns(@Headers("x-user-id") ownerId: string, @Param("orderId", new ParseUUIDPipe()) orderId: string) {
+    return this.orderReturnService.list(ownerId, orderId);
+  }
+
+  // Trả lịch sử order thuộc owner hiện tại theo stage/status và pagination.
   @Get()
   @ApiOperation({ summary: "List owned orders" })
-  @ApiResponse({
-    status: 200,
-    description: "Paginated order summaries",
-    type: Object,
-  })
-  listOwnedOrders(
-    @Headers("x-user-id") ownerId: string,
-    @Query() query: OrderListQueryDto,
-  ): Promise<OrderListResponse> {
+  listOwnedOrders(@Headers("x-user-id") ownerId: string, @Query() query: OrderListQueryDto): Promise<OrderListResponse> {
     return this.orderCommandService.listOwnedOrders(ownerId, query);
   }
 
-  // Trả chi tiết order sau khi redirect từ checkout, có ownership filter ở repository.
+  // Trả detail chỉ khi order thuộc owner hiện tại.
   @Get(":orderId")
   @ApiOperation({ summary: "Get an owned order" })
-  @ApiResponse({ status: 200, description: "Order detail", type: Object })
-  @ApiResponse({ status: 404, description: "Order not found" })
-  getOwnedOrder(
-    @Headers("x-user-id") ownerId: string,
-    @Param("orderId", new ParseUUIDPipe()) orderId: string,
-  ): Promise<OrderResponse> {
+  getOwnedOrder(@Headers("x-user-id") ownerId: string, @Param("orderId", new ParseUUIDPipe()) orderId: string): Promise<OrderResponse> {
     return this.orderCommandService.getOwnedOrder(ownerId, orderId);
   }
 
-  // Hủy order COD đã xác nhận; service sẽ release tồn kho trước khi đổi trạng thái.
+  // Hủy order COD trước khi shipment được lấy hàng và release reservation.
   @Post(":orderId/cancel")
-  @ApiOperation({ summary: "Cancel an owned COD order" })
-  @ApiResponse({ status: 200, description: "Order cancelled", type: Object })
-  @ApiResponse({ status: 409, description: "Order cannot be cancelled" })
-  @ApiResponse({ status: 503, description: "Inventory service unavailable" })
-  cancelOwnedOrder(
-    @Headers("x-user-id") ownerId: string,
-    @Headers("x-user-email") ownerEmail: string | undefined,
-    @Param("orderId", new ParseUUIDPipe()) orderId: string,
-    @Body() dto: CancelOrderDto,
-  ): Promise<OrderResponse> {
-    return this.orderCommandService.cancelOwnedOrder(
-      ownerId,
-      orderId,
-      dto,
-      ownerEmail,
-    );
+  cancelOwnedOrder(@Headers("x-user-id") ownerId: string, @Headers("x-user-email") ownerEmail: string | undefined, @Param("orderId", new ParseUUIDPipe()) orderId: string, @Body() dto: CancelOrderDto): Promise<OrderResponse> {
+    return this.orderCommandService.cancelOwnedOrder(ownerId, orderId, dto, ownerEmail);
   }
 }
