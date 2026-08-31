@@ -1,6 +1,7 @@
 import { Type } from "class-transformer";
 import { IsEnum, IsInt, IsOptional, Max, Min } from "class-validator";
-import { OrderStatus } from "../enums/order-status.enum";
+import { OrderStatus } from "../../../database/enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
 
 // Query danh sách order có giới hạn để bảo vệ database khỏi page size quá lớn.
 export class OrderListQueryDto {
@@ -20,4 +21,8 @@ export class OrderListQueryDto {
   @IsOptional()
   @IsEnum(OrderStatus)
   status?: OrderStatus;
+
+  @IsOptional()
+  @IsEnum(OrderFulfillmentStatus)
+  stage?: OrderFulfillmentStatus;
 }

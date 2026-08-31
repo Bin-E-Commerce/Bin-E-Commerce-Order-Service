@@ -1,19 +1,24 @@
 // File này định nghĩa response public của order, tách khỏi TypeORM entity và dữ liệu kỹ thuật nội bộ.
 
-import { OrderStatus } from "../enums/order-status.enum";
-import { PaymentMethod } from "../enums/payment-method.enum";
+import { OrderStatus } from "../../../database/enums/order-status.enum";
+import { PaymentMethod } from "../../../database/enums/payment-method.enum";
+import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../../../database/enums/payment-status.enum";
 
 // Contract trả về sau khi tạo hoặc đọc một order thuộc user hiện tại.
 export interface OrderResponse {
   id: string;
   orderNumber: string;
   status: OrderStatus;
+  fulfillmentStatus?: OrderFulfillmentStatus;
+  paymentStatus?: PaymentStatus;
   paymentMethod: PaymentMethod;
   subtotal: string;
   shippingFee: string;
   totalAmount: string;
+  shippingFeeBreakdown: Array<Record<string, unknown>>;
   note: string | null;
-  shippingAddress: Record<string, string>;
+  shippingAddress: Record<string, unknown>;
   items: OrderItemResponse[];
   cancelReason: string | null;
   cancelledAt: string | null;
@@ -27,6 +32,8 @@ export interface OrderListItemResponse {
   id: string;
   orderNumber: string;
   status: OrderStatus;
+  fulfillmentStatus?: OrderFulfillmentStatus;
+  paymentStatus?: PaymentStatus;
   paymentMethod: PaymentMethod;
   totalAmount: string;
   itemCount: number;
@@ -36,8 +43,8 @@ export interface OrderListItemResponse {
 
 // Preview nhỏ của snapshot sản phẩm để card lịch sử có ảnh và tên mà không gọi detail từng order.
 export interface OrderListPreviewItemResponse {
-  productId: string;
-  variantId: string;
+  productId?: string;
+  variantId?: string;
   productName: string;
   variantName: string;
   imageUrl: string | null;
@@ -58,8 +65,12 @@ export interface SellerOrderListItemResponse {
   id: string;
   orderNumber: string;
   status: OrderStatus;
+  fulfillmentStatus?: OrderFulfillmentStatus;
+  paymentStatus?: PaymentStatus;
   paymentMethod: PaymentMethod;
   shopItemTotal: string;
+  shippingFee: string;
+  shippingFeeBreakdown: Array<Record<string, unknown>>;
   itemCount: number;
   previewItems: SellerOrderPreviewItemResponse[];
   createdAt: string;
@@ -89,9 +100,13 @@ export interface SellerOrderResponse {
   id: string;
   orderNumber: string;
   status: OrderStatus;
+  fulfillmentStatus: OrderFulfillmentStatus;
+  paymentStatus: PaymentStatus;
   paymentMethod: PaymentMethod;
   shopItemTotal: string;
-  shippingAddress: Record<string, string>;
+  shippingFee: string;
+  shippingFeeBreakdown: Array<Record<string, unknown>>;
+  shippingAddress: Record<string, unknown>;
   items: SellerOrderItemResponse[];
   cancelReason: string | null;
   cancelledAt: string | null;

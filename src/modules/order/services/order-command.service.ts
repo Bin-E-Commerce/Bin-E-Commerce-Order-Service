@@ -7,6 +7,7 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
 import { DataSource, QueryFailedError } from "typeorm";
 import { Order } from "../../../database/entities/order.entity";
@@ -17,13 +18,20 @@ import { AuthClient } from "../clients/auth.client";
 import { ProductClient } from "../clients/product.client";
 import { SellerShopClient } from "../clients/seller-shop.client";
 import {
+  ShippingClient,
+  type GhnAddressSelectionInput,
+  type ShippingQuote,
+} from "../clients/shipping.client";
+import {
   EmptyCartError,
   IdempotencyConflictError,
   OrderCancellationConflictError,
 } from "../errors/order.errors";
 import { OrderRepository } from "../repositories/order.repository";
-import { OrderStatus } from "../enums/order-status.enum";
-import { PaymentMethod } from "../enums/payment-method.enum";
+import { OrderStatus } from "../../../database/enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../../../database/enums/payment-status.enum";
+import { PaymentMethod } from "../../../database/enums/payment-method.enum";
 import type { CreateCodOrderDto } from "../dto/create-cod-order.dto";
 import type {
   OrderListResponse,
@@ -54,6 +62,7 @@ export class OrderCommandService {
     private readonly orderEvents: OrderEventsService,
     private readonly responseMapper: OrderResponseMapper,
     private readonly dataSource: DataSource,
+    @Optional() private readonly shippingClient?: ShippingClient,
   ) {}
 
   // Tạo order COD idempotent; cùng user và cùng key sẽ nhận lại order cũ thay vì reserve stock lần hai.
@@ -95,6 +104,24 @@ export class OrderCommandService {
         quantity: item.quantity,
       })),
     );
+    let shipping: { fee: string; breakdown: Array<Record<string, unknown>> };
+    try {
+      shipping = this.shippingClient
+        ? await this.calculateShipping(reservation.items, address)
+        : { fee: "0.00", breakdown: [] };
+    } catch (error) {
+      // Quote thất bại sau reserve phải release ngay để không làm treo tồn kho của khách.
+      await this.productClient
+        .release(
+          idempotencyKey,
+          reservation.items.map((item) => ({
+            variantId: item.variantId,
+            quantity: item.quantity,
+          })),
+        )
+        .catch(() => undefined);
+      throw error;
+    }
 
     let savedOrder: Order;
     try {
@@ -107,12 +134,15 @@ export class OrderCommandService {
           label: address.label,
           fullName: address.fullName,
           phone: address.phone,
-          province: address.province,
-          district: address.district,
-          ward: address.ward,
+          province: address.ghnProvinceName ?? address.province,
+          district: address.ghnDistrictName ?? address.district,
+          ward: address.ghnWardName ?? address.ward,
           street: address.street,
+          ghnAddress: this.toGhnAddressSelection(address),
         },
         items: reservation.items,
+        shippingFee: shipping.fee,
+        shippingFeeBreakdown: shipping.breakdown,
       });
     } catch (error) {
       if (this.isUniqueViolation(error)) {
@@ -163,6 +193,45 @@ export class OrderCommandService {
     }
   }
 
+  // Quote phí theo từng shop sau khi Product Service đã xác nhận snapshot giá/quantity.
+  async quoteOrder(
+    ownerId: string,
+    shippingAddressId: string,
+    paymentMethod: PaymentMethod,
+  ) {
+    if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
+    if (paymentMethod !== PaymentMethod.COD)
+      throw new BadRequestException("Chỉ hỗ trợ thanh toán COD.");
+    const cart = await this.cartClient.getActiveCart(ownerId);
+    if (cart.items.length === 0) throw new EmptyCartError();
+    const address = await this.authClient.getOwnedAddress(
+      ownerId,
+      shippingAddressId,
+    );
+    if (!this.shippingClient)
+      throw new BadRequestException("Shipping Service chưa sẵn sàng.");
+    const quoteSnapshot = await this.productClient.quote(
+      `quote-${ownerId}-${shippingAddressId}-${Date.now()}`,
+      cart.items.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+      })),
+    );
+    const shipping = await this.calculateShipping(quoteSnapshot.items, address);
+    const items = quoteSnapshot.items;
+    const subtotal = fromCents(
+      items.reduce((sum, item) => sum + toCents(item.lineTotal), 0n),
+    );
+    return {
+      subtotal,
+      shippingFee: shipping.fee,
+      totalAmount: fromCents(toCents(subtotal) + toCents(shipping.fee)),
+      shippingFeeBreakdown: shipping.breakdown,
+      paymentMethod: PaymentMethod.COD,
+    };
+  }
+
   // Đọc order theo owner để trang kết quả không thể xem đơn của tài khoản khác.
   async getOwnedOrder(
     ownerId: string,
@@ -173,6 +242,72 @@ export class OrderCommandService {
     return this.responseMapper.toResponse(order);
   }
 
+  // Trả context tối thiểu cho Shipping Service; sellerUserId chỉ là audit context, shop scope vẫn được query từ Order DB.
+  async getShippingContext(
+    orderId: string,
+    _sellerUserId: string,
+    shopId: string,
+  ): Promise<{
+    orderId: string;
+    orderNumber: string;
+    ownerId: string;
+    orderStatus: OrderStatus;
+    shopId: string;
+    shippingAddress: Record<string, unknown>;
+    items: Array<{
+      productId: string;
+      productName: string;
+      imageUrl: string | null;
+      quantity: number;
+      lineTotal: string;
+    }>;
+  }> {
+    if (!shopId?.trim()) throw new BadRequestException("Thiếu shop context.");
+    const order = await this.orderRepository.findSellerById(shopId, orderId);
+    if (!order)
+      throw new NotFoundException(
+        "Không tìm thấy đơn hàng trong phạm vi shop.",
+      );
+    return {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      ownerId: order.ownerId,
+      orderStatus: order.status,
+      shopId,
+      shippingAddress: {
+        contactName: order.shippingAddress.fullName ?? "",
+        phone: order.shippingAddress.phone ?? "",
+        addressLine: order.shippingAddress.street ?? "",
+        province: order.shippingAddress.province ?? "",
+        district: order.shippingAddress.district ?? "",
+        ward: order.shippingAddress.ward ?? "",
+        ...(order.shippingAddress.ghnAddress
+          ? { ghnAddress: order.shippingAddress.ghnAddress }
+          : {}),
+      },
+      items: (order.items ?? []).map((item) => ({
+        productId: item.productId,
+        sku: item.sku,
+        productName: item.productName,
+        imageUrl: item.imageUrl,
+        unitPrice: item.unitPrice,
+        quantity: item.quantity,
+        lineTotal: item.lineTotal,
+        packageWeightGrams: item.packageWeightGrams,
+        packageLengthCm: Number(item.packageLengthCm),
+        packageWidthCm: Number(item.packageWidthCm),
+        packageHeightCm: Number(item.packageHeightCm),
+      })),
+    };
+  }
+
+  // Xác nhận owner ở lớp repository để Shipping Service không thể tự cấp quyền tracking bằng dữ liệu client.
+  async assertOwnedOrder(ownerId: string, orderId: string): Promise<void> {
+    if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
+    const order = await this.orderRepository.findOwnedById(ownerId, orderId);
+    if (!order) throw new NotFoundException("Không tìm thấy đơn hàng.");
+  }
+
   // Trả danh sách order theo owner, filter trạng thái và phân trang server-side.
   async listOwnedOrders(
     ownerId: string,
@@ -181,24 +316,36 @@ export class OrderCommandService {
     if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 10;
-    const [orders, total] = await this.orderRepository.findOwnedPage(
-      ownerId,
-      page,
-      pageSize,
-      query.status,
-    );
+    const [orders, total] = query.stage
+      ? await this.orderRepository.findOwnedPage(
+          ownerId,
+          page,
+          pageSize,
+          query.status,
+          query.stage,
+        )
+      : await this.orderRepository.findOwnedPage(
+          ownerId,
+          page,
+          pageSize,
+          query.status,
+        );
     return {
       items: orders.map((order) => ({
         id: order.id,
         orderNumber: order.orderNumber,
         status: order.status,
+        ...(order.fulfillmentStatus
+          ? { fulfillmentStatus: order.fulfillmentStatus }
+          : {}),
+        ...(order.paymentStatus ? { paymentStatus: order.paymentStatus } : {}),
         paymentMethod: order.paymentMethod,
         totalAmount: order.totalAmount,
         itemCount:
           order.items?.reduce((count, item) => count + item.quantity, 0) ?? 0,
         previewItems: (order.items ?? []).slice(0, 2).map((item) => ({
-          productId: item.productId,
-          variantId: item.variantId,
+          ...(item.productId ? { productId: item.productId } : {}),
+          ...(item.variantId ? { variantId: item.variantId } : {}),
           productName: item.productName,
           variantName: item.variantName,
           imageUrl: item.imageUrl,
@@ -231,9 +378,7 @@ export class OrderCommandService {
     );
 
     return {
-      items: orders.map((order) =>
-        this.responseMapper.toSellerListItem(order),
-      ),
+      items: orders.map((order) => this.responseMapper.toSellerListItem(order)),
       total,
       page,
       pageSize,
@@ -290,6 +435,7 @@ export class OrderCommandService {
         throw new OrderCancellationConflictError(lockedOrder.status);
       }
       lockedOrder.status = OrderStatus.CANCELLED;
+      lockedOrder.fulfillmentStatus = OrderFulfillmentStatus.CANCELLED;
       lockedOrder.cancelReason = dto.reason?.trim() || null;
       lockedOrder.cancelledAt = new Date();
       await manager.getRepository(Order).save(lockedOrder);
@@ -329,8 +475,10 @@ export class OrderCommandService {
     dto: CreateCodOrderDto;
     idempotencyKey: string;
     fingerprint: string;
-    address: Record<string, string>;
+    address: Record<string, unknown>;
     items: CheckoutQuoteItem[];
+    shippingFee: string;
+    shippingFeeBreakdown: Array<Record<string, unknown>>;
   }): Promise<Order> {
     return this.dataSource.transaction(async (manager) => {
       const repository = manager.getRepository(Order);
@@ -344,12 +492,15 @@ export class OrderCommandService {
         orderNumber: this.generateOrderNumber(),
         ownerId: input.ownerId,
         status: OrderStatus.CONFIRMED,
+        fulfillmentStatus: OrderFulfillmentStatus.TO_SHIP,
+        paymentStatus: PaymentStatus.COD_PENDING_COLLECTION,
         paymentMethod: PaymentMethod.COD,
         shippingAddressId: input.dto.shippingAddressId,
         shippingAddress: input.address,
         subtotal,
-        shippingFee: "0.00",
-        totalAmount: subtotal,
+        shippingFee: input.shippingFee,
+        shippingFeeBreakdown: input.shippingFeeBreakdown,
+        totalAmount: fromCents(toCents(subtotal) + toCents(input.shippingFee)),
         note: input.dto.note?.trim() || null,
         cancelReason: null,
         cancelledAt: null,
@@ -373,6 +524,10 @@ export class OrderCommandService {
           unitPrice: item.unitPrice,
           quantity: item.quantity,
           lineTotal: fromCents(toCents(item.unitPrice) * BigInt(item.quantity)),
+          packageWeightGrams: item.packageWeightGrams,
+          packageLengthCm: String(item.packageLengthCm),
+          packageWidthCm: String(item.packageWidthCm),
+          packageHeightCm: String(item.packageHeightCm),
         }),
       );
       await itemRepository.save(orderItems);
@@ -390,6 +545,134 @@ export class OrderCommandService {
       savedOrder.items = orderItems;
       return savedOrder;
     });
+  }
+
+  // Group item theo seller shop và cộng quote riêng để không làm lộ hoặc cộng nhầm doanh thu shop khác.
+  private async calculateShipping(
+    items: CheckoutQuoteItem[],
+    address: {
+      fullName: string;
+      phone: string;
+      street: string;
+      district: string;
+      ward: string;
+      province: string;
+      ghnProvinceName: string | null;
+      ghnProvinceId: number | null;
+      ghnDistrictId: number | null;
+      ghnWardCode: string | null;
+      ghnDistrictName: string | null;
+      ghnWardName: string | null;
+    },
+  ) {
+    const groups = new Map<string, CheckoutQuoteItem[]>();
+    for (const item of items) {
+      if (!item.sellerShopId)
+        throw new BadRequestException(
+          "Sản phẩm chưa có shop giao hàng hợp lệ.",
+        );
+      groups.set(item.sellerShopId, [
+        ...(groups.get(item.sellerShopId) ?? []),
+        item,
+      ]);
+    }
+    const quotes = await Promise.all(
+      [...groups.entries()].map(async ([shopId, shopItems]) => {
+        const weight = shopItems.reduce(
+          (sum, item) => sum + item.packageWeightGrams * item.quantity,
+          0,
+        );
+        if (
+          !shopItems.every(
+            (item) =>
+              item.packageWeightGrams > 0 &&
+              item.packageLengthCm > 0 &&
+              item.packageWidthCm > 0 &&
+              item.packageHeightCm > 0,
+          )
+        ) {
+          throw new BadRequestException(
+            "Sản phẩm chưa đủ thông tin đóng gói để tính phí giao hàng.",
+          );
+        }
+        const length = Math.max(
+          ...shopItems.map((item) => item.packageLengthCm),
+        );
+        const width = Math.max(...shopItems.map((item) => item.packageWidthCm));
+        const height = shopItems.reduce(
+          (sum, item) => sum + item.packageHeightCm * item.quantity,
+          0,
+        );
+        const value = Number(
+          fromCents(
+            shopItems.reduce((sum, item) => sum + toCents(item.lineTotal), 0n),
+          ),
+        );
+        return this.shippingClient!.calculateQuote({
+          shopId,
+          to: {
+            contactName: address.fullName,
+            phone: address.phone,
+            addressLine: address.street,
+            province: address.ghnProvinceName ?? address.province,
+            district: address.ghnDistrictName ?? address.district,
+            ward: address.ghnWardName ?? address.ward,
+            ghnAddress: this.toGhnAddressSelection(address),
+          },
+          weightGrams: weight,
+          lengthCm: length,
+          widthCm: width,
+          heightCm: height,
+          value,
+          codAmount: value,
+        });
+      }),
+    );
+    const fee = fromCents(
+      quotes.reduce((sum, quote) => sum + toCents(quote.fee), 0n),
+    );
+    return {
+      fee,
+      breakdown: quotes.map((quote) => ({
+        ...quote,
+        estimatedDeliveryAt: quote.estimatedDeliveryAt,
+      })),
+    };
+  }
+
+  // Tạo selection GHN trực tiếp từ địa chỉ Auth đã lưu để checkout không gửi mã địa lý tùy ý từ browser.
+  private toGhnAddressSelection(address: {
+    ghnProvinceId: number | null;
+    ghnProvinceName: string | null;
+    ghnDistrictId: number | null;
+    ghnWardCode: string | null;
+    ghnDistrictName: string | null;
+    ghnWardName: string | null;
+  }): GhnAddressSelectionInput {
+    if (
+      !address.ghnProvinceId ||
+      !address.ghnProvinceName ||
+      !address.ghnDistrictId ||
+      !address.ghnDistrictName ||
+      !address.ghnWardCode ||
+      !address.ghnWardName
+    ) {
+      throw new BadRequestException(
+        "Địa chỉ giao hàng chưa có đủ mã GHN. Vui lòng cập nhật lại địa chỉ.",
+      );
+    }
+    return {
+      provinceId: address.ghnProvinceId,
+      districtId: address.ghnDistrictId,
+      wardCode: address.ghnWardCode,
+      districtName: address.ghnDistrictName,
+      wardName: address.ghnWardName,
+    };
+  }
+
+  // Nhân tiền snapshot bằng số nguyên cent để không sai số float.
+  private multiplyMoney(value: string, quantity: number): string {
+    return fromCents(toCents(value) * BigInt(quantity));
   }
 
   // Fingerprint giúp cùng idempotency key không bị tái sử dụng cho địa chỉ hoặc phương thức khác.

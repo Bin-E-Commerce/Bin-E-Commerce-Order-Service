@@ -11,8 +11,10 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from "typeorm";
-import { OrderStatus } from "../../modules/order/enums/order-status.enum";
-import { PaymentMethod } from "../../modules/order/enums/payment-method.enum";
+import { OrderStatus } from "../enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../enums/payment-status.enum";
+import { PaymentMethod } from "../enums/payment-method.enum";
 import { OrderItem } from "./order-item.entity";
 import { OrderStatusHistory } from "./order-status-history.entity";
 
@@ -40,6 +42,26 @@ export class Order {
   })
   status!: OrderStatus;
 
+  // Trạng thái fulfillment mới dùng cho UI Customer/Seller; status cũ được giữ để tương thích dữ liệu Phase 1-3.
+  @Column({
+    name: "fulfillment_status",
+    type: "enum",
+    enum: OrderFulfillmentStatus,
+    enumName: "order_fulfillment_status_enum",
+    default: OrderFulfillmentStatus.TO_SHIP,
+  })
+  fulfillmentStatus!: OrderFulfillmentStatus;
+
+  // COD chỉ được xem là PAID sau khi mô phỏng giao thành công và thu tiền.
+  @Column({
+    name: "payment_status",
+    type: "enum",
+    enum: PaymentStatus,
+    enumName: "payment_status_enum",
+    default: PaymentStatus.COD_PENDING_COLLECTION,
+  })
+  paymentStatus!: PaymentStatus;
+
   @Column({
     name: "payment_method",
     type: "enum",
@@ -52,7 +74,7 @@ export class Order {
   shippingAddressId!: string;
 
   @Column({ name: "shipping_address", type: "jsonb" })
-  shippingAddress!: Record<string, string>;
+  shippingAddress!: Record<string, unknown>;
 
   @Column({ type: "numeric", precision: 14, scale: 2 })
   subtotal!: string;
@@ -65,6 +87,20 @@ export class Order {
     default: 0,
   })
   shippingFee!: string;
+
+  // Lưu breakdown quote tại thời điểm đặt để phí lịch sử không đổi theo provider hiện tại.
+  @Column({
+    name: "shipping_fee_breakdown",
+    type: "jsonb",
+    default: () => "'[]'::jsonb",
+  })
+  shippingFeeBreakdown!: Array<Record<string, unknown>>;
+
+  @Column({ name: "completed_at", type: "timestamptz", nullable: true })
+  completedAt!: Date | null;
+
+  @Column({ name: "return_window_until", type: "timestamptz", nullable: true })
+  returnWindowUntil!: Date | null;
 
   @Column({ name: "total_amount", type: "numeric", precision: 14, scale: 2 })
   totalAmount!: string;
