@@ -4,21 +4,21 @@
 import { Test, type TestingModule } from "@nestjs/testing";
 import { createMock, type DeepMocked } from "@golevelup/ts-jest";
 import { DataSource } from "typeorm";
-import { Order } from "../../../database/entities/order.entity";
-import { OrderItem } from "../../../database/entities/order-item.entity";
-import { OrderStatusHistory } from "../../../database/entities/order-status-history.entity";
-import { AuthClient } from "../clients/auth.client";
-import { CartClient } from "../clients/cart.client";
-import { ProductClient } from "../clients/product.client";
-import { SellerShopClient } from "../clients/seller-shop.client";
-import { CreateCodOrderDto } from "../dto/create-cod-order.dto";
+import { Order } from "../../../../database/order/entities/order.entity";
+import { OrderItem } from "../../../../database/order/entities/order-item.entity";
+import { OrderStatusHistory } from "../../../../database/order/entities/order-status-history.entity";
+import { AuthClient } from "../../clients/auth.client";
+import { CartClient } from "../../clients/cart.client";
+import { ProductClient } from "../../clients/product.client";
+import { SellerShopClient } from "../../clients/seller-shop.client";
+import { CreateCodOrderDto } from "../../dto/create-cod-order.dto";
 import {
   EmptyCartError,
   IdempotencyConflictError,
-} from "../errors/order.errors";
-import { PaymentMethod } from "../../../database/enums/payment-method.enum";
-import { OrderStatus } from "../../../database/enums/order-status.enum";
-import { OrderRepository } from "../repositories/order.repository";
+} from "../../errors/order.errors";
+import { PaymentMethod } from "../../../../database/order/enums/payment-method.enum";
+import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
+import { OrderRepository } from "../../repositories/order.repository";
 import { OrderResponseMapper } from "./order-response-mapper.service";
 import { OrderCommandService } from "./order-command.service";
 import { SellerOrderAccessService } from "./seller-order-access.service";

@@ -7,16 +7,16 @@ import {
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
-import { OrderReturnRequest } from "../../../database/entities/order-return-request.entity";
-import { OrderReturnStatus } from "../../../database/enums/order-return-status.enum";
-import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
-import { OrderRepository } from "../repositories/order.repository";
-import { SellerShopClient } from "../clients/seller-shop.client";
+import { OrderReturnRequest } from "../../../../database/returns/entities/order-return-request.entity";
+import { OrderReturnStatus } from "../../../../database/returns/enums/order-return-status.enum";
+import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
+import { OrderRepository } from "../../repositories/order.repository";
+import { SellerShopClient } from "../../clients/seller-shop.client";
 import type {
   CreateOrderReturnDto,
   ReviewOrderReturnDto,
-} from "../dto/order-return.dto";
-import type { SellerOrderUserContext } from "../types/seller-order-user-context.type";
+} from "../../dto/order-return.dto";
+import type { SellerOrderUserContext } from "../../types/seller-order-user-context.type";
 
 // Orchestrate return request với ownership đã xác minh tại Order Repository/Seller Service.
 @Injectable()

@@ -3,10 +3,10 @@
 import { Injectable } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { FindOptionsWhere, Repository } from "typeorm";
-import { Order } from "../../../database/entities/order.entity";
-import { OrderItem } from "../../../database/entities/order-item.entity";
-import { OrderStatus } from "../../../database/enums/order-status.enum";
-import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
+import { Order } from "../../../database/order/entities/order.entity";
+import { OrderItem } from "../../../database/order/entities/order-item.entity";
+import { OrderStatus } from "../../../database/order/enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../../../database/order/enums/order-fulfillment-status.enum";
 import type { SellerOrderListQueryDto } from "../dto/seller-order-list-query.dto";
 import type { CustomerOrderTabCounts } from "../types/order-response.type";
 

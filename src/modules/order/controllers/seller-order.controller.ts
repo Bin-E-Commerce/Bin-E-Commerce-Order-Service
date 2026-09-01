@@ -22,11 +22,11 @@ import type {
   SellerOrderListResponse,
   SellerOrderResponse,
 } from "../types/order-response.type";
-import { OrderCommandService } from "../services/order-command.service";
-import { SellerOrderAccessService } from "../services/seller-order-access.service";
-import { OrderReturnService } from "../services/order-return.service";
+import { OrderCommandService } from "../services/order/order-command.service";
+import { SellerOrderAccessService } from "../services/order/seller-order-access.service";
+import { OrderReturnService } from "../services/returns/order-return.service";
 import { ReviewOrderReturnDto } from "../dto/order-return.dto";
-import { OrderReturnStatus } from "../../../database/enums/order-return-status.enum";
+import { OrderReturnStatus } from "../../../database/returns/enums/order-return-status.enum";
 
 @ApiTags("seller-orders")
 @ApiBearerAuth()
