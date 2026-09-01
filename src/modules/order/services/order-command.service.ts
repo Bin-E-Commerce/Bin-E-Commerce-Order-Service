@@ -11,6 +11,7 @@ import {
 } from "@nestjs/common";
 import { DataSource, QueryFailedError } from "typeorm";
 import { Order } from "../../../database/entities/order.entity";
+import { OrderDeliveryIssue } from "../../../database/entities/order-delivery-issue.entity";
 import { OrderItem } from "../../../database/entities/order-item.entity";
 import { OrderStatusHistory } from "../../../database/entities/order-status-history.entity";
 import { CartClient } from "../clients/cart.client";
@@ -32,6 +33,7 @@ import { OrderStatus } from "../../../database/enums/order-status.enum";
 import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
 import { PaymentStatus } from "../../../database/enums/payment-status.enum";
 import { PaymentMethod } from "../../../database/enums/payment-method.enum";
+import { OrderDeliveryIssueStatus } from "../../../database/enums/order-delivery-issue-status.enum";
 import type { CreateCodOrderDto } from "../dto/create-cod-order.dto";
 import type {
   OrderListResponse,
@@ -48,6 +50,8 @@ import { fromCents, toCents } from "../utils/order-money.util";
 import { OrderResponseMapper } from "./order-response-mapper.service";
 import { SellerOrderAccessService } from "./seller-order-access.service";
 import { OrderEventsService } from "./order-events.service";
+
+const REVIEW_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 // Điều phối transaction boundary và giữ mọi kiểm tra ownership ở server-side.
 @Injectable()
@@ -308,6 +312,82 @@ export class OrderCommandService {
     if (!order) throw new NotFoundException("Không tìm thấy đơn hàng.");
   }
 
+  // Trả purchase proof tối thiểu cho Product Service; service gọi qua internal token và không được nhận ownerId từ browser.
+  async getReviewContext(orderItemId: string): Promise<{
+    orderId: string;
+    orderItemId: string;
+    ownerId: string;
+    productId: string;
+    variantId: string;
+    sellerOwnerId: string | null;
+    productName: string;
+    fulfillmentStatus: OrderFulfillmentStatus;
+    deliveredAt: string | null;
+    reviewDeadline: string | null;
+    deliveryConfirmationStatus: string;
+    hasOpenDeliveryIssue: boolean;
+  }> {
+    const order = await this.orderRepository.findReviewContextByItemId(orderItemId);
+    if (!order?.items?.[0]) throw new NotFoundException("Không tìm thấy sản phẩm trong đơn hàng.");
+    const item = order.items[0];
+    const deliveredAt = order.deliveredAt ?? order.completedAt;
+    const openIssue = await this.dataSource.getRepository(OrderDeliveryIssue).exist({
+      where: { orderId: order.id, status: OrderDeliveryIssueStatus.OPEN },
+    });
+    return {
+      orderId: order.id,
+      orderItemId: item.id,
+      ownerId: order.ownerId,
+      productId: item.productId,
+      variantId: item.variantId,
+      sellerOwnerId: item.sellerOwnerId,
+      productName: item.productName,
+      fulfillmentStatus: order.fulfillmentStatus,
+      deliveredAt: deliveredAt?.toISOString() ?? null,
+      reviewDeadline: this.getReviewDeadline(deliveredAt),
+      deliveryConfirmationStatus: order.deliveryConfirmationStatus,
+      hasOpenDeliveryIssue: openIssue,
+    };
+  }
+
+  // Trả toàn bộ item của order cho Product Service dựng danh sách “đã đánh giá/chưa đánh giá” mà vẫn giữ ownership ở Order Service.
+  async getOrderReviewContexts(ownerId: string, orderId: string) {
+    const order = await this.orderRepository.findOwnedById(ownerId, orderId);
+    if (!order) throw new NotFoundException("Không tìm thấy đơn hàng.");
+    const hasOpenDeliveryIssue = await this.dataSource.getRepository(OrderDeliveryIssue).exist({
+      where: { orderId, status: OrderDeliveryIssueStatus.OPEN },
+    });
+    const deliveredAt = order.deliveredAt ?? order.completedAt;
+    return {
+      orderId: order.id,
+      ownerId: order.ownerId,
+      fulfillmentStatus: order.fulfillmentStatus,
+      deliveredAt: deliveredAt?.toISOString() ?? null,
+      reviewDeadline: this.getReviewDeadline(deliveredAt),
+      deliveryConfirmationStatus: order.deliveryConfirmationStatus,
+      hasOpenDeliveryIssue,
+      items: (order.items ?? []).map((item) => ({
+        orderItemId: item.id,
+        productId: item.productId,
+        variantId: item.variantId,
+        productName: item.productName,
+        variantName: item.variantName,
+        imageUrl: item.imageUrl,
+      })),
+    };
+  }
+
+  // Cung cấp số lượng đã bán theo product cho Product Service mà không cho phép truy cập chéo database.
+  getSoldQuantities(sellerOwnerId: string, productIds: string[]) {
+    return this.orderRepository.findSoldQuantities(sellerOwnerId, productIds);
+  }
+
+  // Tách hạn đánh giá 30 ngày khỏi deadline xác nhận giao hàng 3 ngày để trải nghiệm không bị hết quyền đánh giá quá sớm.
+  private getReviewDeadline(deliveredAt: Date | null): string | null {
+    if (!deliveredAt) return null;
+    return new Date(deliveredAt.getTime() + REVIEW_WINDOW_MS).toISOString();
+  }
+
   // Trả danh sách order theo owner, filter trạng thái và phân trang server-side.
   async listOwnedOrders(
     ownerId: string,
@@ -316,20 +396,18 @@ export class OrderCommandService {
     if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 10;
-    const [orders, total] = query.stage
-      ? await this.orderRepository.findOwnedPage(
-          ownerId,
-          page,
-          pageSize,
-          query.status,
-          query.stage,
-        )
-      : await this.orderRepository.findOwnedPage(
-          ownerId,
-          page,
-          pageSize,
-          query.status,
-        );
+    // Trang hiện tại và badge độc lập nhau: page dùng filter đang chọn, còn counts luôn thống kê toàn bộ owner.
+    const [pageResult, counts] = await Promise.all([
+      this.orderRepository.findOwnedPage(
+        ownerId,
+        page,
+        pageSize,
+        query.status,
+        query.stage,
+      ),
+      this.orderRepository.countOwnedTabs(ownerId),
+    ]);
+    const [orders, total] = pageResult;
     return {
       items: orders.map((order) => ({
         id: order.id,
@@ -357,6 +435,7 @@ export class OrderCommandService {
       page,
       pageSize,
       totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
+      counts,
     };
   }
 

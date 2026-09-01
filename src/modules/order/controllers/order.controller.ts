@@ -8,6 +8,8 @@ import { CreateOrderReturnDto } from "../dto/order-return.dto";
 import { OrderListQueryDto } from "../dto/order-list-query.dto";
 import { OrderCommandService } from "../services/order-command.service";
 import { OrderReturnService } from "../services/order-return.service";
+import { OrderDeliveryConfirmationService } from "../services/order-delivery-confirmation.service";
+import { DeliveryConfirmationDto } from "../dto/delivery-confirmation.dto";
 import type { OrderListResponse, OrderResponse } from "../types/order-response.type";
 
 // Public Order API được Gateway bảo vệ bằng JWT và permission tương ứng.
@@ -15,7 +17,21 @@ import type { OrderListResponse, OrderResponse } from "../types/order-response.t
 @ApiBearerAuth()
 @Controller({ path: "orders", version: "1" })
 export class OrderController {
-  constructor(private readonly orderCommandService: OrderCommandService, private readonly orderReturnService: OrderReturnService) {}
+  constructor(
+    private readonly orderCommandService: OrderCommandService,
+    private readonly orderReturnService: OrderReturnService,
+    private readonly deliveryConfirmationService: OrderDeliveryConfirmationService,
+  ) {}
+
+  // Customer xác nhận đã nhận hàng hoặc báo vấn đề; Order Service giữ ownership và trạng thái trong một transaction duy nhất.
+  @Post(":orderId/delivery-confirmation")
+  confirmDelivery(
+    @Headers("x-user-id") ownerId: string,
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+    @Body() dto: DeliveryConfirmationDto,
+  ): Promise<OrderResponse> {
+    return this.deliveryConfirmationService.confirm(ownerId, orderId, dto);
+  }
 
   // Tính phí trước checkout từ cart/address server-side, không nhận item hoặc coupon từ browser.
   @Post("quote")

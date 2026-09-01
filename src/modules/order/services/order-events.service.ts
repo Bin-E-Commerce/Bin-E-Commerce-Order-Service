@@ -35,6 +35,40 @@ type GroupedSellerRecipient = {
 export class OrderEventsService {
   constructor(private readonly kafkaProducer: KafkaProducerService) {}
 
+  // Phát tín hiệu để Notification Service nhắc khách xác nhận sau khi Shipping báo giao thành công.
+  async publishDeliveryAwaitingConfirmation(orderId: string): Promise<void> {
+    await this.publishDeliveryEvent(OrderEvents.DELIVERY_AWAITING_CONFIRMATION, orderId, "PENDING");
+  }
+
+  // Phát tín hiệu audit khi khách chủ động xác nhận đã nhận hàng; review vẫn là thao tác tùy chọn ở Product Service.
+  async publishDeliveryConfirmed(orderId: string): Promise<void> {
+    await this.publishDeliveryEvent(OrderEvents.DELIVERY_CONFIRMED, orderId, "CONFIRMED");
+  }
+
+  // Phát tín hiệu khi khách báo vấn đề để notification/support workflow có thể tiếp nhận mà không đổi review thành khiếu nại.
+  async publishDeliveryIssueReported(orderId: string): Promise<void> {
+    await this.publishDeliveryEvent(OrderEvents.DELIVERY_ISSUE_REPORTED, orderId, "ISSUE_REPORTED");
+  }
+
+  // Phát tín hiệu riêng cho auto-complete để downstream biết order hoàn tất do hết hạn chứ không phải customer click.
+  async publishDeliveryAutoConfirmed(orderId: string): Promise<void> {
+    await this.publishDeliveryEvent(OrderEvents.DELIVERY_AUTO_CONFIRMED, orderId, "AUTO_CONFIRMED");
+  }
+
+  // Chuẩn hóa envelope delivery event và giữ eventId ổn định để consumer downstream chống duplicate.
+  private async publishDeliveryEvent(topic: string, orderId: string, status: string): Promise<void> {
+    const occurredAt = new Date().toISOString();
+    await this.kafkaProducer.publish(topic, {
+      eventId: `${topic}:${orderId}`,
+      eventName: topic,
+      eventVersion: 1,
+      source: "order-service",
+      occurredAt,
+      aggregateId: orderId,
+      data: { orderId, status },
+    }, orderId);
+  }
+
   // Gom item theo chủ shop để một order nhiều shop tạo đúng một notification/email cho từng seller.
   // EventId ổn định theo orderId giúp Notification Service chống duplicate khi Kafka redeliver event.
   async publishCreated(

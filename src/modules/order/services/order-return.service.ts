@@ -32,7 +32,10 @@ export class OrderReturnService {
   async create(ownerId: string, orderId: string, dto: CreateOrderReturnDto) {
     const order = await this.orders.findOwnedById(ownerId, orderId);
     if (!order) throw new NotFoundException("Không tìm thấy đơn hàng.");
-    if (order.fulfillmentStatus !== OrderFulfillmentStatus.COMPLETED)
+    if (
+      order.fulfillmentStatus !== OrderFulfillmentStatus.DELIVERED &&
+      order.fulfillmentStatus !== OrderFulfillmentStatus.COMPLETED
+    )
       throw new ConflictException("Đơn hàng chưa đủ điều kiện trả hàng.");
     if (order.returnWindowUntil && order.returnWindowUntil < new Date())
       throw new ConflictException("Đã hết thời hạn trả hàng.");

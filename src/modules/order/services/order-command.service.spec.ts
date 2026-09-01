@@ -317,6 +317,16 @@ describe("OrderCommandService", () => {
     it("should return paginated summaries for the current owner", async () => {
       // Arrange
       const createdAt = new Date("2026-08-30T08:00:00.000Z");
+      mockOrderRepository.countOwnedTabs.mockResolvedValue({
+        all: 11,
+        pendingPayment: 1,
+        toShip: 2,
+        shipping: 3,
+        delivered: 4,
+        completed: 1,
+        cancelled: 0,
+        returnRefund: 0,
+      });
       mockOrderRepository.findOwnedPage.mockResolvedValue([
         [
           {
@@ -370,11 +380,22 @@ describe("OrderCommandService", () => {
         page: 2,
         pageSize: 10,
         totalPages: 2,
+        counts: {
+          all: 11,
+          pendingPayment: 1,
+          toShip: 2,
+          shipping: 3,
+          delivered: 4,
+          completed: 1,
+          cancelled: 0,
+          returnRefund: 0,
+        },
       });
       expect(mockOrderRepository.findOwnedPage).toHaveBeenCalledWith(
         ownerId,
         2,
         10,
+        undefined,
         undefined,
       );
     });
