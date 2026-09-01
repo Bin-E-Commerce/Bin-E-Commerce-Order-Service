@@ -17,6 +17,8 @@ import { PaymentStatus } from "../enums/payment-status.enum";
 import { PaymentMethod } from "../enums/payment-method.enum";
 import { OrderItem } from "./order-item.entity";
 import { OrderStatusHistory } from "./order-status-history.entity";
+import { OrderDeliveryConfirmationStatus } from "../enums/order-delivery-confirmation-status.enum";
+import { OrderDeliveryConfirmationMethod } from "../enums/order-delivery-confirmation-method.enum";
 
 // Lưu một đơn hàng và khóa idempotency theo từng owner.
 @Entity({ name: "orders" })
@@ -24,6 +26,7 @@ import { OrderStatusHistory } from "./order-status-history.entity";
   unique: true,
 })
 @Index("idx_orders_owner_created_at", ["ownerId", "createdAt"])
+@Index("idx_orders_delivery_confirmation_deadline", ["fulfillmentStatus", "deliveryConfirmationDeadline"])
 export class Order {
   @PrimaryGeneratedColumn("uuid")
   id!: string;
@@ -51,6 +54,21 @@ export class Order {
     default: OrderFulfillmentStatus.TO_SHIP,
   })
   fulfillmentStatus!: OrderFulfillmentStatus;
+
+  @Column({ name: "delivery_confirmation_status", type: "enum", enum: OrderDeliveryConfirmationStatus, enumName: "order_delivery_confirmation_status_enum", default: OrderDeliveryConfirmationStatus.PENDING })
+  deliveryConfirmationStatus!: OrderDeliveryConfirmationStatus;
+
+  @Column({ name: "delivery_confirmation_method", type: "enum", enum: OrderDeliveryConfirmationMethod, enumName: "order_delivery_confirmation_method_enum", nullable: true })
+  deliveryConfirmationMethod!: OrderDeliveryConfirmationMethod | null;
+
+  @Column({ name: "delivered_at", type: "timestamptz", nullable: true })
+  deliveredAt!: Date | null;
+
+  @Column({ name: "delivery_confirmation_deadline", type: "timestamptz", nullable: true })
+  deliveryConfirmationDeadline!: Date | null;
+
+  @Column({ name: "delivery_confirmed_at", type: "timestamptz", nullable: true })
+  deliveryConfirmedAt!: Date | null;
 
   // COD chỉ được xem là PAID sau khi mô phỏng giao thành công và thu tiền.
   @Column({

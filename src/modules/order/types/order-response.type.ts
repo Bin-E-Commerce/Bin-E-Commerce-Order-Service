@@ -4,6 +4,8 @@ import { OrderStatus } from "../../../database/enums/order-status.enum";
 import { PaymentMethod } from "../../../database/enums/payment-method.enum";
 import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
 import { PaymentStatus } from "../../../database/enums/payment-status.enum";
+import { OrderDeliveryConfirmationMethod } from "../../../database/enums/order-delivery-confirmation-method.enum";
+import { OrderDeliveryConfirmationStatus } from "../../../database/enums/order-delivery-confirmation-status.enum";
 
 // Contract trả về sau khi tạo hoặc đọc một order thuộc user hiện tại.
 export interface OrderResponse {
@@ -25,6 +27,15 @@ export interface OrderResponse {
   statusHistory: OrderStatusHistoryResponse[];
   warnings: string[];
   createdAt: string;
+  completedAt: string | null;
+  deliveryConfirmation: OrderDeliveryConfirmationResponse;
+}
+
+export interface OrderDeliveryConfirmationResponse {
+  status: OrderDeliveryConfirmationStatus;
+  method: OrderDeliveryConfirmationMethod | null;
+  deliveredAt: string | null;
+  deadline: string | null;
 }
 
 // Summary nhẹ dùng cho danh sách để không tải snapshot chi tiết không cần thiết.
@@ -58,6 +69,19 @@ export interface OrderListResponse {
   page: number;
   pageSize: number;
   totalPages: number;
+  counts: CustomerOrderTabCounts;
+}
+
+// Số lượng đơn theo từng nhóm nghiệp vụ, được tính trên toàn bộ order của owner để badge không phụ thuộc trang đang mở.
+export interface CustomerOrderTabCounts {
+  all: number;
+  pendingPayment: number;
+  toShip: number;
+  shipping: number;
+  delivered: number;
+  completed: number;
+  cancelled: number;
+  returnRefund: number;
 }
 
 // Summary Seller chỉ chứa item thuộc shop hiện tại và không leak tổng tiền của các shop khác trong cùng order.

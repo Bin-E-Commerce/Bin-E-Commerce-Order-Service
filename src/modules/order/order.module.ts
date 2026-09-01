@@ -20,6 +20,10 @@ import { OrderEventsService } from "./services/order-events.service";
 import { ShippingClient } from "./clients/shipping.client";
 import { OrderReturnRequest } from "../../database/entities/order-return-request.entity";
 import { OrderReturnService } from "./services/order-return.service";
+import { OrderDeliveryIssue } from "../../database/entities/order-delivery-issue.entity";
+import { OrderDeliveryConfirmationService } from "./services/order-delivery-confirmation.service";
+import { OrderDeliveryAutomationService } from "./services/order-delivery-automation.service";
+import { ShipmentStatusConsumer } from "./integrations/shipment-status.consumer";
 
 // Module chỉ expose controller Order; cross-service call được giữ trong client adapter tương ứng.
 @Module({
@@ -29,6 +33,7 @@ import { OrderReturnService } from "./services/order-return.service";
       OrderItem,
       OrderStatusHistory,
       OrderReturnRequest,
+      OrderDeliveryIssue,
     ]),
   ],
   controllers: [
@@ -48,6 +53,9 @@ import { OrderReturnService } from "./services/order-return.service";
     OrderEventsService,
     ShippingClient,
     OrderReturnService,
+    OrderDeliveryConfirmationService,
+    OrderDeliveryAutomationService,
+    ShipmentStatusConsumer,
   ],
 })
 export class OrderModule {}

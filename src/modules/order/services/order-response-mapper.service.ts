@@ -4,6 +4,7 @@ import { Injectable } from "@nestjs/common";
 import { Order } from "../../../database/entities/order.entity";
 import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
 import { PaymentStatus } from "../../../database/enums/payment-status.enum";
+import { OrderDeliveryConfirmationStatus } from "../../../database/enums/order-delivery-confirmation-status.enum";
 import { OrderStatus } from "../../../database/enums/order-status.enum";
 import { fromCents, toCents } from "../utils/order-money.util";
 import type {
@@ -60,6 +61,13 @@ export class OrderResponseMapper {
         })),
       warnings,
       createdAt: order.createdAt.toISOString(),
+      completedAt: order.completedAt?.toISOString() ?? null,
+      deliveryConfirmation: {
+        status: order.deliveryConfirmationStatus ?? OrderDeliveryConfirmationStatus.PENDING,
+        method: order.deliveryConfirmationMethod ?? null,
+        deliveredAt: order.deliveredAt?.toISOString() ?? null,
+        deadline: order.deliveryConfirmationDeadline?.toISOString() ?? null,
+      },
     };
   }
 
