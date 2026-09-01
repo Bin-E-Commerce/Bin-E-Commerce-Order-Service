@@ -1,17 +1,17 @@
 // File này map persistence model thành response order ổn định cho frontend và API consumer.
 
 import { Injectable } from "@nestjs/common";
-import { Order } from "../../../database/entities/order.entity";
-import { OrderFulfillmentStatus } from "../../../database/enums/order-fulfillment-status.enum";
-import { PaymentStatus } from "../../../database/enums/payment-status.enum";
-import { OrderDeliveryConfirmationStatus } from "../../../database/enums/order-delivery-confirmation-status.enum";
-import { OrderStatus } from "../../../database/enums/order-status.enum";
-import { fromCents, toCents } from "../utils/order-money.util";
+import { Order } from "../../../../database/order/entities/order.entity";
+import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../../../../database/order/enums/payment-status.enum";
+import { OrderDeliveryConfirmationStatus } from "../../../../database/delivery/enums/order-delivery-confirmation-status.enum";
+import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
+import { fromCents, toCents } from "../../utils/order-money.util";
 import type {
   OrderResponse,
   SellerOrderListItemResponse,
   SellerOrderResponse,
-} from "../types/order-response.type";
+} from "../../types/order-response.type";
 
 // Không leak idempotency key, fingerprint hay ownerId ra public response.
 @Injectable()

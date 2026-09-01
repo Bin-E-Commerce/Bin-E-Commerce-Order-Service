@@ -11,7 +11,7 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { OrderCommandService } from "../services/order-command.service";
+import { OrderCommandService } from "../services/order/order-command.service";
 
 @Controller({ path: "internal/orders", version: "1" })
 export class InternalOrderController {

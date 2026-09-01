@@ -6,7 +6,7 @@ import {
   Injectable,
   UnauthorizedException,
 } from "@nestjs/common";
-import type { SellerOrderUserContext } from "../types/seller-order-user-context.type";
+import type { SellerOrderUserContext } from "../../types/seller-order-user-context.type";
 
 const SELLER_ORDER_READ_PERMISSION = "seller.order.read";
 

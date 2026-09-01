@@ -17,8 +17,8 @@ import { PaymentStatus } from "../enums/payment-status.enum";
 import { PaymentMethod } from "../enums/payment-method.enum";
 import { OrderItem } from "./order-item.entity";
 import { OrderStatusHistory } from "./order-status-history.entity";
-import { OrderDeliveryConfirmationStatus } from "../enums/order-delivery-confirmation-status.enum";
-import { OrderDeliveryConfirmationMethod } from "../enums/order-delivery-confirmation-method.enum";
+import { OrderDeliveryConfirmationStatus } from "../../delivery/enums/order-delivery-confirmation-status.enum";
+import { OrderDeliveryConfirmationMethod } from "../../delivery/enums/order-delivery-confirmation-method.enum";
 
 // Lưu một đơn hàng và khóa idempotency theo từng owner.
 @Entity({ name: "orders" })
