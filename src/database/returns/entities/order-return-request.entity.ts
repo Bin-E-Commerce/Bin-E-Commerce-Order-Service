@@ -13,6 +13,10 @@ import { OrderReturnReason } from "../enums/order-return-reason.enum";
 // Một request thuộc một customer order và một shop scope.
 @Entity("order_return_requests")
 @Index(["orderId", "shopId", "status"])
+@Index("uq_order_return_active_order_shop", ["orderId", "shopId"], {
+  unique: true,
+  where: `"status" IN ('REQUESTED', 'AWAITING_SHIPMENT', 'IN_TRANSIT', 'SHIPMENT_FAILED', 'RECEIVED', 'REFUND_PENDING')`,
+})
 export class OrderReturnRequest {
   @PrimaryGeneratedColumn("uuid")
   id!: string;

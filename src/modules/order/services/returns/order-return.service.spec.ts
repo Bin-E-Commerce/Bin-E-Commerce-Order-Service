@@ -1,7 +1,9 @@
 /// <reference types="jest" />
 
+// File này kiểm tra các quy tắc tạo và tính toán của workflow hoàn hàng.
+
 import { type DeepMocked } from "@golevelup/ts-jest";
-import { Repository } from "typeorm";
+import { QueryFailedError, Repository } from "typeorm";
 import { OrderReturnRequest } from "../../../../database/returns/entities/order-return-request.entity";
 import { OrderReturnReason } from "../../../../database/returns/enums/order-return-reason.enum";
 import { OrderReturnStatus } from "../../../../database/returns/enums/order-return-status.enum";
@@ -140,5 +142,52 @@ describe("OrderReturnService", () => {
       itemIds: ["item-1", "item-2"],
       reason: OrderReturnReason.CHANGE_OF_MIND,
     })).rejects.toThrow("một shop");
+  });
+
+  it.each([
+    OrderReturnStatus.REQUESTED,
+    OrderReturnStatus.AWAITING_SHIPMENT,
+    OrderReturnStatus.IN_TRANSIT,
+    OrderReturnStatus.RECEIVED,
+  ])("returns the active request when status is %s", async (status) => {
+    // Arrange
+    const existingRequest = { id: "return-1", status } as OrderReturnRequest;
+    returns.findOne.mockResolvedValue(existingRequest);
+
+    // Act
+    const result = await service.create("customer-1", "order-1", {
+      itemIds: ["item-1"],
+      reason: OrderReturnReason.CHANGE_OF_MIND,
+    });
+
+    // Assert
+    expect(result).toBe(existingRequest);
+    expect(returns.save).not.toHaveBeenCalled();
+    expect(shipping.calculateQuote).not.toHaveBeenCalled();
+  });
+
+  it("returns the request created by a concurrent insert", async () => {
+    // Arrange
+    const concurrentRequest = { id: "return-2", status: OrderReturnStatus.REQUESTED } as OrderReturnRequest;
+    returns.findOne
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(concurrentRequest);
+    const driverError = Object.assign(new Error("duplicate active return"), {
+      code: "23505",
+      constraint: "uq_order_return_active_order_shop",
+    });
+    const uniqueViolation = new QueryFailedError("INSERT", [], driverError);
+    returns.save.mockRejectedValue(uniqueViolation);
+
+    // Act
+    const result = await service.create("customer-1", "order-1", {
+      itemIds: ["item-1"],
+      reason: OrderReturnReason.CHANGE_OF_MIND,
+    });
+
+    // Assert
+    expect(result).toBe(concurrentRequest);
+    expect(returns.save).toHaveBeenCalledTimes(1);
+    expect(returns.findOne).toHaveBeenCalledTimes(2);
   });
 });
