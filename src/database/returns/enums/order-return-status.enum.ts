@@ -8,8 +8,11 @@ export enum OrderReturnStatus {
   IN_TRANSIT = "IN_TRANSIT",
   SHIPMENT_FAILED = "SHIPMENT_FAILED",
   RECEIVED = "RECEIVED",
+  INSPECTION_PASSED = "INSPECTION_PASSED",
   INSPECTION_FAILED = "INSPECTION_FAILED",
   REFUND_PENDING = "REFUND_PENDING",
+  REFUND_FAILED = "REFUND_FAILED",
+  REFUNDED = "REFUNDED",
 }
 
 // Các trạng thái này giữ một quy trình hoàn hàng đang mở theo từng order và shop.
