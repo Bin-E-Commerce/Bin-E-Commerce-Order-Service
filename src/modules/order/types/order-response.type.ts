@@ -117,6 +117,18 @@ export interface SellerOrderListResponse {
   page: number;
   pageSize: number;
   totalPages: number;
+  counts: SellerOrderTabCounts;
+}
+
+// Số lượng theo từng bước Seller; returnRefund chỉ gồm yêu cầu Seller còn phải duyệt hoặc kiểm tra.
+export interface SellerOrderTabCounts {
+  all: number;
+  toShip: number;
+  shipping: number;
+  delivered: number;
+  completed: number;
+  cancelled: number;
+  returnRefund: number;
 }
 
 // Chi tiết Seller chỉ map item của shop, giữ nguyên snapshot giao hàng và timeline order cấp hệ thống.

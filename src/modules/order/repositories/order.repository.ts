@@ -7,14 +7,21 @@ import { Order } from "../../../database/order/entities/order.entity";
 import { OrderItem } from "../../../database/order/entities/order-item.entity";
 import { OrderStatus } from "../../../database/order/enums/order-status.enum";
 import { OrderFulfillmentStatus } from "../../../database/order/enums/order-fulfillment-status.enum";
+import { OrderReturnRequest } from "../../../database/returns/entities/order-return-request.entity";
+import { OrderReturnStatus } from "../../../database/returns/enums/order-return-status.enum";
 import type { SellerOrderListQueryDto } from "../dto/seller-order-list-query.dto";
-import type { CustomerOrderTabCounts } from "../types/order-response.type";
+import type {
+  CustomerOrderTabCounts,
+  SellerOrderTabCounts,
+} from "../types/order-response.type";
 
 // Cung cấp các query theo ownership và idempotency, không cho caller truyền owner tùy ý vào service khác.
 @Injectable()
 export class OrderRepository {
   constructor(
     @InjectRepository(Order) private readonly repository: Repository<Order>,
+    @InjectRepository(OrderReturnRequest)
+    private readonly returnRepository: Repository<OrderReturnRequest>,
   ) {}
 
   // Tìm order cũ để retry cùng key trả đúng kết quả và không reserve stock lần hai.
@@ -115,6 +122,73 @@ export class OrderRepository {
     };
   }
 
+  // Đếm order có item thuộc shop theo từng stage và chỉ đếm return request còn việc Seller phải xử lý.
+  async countSellerTabs(shopId: string): Promise<SellerOrderTabCounts> {
+    const [row, actionableReturnRow] = await Promise.all([
+      this.repository
+        .createQueryBuilder("order")
+        .select("COUNT(*)", "total")
+        .addSelect(
+          "COUNT(*) FILTER (WHERE order.fulfillment_status = :toShip)",
+          "toShip",
+        )
+        .addSelect(
+          "COUNT(*) FILTER (WHERE order.fulfillment_status = :shipping)",
+          "shipping",
+        )
+        .addSelect(
+          "COUNT(*) FILTER (WHERE order.fulfillment_status = :delivered)",
+          "delivered",
+        )
+        .addSelect(
+          "COUNT(*) FILTER (WHERE order.fulfillment_status = :completed)",
+          "completed",
+        )
+        .addSelect(
+          "COUNT(*) FILTER (WHERE order.fulfillment_status = :cancelled)",
+          "cancelled",
+        )
+        .where(
+          `EXISTS (
+            SELECT 1
+            FROM order_items seller_item
+            WHERE seller_item.order_id = "order"."id"
+              AND seller_item.seller_shop_id = :shopId
+          )`,
+          { shopId },
+        )
+        .setParameters({
+          toShip: OrderFulfillmentStatus.TO_SHIP,
+          shipping: OrderFulfillmentStatus.SHIPPING,
+          delivered: OrderFulfillmentStatus.DELIVERED,
+          completed: OrderFulfillmentStatus.COMPLETED,
+          cancelled: OrderFulfillmentStatus.CANCELLED,
+        })
+        .getRawOne<Record<string, string>>(),
+      this.returnRepository
+        .createQueryBuilder("return_request")
+        .select("COUNT(*)", "count")
+        .where("return_request.shop_id = :shopId", { shopId })
+        .andWhere("return_request.status IN (:...actionableStatuses)", {
+          actionableStatuses: [
+            OrderReturnStatus.REQUESTED,
+            OrderReturnStatus.RECEIVED,
+          ],
+        })
+        .getRawOne<{ count: string }>(),
+    ]);
+
+    return {
+      all: Number(row?.total ?? 0),
+      toShip: Number(row?.toShip ?? 0),
+      shipping: Number(row?.shipping ?? 0),
+      delivered: Number(row?.delivered ?? 0),
+      completed: Number(row?.completed ?? 0),
+      cancelled: Number(row?.cancelled ?? 0),
+      returnRefund: Number(actionableReturnRow?.count ?? 0),
+    };
+  }
+
   // Lấy danh sách order có item thuộc shop bằng truy vấn hai bước để pagination không bị nhân bản bởi quan hệ 1-n.
   async findSellerPage(
     shopId: string,
@@ -195,7 +269,7 @@ export class OrderRepository {
       .getOne();
   }
 
-  // Tổng hợp số lượng item đã phát sinh từ order database để Product Service đọc được cả dữ liệu lịch sử.
+  // Tổng hợp số lượng sản phẩm bán thành công; chỉ đơn đã hoàn tất mới được tính.
   async findSoldQuantities(
     sellerOwnerId: string,
     productIds: string[],
@@ -203,20 +277,17 @@ export class OrderRepository {
     if (!sellerOwnerId || productIds.length === 0) return [];
 
     const rows = await this.repository
-      .createQueryBuilder("order")
-      .innerJoin(OrderItem, "item", "item.order_id = order.id")
+      .createQueryBuilder("saleOrder")
+      .innerJoin(OrderItem, "item", "item.order_id = saleOrder.id")
       .select("item.product_id", "productId")
       .addSelect("COALESCE(SUM(item.quantity), 0)", "quantitySold")
       .where("item.seller_owner_id = :sellerOwnerId", { sellerOwnerId })
       .andWhere("item.product_id IN (:...productIds)", { productIds })
-      .andWhere("order.status = :confirmedStatus", {
+      .andWhere("saleOrder.status = :confirmedStatus", {
         confirmedStatus: OrderStatus.CONFIRMED,
       })
-      .andWhere("order.fulfillment_status NOT IN (:...excludedStages)", {
-        excludedStages: [
-          OrderFulfillmentStatus.CANCELLED,
-          OrderFulfillmentStatus.RETURN_REFUND,
-        ],
+      .andWhere("saleOrder.fulfillment_status = :completedStatus", {
+        completedStatus: OrderFulfillmentStatus.COMPLETED,
       })
       .groupBy("item.product_id")
       .getRawMany<{ productId: string; quantitySold: string }>();

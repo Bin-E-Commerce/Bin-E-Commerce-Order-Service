@@ -33,7 +33,7 @@ export class ShipmentStatusConsumer implements OnModuleInit, OnModuleDestroy {
     this.consumer = kafka.consumer({
       groupId: this.config.get<string>(
         "KAFKA_ORDER_GROUP_ID",
-        "order-service-shipment-sync-v2",
+        "order-service-shipment-sync-v3",
       ),
     });
   }

@@ -25,7 +25,7 @@ import type {
 import { OrderCommandService } from "../services/order/order-command.service";
 import { SellerOrderAccessService } from "../services/order/seller-order-access.service";
 import { OrderReturnService } from "../services/returns/order-return.service";
-import { ReviewOrderReturnDto } from "../dto/order-return.dto";
+import { InspectOrderReturnDto, ReviewOrderReturnDto } from "../dto/order-return.dto";
 import { OrderReturnStatus } from "../../../database/returns/enums/order-return-status.enum";
 
 @ApiTags("seller-orders")
@@ -38,6 +38,12 @@ export class SellerOrderController {
     private readonly sellerOrderAccess: SellerOrderAccessService,
     private readonly orderReturnService: OrderReturnService,
   ) {}
+
+  // Seller queue return được lọc theo shop từ user context.
+  @Get("returns")
+  listReturns(@Headers() headers: Record<string, unknown>, @Query("status") status?: OrderReturnStatus) {
+    return this.orderReturnService.listForSeller(this.sellerOrderAccess.buildCurrentUserFromHeaders(headers), status);
+  }
 
   // List Seller chỉ gồm order có item thuộc shop được resolve từ user context.
   @Get()
@@ -77,16 +83,14 @@ export class SellerOrderController {
   }
 
   // Seller approve request return chỉ trong shop được resolve từ user context.
-  @Post(":orderId/returns/:returnId/approve")
+  @Post("returns/:returnId/approve")
   approveReturn(
     @Headers() headers: Record<string, unknown>,
-    @Param("orderId", new ParseUUIDPipe()) orderId: string,
     @Param("returnId", new ParseUUIDPipe()) returnId: string,
     @Body() dto: ReviewOrderReturnDto,
   ) {
     return this.orderReturnService.review(
       this.sellerOrderAccess.buildCurrentUserFromHeaders(headers),
-      orderId,
       returnId,
       dto,
       OrderReturnStatus.APPROVED,
@@ -94,19 +98,27 @@ export class SellerOrderController {
   }
 
   // Seller reject request return với ghi chú tùy chọn để customer biết lý do.
-  @Post(":orderId/returns/:returnId/reject")
+  @Post("returns/:returnId/reject")
   rejectReturn(
     @Headers() headers: Record<string, unknown>,
-    @Param("orderId", new ParseUUIDPipe()) orderId: string,
     @Param("returnId", new ParseUUIDPipe()) returnId: string,
     @Body() dto: ReviewOrderReturnDto,
   ) {
     return this.orderReturnService.review(
       this.sellerOrderAccess.buildCurrentUserFromHeaders(headers),
-      orderId,
       returnId,
       dto,
       OrderReturnStatus.REJECTED,
     );
+  }
+
+  // Seller ghi nhận kết quả kiểm tra kiện hàng đã nhận.
+  @Post("returns/:returnId/inspection")
+  inspectReturn(
+    @Headers() headers: Record<string, unknown>,
+    @Param("returnId", new ParseUUIDPipe()) returnId: string,
+    @Body() dto: InspectOrderReturnDto,
+  ) {
+    return this.orderReturnService.inspect(this.sellerOrderAccess.buildCurrentUserFromHeaders(headers), returnId, dto);
   }
 }

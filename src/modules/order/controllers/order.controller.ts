@@ -59,6 +59,18 @@ export class OrderController {
     return this.orderReturnService.list(ownerId, orderId);
   }
 
+  // Customer xem detail return bằng ownership ở Order Service.
+  @Get("returns/:returnId")
+  getReturn(@Headers("x-user-id") ownerId: string, @Param("returnId", new ParseUUIDPipe()) returnId: string) {
+    return this.orderReturnService.getForCustomer(ownerId, returnId);
+  }
+
+  // Customer hủy request khi seller chưa xử lý.
+  @Post("returns/:returnId/cancellation")
+  cancelReturn(@Headers("x-user-id") ownerId: string, @Param("returnId", new ParseUUIDPipe()) returnId: string) {
+    return this.orderReturnService.cancel(ownerId, returnId);
+  }
+
   // Trả lịch sử order thuộc owner hiện tại theo stage/status và pagination.
   @Get()
   @ApiOperation({ summary: "List owned orders" })

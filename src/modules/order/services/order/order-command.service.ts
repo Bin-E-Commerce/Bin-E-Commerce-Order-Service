@@ -305,6 +305,28 @@ export class OrderCommandService {
     };
   }
 
+  // Seller chỉ được hủy order thuộc shop của mình; dùng chung luồng customer để release reservation đúng một lần.
+  async cancelBySeller(
+    sellerUserId: string,
+    shopId: string,
+    orderId: string,
+    dto: CancelOrderDto,
+  ): Promise<OrderResponse> {
+    if (!sellerUserId?.trim() || !shopId?.trim()) {
+      throw new BadRequestException("Thiếu seller hoặc shop context.");
+    }
+    const normalizedReason = dto.reason?.trim();
+    if (!normalizedReason) {
+      throw new BadRequestException("Seller phải nhập lý do hủy đơn hàng.");
+    }
+    const order = await this.orderRepository.findSellerById(shopId, orderId);
+    if (!order) throw new NotFoundException("Không tìm thấy đơn hàng trong phạm vi shop.");
+    return this.cancelOwnedOrder(order.ownerId, orderId, {
+      ...dto,
+      reason: normalizedReason,
+    });
+  }
+
   // Xác nhận owner ở lớp repository để Shipping Service không thể tự cấp quyền tracking bằng dữ liệu client.
   async assertOwnedOrder(ownerId: string, orderId: string): Promise<void> {
     if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
@@ -449,12 +471,12 @@ export class OrderCommandService {
     const shopId = await this.sellerShopClient.getOwnedShopId(user);
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 10;
-    const [orders, total] = await this.orderRepository.findSellerPage(
-      shopId,
-      page,
-      pageSize,
-      query,
-    );
+    // Page chịu filter đang chọn, còn counts luôn thống kê toàn bộ shop để badge không nhảy theo tab.
+    const [pageResult, counts] = await Promise.all([
+      this.orderRepository.findSellerPage(shopId, page, pageSize, query),
+      this.orderRepository.countSellerTabs(shopId),
+    ]);
+    const [orders, total] = pageResult;
 
     return {
       items: orders.map((order) => this.responseMapper.toSellerListItem(order)),
@@ -462,6 +484,7 @@ export class OrderCommandService {
       page,
       pageSize,
       totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
+      counts,
     };
   }
 
@@ -491,6 +514,9 @@ export class OrderCommandService {
     if (order.status !== OrderStatus.CONFIRMED) {
       throw new OrderCancellationConflictError(order.status);
     }
+    if (order.fulfillmentStatus !== OrderFulfillmentStatus.TO_SHIP) {
+      throw new OrderCancellationConflictError(order.status);
+    }
 
     await this.productClient.release(
       order.idempotencyKey,
@@ -511,6 +537,9 @@ export class OrderCommandService {
       if (!lockedOrder) throw new NotFoundException("Không tìm thấy đơn hàng.");
       if (lockedOrder.status === OrderStatus.CANCELLED) return false;
       if (lockedOrder.status !== OrderStatus.CONFIRMED) {
+        throw new OrderCancellationConflictError(lockedOrder.status);
+      }
+      if (lockedOrder.fulfillmentStatus !== OrderFulfillmentStatus.TO_SHIP) {
         throw new OrderCancellationConflictError(lockedOrder.status);
       }
       lockedOrder.status = OrderStatus.CANCELLED;

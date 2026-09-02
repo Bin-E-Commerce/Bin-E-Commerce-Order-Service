@@ -8,6 +8,7 @@ import {
   OrderEventItem,
   OrderEvents,
 } from "../../../../../../../packages/common/kafka/events/order.events";
+import type { ReturnChangedEvent } from "../../../../../../../packages/common/kafka/events/order.events";
 import { KafkaProducerService } from "../../../../kafka/kafka-producer.service";
 import { Order } from "../../../../database/order/entities/order.entity";
 import { fromCents, toCents } from "../../utils/order-money.util";
@@ -34,6 +35,43 @@ type GroupedSellerRecipient = {
 @Injectable()
 export class OrderEventsService {
   constructor(private readonly kafkaProducer: KafkaProducerService) {}
+
+  // Phát sự kiện return sau khi transaction đã commit; Notification Service dùng eventId ổn định để chống trùng.
+  async publishReturnChanged(input: {
+    eventName: ReturnChangedEvent["eventName"];
+    returnId: string;
+    orderId: string;
+    orderNumber: string;
+    shopId: string;
+    customerUserId: string;
+    sellerUserId: string | null;
+    status: string;
+    refundAmount: string;
+    reason: string;
+    note: string | null;
+  }): Promise<void> {
+    const event: ReturnChangedEvent = {
+      eventId: `${input.eventName}:${input.returnId}:${input.status}`,
+      eventName: input.eventName,
+      eventVersion: 1,
+      source: "order-service",
+      occurredAt: new Date().toISOString(),
+      aggregateId: input.returnId,
+      data: {
+        returnId: input.returnId,
+        orderId: input.orderId,
+        orderNumber: input.orderNumber,
+        shopId: input.shopId,
+        customerUserId: input.customerUserId,
+        sellerUserId: input.sellerUserId,
+        status: input.status,
+        refundAmount: input.refundAmount,
+        reason: input.reason,
+        note: input.note,
+      },
+    };
+    await this.kafkaProducer.publish(input.eventName, event, input.returnId);
+  }
 
   // Phát tín hiệu để Notification Service nhắc khách xác nhận sau khi Shipping báo giao thành công.
   async publishDeliveryAwaitingConfirmation(orderId: string): Promise<void> {

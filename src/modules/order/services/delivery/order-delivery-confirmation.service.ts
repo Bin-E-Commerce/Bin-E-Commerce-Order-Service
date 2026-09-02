@@ -1,5 +1,5 @@
 // File này điều phối xác nhận nhận hàng, delivery issue và tự hoàn tất order sau deadline.
-// Service là ranh giới duy nhất được phép đổi fulfillment từ DELIVERED sang COMPLETED; mọi request đều khóa order để chống double-click và worker chạy trùng.
+// Service là ranh giới duy nhất được phép đổi fulfillment sau khi khóa order, chống double-click và worker chạy trùng.
 
 import {
   BadRequestException,
@@ -32,7 +32,8 @@ const SHIPMENT_STAGE_BY_STATUS: Partial<
 > = {
   READY_TO_SHIP: OrderFulfillmentStatus.TO_SHIP,
   PICKUP_ASSIGNED: OrderFulfillmentStatus.TO_SHIP,
-  PICKED_UP: OrderFulfillmentStatus.TO_SHIP,
+  // Khi shipper đã lấy kiện, order phải rời nhóm "Chờ lấy hàng" và hiển thị đang vận chuyển.
+  PICKED_UP: OrderFulfillmentStatus.SHIPPING,
   IN_TRANSIT: OrderFulfillmentStatus.SHIPPING,
   FAILED: OrderFulfillmentStatus.DELIVERY_FAILED,
   CANCELLED: OrderFulfillmentStatus.CANCELLED,
@@ -136,7 +137,9 @@ export class OrderDeliveryConfirmationService {
   }
 
   // Xử lý quyết định của customer trong một transaction khóa order và issue liên quan.
-  // RECEIVED hoàn tất order ngay; ISSUE_REPORTED giữ order ở DELIVERED để return/support có thời gian xử lý và chặn auto-complete.
+  // RECEIVED hoàn tất order ngay; ISSUE chuyển đơn ra khỏi tab "Chờ xác nhận" bằng cách
+  // chốt fulfillment về RETURN_REFUND, còn return request vẫn giữ state riêng để Seller xử lý.
+  // Nhánh ISSUE idempotent để retry sau timeout không tạo issue hoặc lịch sử hủy trùng.
   async confirm(ownerId: string, orderId: string, dto: DeliveryConfirmationDto) {
     if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
 
@@ -155,6 +158,13 @@ export class OrderDeliveryConfirmationService {
         dto.decision === DeliveryConfirmationDecision.RECEIVED &&
         (order.fulfillmentStatus === OrderFulfillmentStatus.COMPLETED ||
           order.deliveryConfirmationStatus === OrderDeliveryConfirmationStatus.AUTO_CONFIRMED)
+      ) {
+        return;
+      }
+      if (
+        dto.decision === DeliveryConfirmationDecision.ISSUE &&
+        order.fulfillmentStatus === OrderFulfillmentStatus.RETURN_REFUND &&
+        order.deliveryConfirmationStatus === OrderDeliveryConfirmationStatus.ISSUE_REPORTED
       ) {
         return;
       }
@@ -189,21 +199,28 @@ export class OrderDeliveryConfirmationService {
       const existingIssue = await issueRepository.findOne({
         where: { orderId, status: OrderDeliveryIssueStatus.OPEN },
       });
-      if (existingIssue) return;
 
-      await issueRepository.save(
-        issueRepository.create({
-          orderId,
-          ownerId,
-          reason: dto.reason,
-          itemIds,
-          note: dto.note?.trim() || null,
-          status: OrderDeliveryIssueStatus.OPEN,
-          returnRequestId: null,
-          resolvedAt: null,
-          resolutionNote: null,
-        }),
-      );
+      // Issue đã mở thì giữ nguyên evidence/audit gốc; chỉ bảo đảm order cũ được đồng bộ về RETURN_REFUND.
+      if (!existingIssue) {
+        await issueRepository.save(
+          issueRepository.create({
+            orderId,
+            ownerId,
+            reason: dto.reason,
+            itemIds,
+            evidence: dto.evidence ?? [],
+            note: dto.note?.trim() || null,
+            status: OrderDeliveryIssueStatus.OPEN,
+            returnRequestId: null,
+            resolvedAt: null,
+            resolutionNote: null,
+          }),
+        );
+      }
+
+      // Qua chốt DELIVERED ở trên nên mọi request ISSUE chưa idempotent đều cần rời tab Chờ xác nhận.
+      // Không đổi order.status legacy sang CANCELLED vì đó là trạng thái hủy trước khi shipper nhận hàng.
+      order.fulfillmentStatus = OrderFulfillmentStatus.RETURN_REFUND;
       order.deliveryConfirmationStatus = OrderDeliveryConfirmationStatus.ISSUE_REPORTED;
       await manager.getRepository(Order).save(order);
       eventStatus = "issue";
@@ -256,4 +273,5 @@ export class OrderDeliveryConfirmationService {
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
   }
+
 }
