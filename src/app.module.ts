@@ -27,6 +27,8 @@ import { KafkaModule } from "./kafka/kafka.module";
         database: config.get<string>("POSTGRES_DB"),
         entities: [__dirname + "/**/*.entity{.ts,.js}"],
         migrations: [__dirname + "/database/migrations/*{.ts,.js}"],
+        // Cho phép migration enum commit trước migration chuẩn hóa dữ liệu cũ.
+        migrationsTransactionMode: "each" as const,
         migrationsRun: true,
         synchronize: false,
         ssl:

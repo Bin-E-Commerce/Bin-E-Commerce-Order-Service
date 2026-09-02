@@ -34,6 +34,9 @@ export class OrderDeliveryIssue {
   @Column({ name: "item_ids", type: "jsonb", default: () => "'[]'::jsonb" })
   itemIds!: string[];
 
+  @Column({ type: "jsonb", default: () => "'[]'::jsonb" })
+  evidence!: Array<{ assetId: string; url: string; type: "image" | "video" }>;
+
   @Column({ type: "varchar", length: 1000, nullable: true })
   note!: string | null;
 

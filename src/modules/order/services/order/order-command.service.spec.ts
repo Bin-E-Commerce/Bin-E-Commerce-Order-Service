@@ -18,6 +18,7 @@ import {
 } from "../../errors/order.errors";
 import { PaymentMethod } from "../../../../database/order/enums/payment-method.enum";
 import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
 import { OrderRepository } from "../../repositories/order.repository";
 import { OrderResponseMapper } from "./order-response-mapper.service";
 import { OrderCommandService } from "./order-command.service";
@@ -422,6 +423,15 @@ describe("OrderCommandService", () => {
       mockSellerOrderAccess.ensureCanRead.mockReturnValue(currentUser);
       mockSellerShopClient.getOwnedShopId.mockResolvedValue("shop-1");
       mockOrderRepository.findSellerPage.mockResolvedValue([[order], 1]);
+      mockOrderRepository.countSellerTabs.mockResolvedValue({
+        all: 4,
+        toShip: 1,
+        shipping: 1,
+        delivered: 1,
+        completed: 1,
+        cancelled: 0,
+        returnRefund: 0,
+      });
       mockResponseMapper.toSellerListItem.mockReturnValue(expected as never);
 
       const result = await target.listSellerOrders(currentUser, {
@@ -430,6 +440,15 @@ describe("OrderCommandService", () => {
       });
 
       expect(result.items).toEqual([expected]);
+      expect(result.counts).toEqual({
+        all: 4,
+        toShip: 1,
+        shipping: 1,
+        delivered: 1,
+        completed: 1,
+        cancelled: 0,
+        returnRefund: 0,
+      });
       expect(mockSellerShopClient.getOwnedShopId).toHaveBeenCalledWith(
         currentUser,
       );
@@ -438,6 +457,9 @@ describe("OrderCommandService", () => {
         1,
         10,
         { page: 1, pageSize: 10 },
+      );
+      expect(mockOrderRepository.countSellerTabs).toHaveBeenCalledWith(
+        "shop-1",
       );
     });
 
@@ -470,6 +492,7 @@ describe("OrderCommandService", () => {
         id: "order-1",
         ownerId,
         status: OrderStatus.CONFIRMED,
+        fulfillmentStatus: OrderFulfillmentStatus.TO_SHIP,
         idempotencyKey,
         items: [{ variantId, quantity: 2 }],
       } as Order;
@@ -545,6 +568,7 @@ describe("OrderCommandService", () => {
         id: "order-1",
         ownerId,
         status: OrderStatus.CONFIRMED,
+        fulfillmentStatus: OrderFulfillmentStatus.TO_SHIP,
         idempotencyKey,
         items: [{ variantId, quantity: 1 }],
       } as Order;

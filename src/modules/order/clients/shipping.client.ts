@@ -37,6 +37,7 @@ export interface ShippingQuote {
 export interface OrderShippingQuoteInput {
   shopId: string;
   to: ShippingAddressInput;
+  shipmentKind?: "FORWARD" | "RETURN";
   weightGrams: number;
   lengthCm: number;
   widthCm: number;
@@ -56,7 +57,8 @@ export class ShippingClient {
     this.internalToken = config.get<string>("INTERNAL_SERVICE_TOKEN", "");
   }
 
-  // Gửi một quote cho từng shop; pickup address được Shipping Service resolve server-side.
+  // Gửi quote cho một shop; pickup của Seller được Shipping Service resolve server-side.
+  // Với shipmentKind=RETURN, Shipping Service đảo chiều tuyến thành customer → shop.
   async calculateQuote(input: OrderShippingQuoteInput): Promise<ShippingQuote> {
     let response: Response;
     try {

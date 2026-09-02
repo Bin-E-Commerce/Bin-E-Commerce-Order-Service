@@ -6,6 +6,8 @@ import { createMock, type DeepMocked } from "@golevelup/ts-jest";
 import { DataSource } from "typeorm";
 import { Order } from "../../../../database/order/entities/order.entity";
 import { OrderItem } from "../../../../database/order/entities/order-item.entity";
+import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
+import { OrderDeliveryIssue } from "../../../../database/delivery/entities/order-delivery-issue.entity";
 import { OrderDeliveryConfirmationStatus } from "../../../../database/delivery/enums/order-delivery-confirmation-status.enum";
 import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
 import { PaymentStatus } from "../../../../database/order/enums/payment-status.enum";
@@ -33,6 +35,7 @@ describe("OrderDeliveryConfirmationService", () => {
     ({
       id: orderId,
       ownerId,
+      status: OrderStatus.CONFIRMED,
       fulfillmentStatus: OrderFulfillmentStatus.DELIVERED,
       deliveryConfirmationStatus: OrderDeliveryConfirmationStatus.PENDING,
       deliveryConfirmationDeadline: new Date("2026-09-03T10:00:00.000Z"),
@@ -61,9 +64,18 @@ describe("OrderDeliveryConfirmationService", () => {
     const itemRepository = {
       find: jest.fn().mockResolvedValue([]),
     };
+    const issueRepository = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((value: unknown) => value),
+      save: jest.fn().mockImplementation(async (value: unknown) => value),
+    };
     const manager = {
       getRepository: jest.fn((entity: unknown) =>
-        entity === OrderItem ? itemRepository : orderRepository,
+        entity === OrderItem
+          ? itemRepository
+          : entity === OrderDeliveryIssue
+            ? issueRepository
+            : orderRepository,
       ),
     };
     mockDataSource.transaction.mockImplementation(async (callback: any) => callback(manager));
@@ -126,6 +138,20 @@ describe("OrderDeliveryConfirmationService", () => {
     expect(order.fulfillmentStatus).toBe(OrderFulfillmentStatus.SHIPPING);
   });
 
+  // Shipper đã lấy kiện thì customer phải thấy đơn ở nhóm đang giao, không còn ở nhóm chờ lấy hàng.
+  it("should move the order to shipping when the carrier picks it up", async () => {
+    const order = {
+      ...createDeliveredOrder(),
+      fulfillmentStatus: OrderFulfillmentStatus.TO_SHIP,
+      deliveryConfirmationStatus: OrderDeliveryConfirmationStatus.PENDING,
+    } as Order;
+    mockTransaction(order);
+
+    await target.syncShipmentStatus(orderId, "PICKED_UP", "2026-08-31T10:00:00.000Z");
+
+    expect(order.fulfillmentStatus).toBe(OrderFulfillmentStatus.SHIPPING);
+  });
+
   // Customer nhận hàng thì hoàn tất order ngay và ghi nhận payment COD đã thu.
   it("should complete an order when customer confirms receipt", async () => {
     // Arrange
@@ -144,6 +170,24 @@ describe("OrderDeliveryConfirmationService", () => {
     expect(order.paymentStatus).toBe(PaymentStatus.PAID);
     expect(order.deliveryConfirmationStatus).toBe(OrderDeliveryConfirmationStatus.CONFIRMED);
     expect(mockOrderEvents.publishDeliveryConfirmed).toHaveBeenCalledWith(orderId);
+  });
+
+  // Customer báo issue thì order phải rời tab Chờ xác nhận sang Trả hàng/Hoàn tiền, nhưng issue vẫn mở cho Seller xử lý.
+  it("should move an order to return/refund when customer reports a delivery issue", async () => {
+    const order = createDeliveredOrder();
+    mockTransaction(order);
+    mockOrderRepository.findOwnedById.mockResolvedValue(order);
+    mockResponseMapper.toResponse.mockReturnValue({ id: orderId } as never);
+
+    await target.confirm(ownerId, orderId, {
+      decision: DeliveryConfirmationDecision.ISSUE,
+      reason: "NOT_RECEIVED" as DeliveryConfirmationDto["reason"],
+      note: "Khách chưa nhận được kiện hàng.",
+    });
+
+    expect(order.fulfillmentStatus).toBe(OrderFulfillmentStatus.RETURN_REFUND);
+    expect(order.deliveryConfirmationStatus).toBe(OrderDeliveryConfirmationStatus.ISSUE_REPORTED);
+    expect(mockOrderEvents.publishDeliveryIssueReported).toHaveBeenCalledWith(orderId);
   });
 
   // Worker không được auto-complete order còn hạn hoặc đã chuyển sang issue.
