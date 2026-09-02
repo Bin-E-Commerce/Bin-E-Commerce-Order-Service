@@ -15,6 +15,16 @@ import type {
   SellerOrderTabCounts,
 } from "../types/order-response.type";
 
+// Các trạng thái này cho biết item đã đi vào quy trình hoàn thực tế; item bị từ chối hoặc customer tự hủy vẫn là một lượt bán hợp lệ.
+const RETURN_STATUSES_EXCLUDED_FROM_SALES = [
+  OrderReturnStatus.AWAITING_SHIPMENT,
+  OrderReturnStatus.IN_TRANSIT,
+  OrderReturnStatus.SHIPMENT_FAILED,
+  OrderReturnStatus.RECEIVED,
+  OrderReturnStatus.INSPECTION_FAILED,
+  OrderReturnStatus.REFUND_PENDING,
+];
+
 // Cung cấp các query theo ownership và idempotency, không cho caller truyền owner tùy ý vào service khác.
 @Injectable()
 export class OrderRepository {
@@ -269,7 +279,9 @@ export class OrderRepository {
       .getOne();
   }
 
-  // Tổng hợp số lượng sản phẩm bán thành công; chỉ đơn đã hoàn tất mới được tính.
+  // Tổng hợp số lượng bán theo từng item thay vì theo trạng thái tổng của order.
+  // Order RETURN_REFUND vẫn giữ các item không hoàn để không làm mất lượt bán của sản phẩm khác trong cùng đơn.
+  // Chỉ item đã đi vào quy trình hoàn mới bị loại; request bị từ chối hoặc customer tự hủy vẫn được tính như một sale.
   async findSoldQuantities(
     sellerOwnerId: string,
     productIds: string[],
@@ -280,15 +292,36 @@ export class OrderRepository {
       .createQueryBuilder("saleOrder")
       .innerJoin(OrderItem, "item", "item.order_id = saleOrder.id")
       .select("item.product_id", "productId")
-      .addSelect("COALESCE(SUM(item.quantity), 0)", "quantitySold")
+      .addSelect(
+        `COALESCE(
+          SUM(item.quantity) FILTER (
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM order_return_requests return_request
+              WHERE return_request.order_id = saleOrder.id
+                AND return_request.status IN (:...returnStatusesExcludedFromSales)
+                AND return_request.item_ids @> jsonb_build_array(item.id::text)
+            )
+          ),
+          0
+        )`,
+        "quantitySold",
+      )
       .where("item.seller_owner_id = :sellerOwnerId", { sellerOwnerId })
       .andWhere("item.product_id IN (:...productIds)", { productIds })
       .andWhere("saleOrder.status = :confirmedStatus", {
         confirmedStatus: OrderStatus.CONFIRMED,
       })
-      .andWhere("saleOrder.fulfillment_status = :completedStatus", {
-        completedStatus: OrderFulfillmentStatus.COMPLETED,
+      .andWhere("saleOrder.fulfillment_status IN (:...saleStatuses)", {
+        saleStatuses: [
+          OrderFulfillmentStatus.COMPLETED,
+          OrderFulfillmentStatus.RETURN_REFUND,
+        ],
       })
+      .setParameter(
+        "returnStatusesExcludedFromSales",
+        RETURN_STATUSES_EXCLUDED_FROM_SALES,
+      )
       .groupBy("item.product_id")
       .getRawMany<{ productId: string; quantitySold: string }>();
 
