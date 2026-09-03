@@ -13,8 +13,8 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { OrderCommandService } from "../services/order/order-command.service";
-import { OrderReturnService } from "../services/returns/order-return.service";
+import { OrderCommandService } from "../../application/services/order/order-command.service";
+import { OrderReturnService } from "../../application/services/returns/order-return.service";
 import { UpdateReturnShippingCostDto } from "../dto/order-return.dto";
 import { CancelOrderDto } from "../dto/cancel-order.dto";
 

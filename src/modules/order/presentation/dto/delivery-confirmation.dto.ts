@@ -13,7 +13,7 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
-import { OrderDeliveryIssueReason } from "../../../database/delivery/enums/order-delivery-issue-reason.enum";
+import { OrderDeliveryIssueReason } from "../../../../database/delivery/enums/order-delivery-issue-reason.enum";
 
 export enum DeliveryConfirmationDecision {
   RECEIVED = "RECEIVED",

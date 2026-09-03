@@ -10,15 +10,15 @@ import {
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { In, QueryFailedError, Repository } from "typeorm";
-import { OrderReturnRequest } from "../../../../database/returns/entities/order-return-request.entity";
-import { OrderReturnReason } from "../../../../database/returns/enums/order-return-reason.enum";
+import { OrderReturnRequest } from "../../../../../database/returns/entities/order-return-request.entity";
+import { OrderReturnReason } from "../../../../../database/returns/enums/order-return-reason.enum";
 import {
   ACTIVE_ORDER_RETURN_STATUSES,
   OrderReturnStatus,
-} from "../../../../database/returns/enums/order-return-status.enum";
-import { Order } from "../../../../database/order/entities/order.entity";
-import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
-import { OrderRepository } from "../../repositories/order.repository";
+} from "../../../../../database/returns/enums/order-return-status.enum";
+import { Order } from "../../../../../database/order/entities/order.entity";
+import { OrderFulfillmentStatus } from "../../../../../database/order/enums/order-fulfillment-status.enum";
+import { OrderRepository } from "../../../infrastructure/repositories/order.repository";
 import { SellerShopClient } from "../../clients/seller-shop.client";
 import { OrderEventsService } from "../order/order-events.service";
 import { fromCents, toCents } from "../../utils/order-money.util";
@@ -30,7 +30,7 @@ import type {
   CreateOrderReturnDto,
   InspectOrderReturnDto,
   ReviewOrderReturnDto,
-} from "../../dto/order-return.dto";
+} from "../../../presentation/dto/order-return.dto";
 import type { SellerOrderUserContext } from "../../types/seller-order-user-context.type";
 
 const EVIDENCE_REQUIRED_REASONS = new Set<OrderReturnReason>([

@@ -4,11 +4,11 @@
 
 import { type DeepMocked } from "@golevelup/ts-jest";
 import { QueryFailedError, Repository } from "typeorm";
-import { OrderReturnRequest } from "../../../../database/returns/entities/order-return-request.entity";
-import { OrderReturnReason } from "../../../../database/returns/enums/order-return-reason.enum";
-import { OrderReturnStatus } from "../../../../database/returns/enums/order-return-status.enum";
-import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
-import { OrderRepository } from "../../repositories/order.repository";
+import { OrderReturnRequest } from "../../../../../database/returns/entities/order-return-request.entity";
+import { OrderReturnReason } from "../../../../../database/returns/enums/order-return-reason.enum";
+import { OrderReturnStatus } from "../../../../../database/returns/enums/order-return-status.enum";
+import { OrderFulfillmentStatus } from "../../../../../database/order/enums/order-fulfillment-status.enum";
+import { OrderRepository } from "../../../infrastructure/repositories/order.repository";
 import { SellerShopClient } from "../../clients/seller-shop.client";
 import { OrderEventsService } from "../order/order-events.service";
 import { ShippingClient } from "../../clients/shipping.client";

@@ -7,10 +7,10 @@ import {
   OrderCreatedEvent,
   OrderEventItem,
   OrderEvents,
-} from "../../../../../../../packages/common/kafka/events/order.events";
-import type { ReturnChangedEvent } from "../../../../../../../packages/common/kafka/events/order.events";
-import { KafkaProducerService } from "../../../../kafka/kafka-producer.service";
-import { Order } from "../../../../database/order/entities/order.entity";
+} from "@common/kafka/events/order.events";
+import type { ReturnChangedEvent } from "@common/kafka/events/order.events";
+import { KafkaProducerService } from "../../../../../kafka/kafka-producer.service";
+import { Order } from "../../../../../database/order/entities/order.entity";
 import { fromCents, toCents } from "../../utils/order-money.util";
 
 type SellerRecipientSource = {

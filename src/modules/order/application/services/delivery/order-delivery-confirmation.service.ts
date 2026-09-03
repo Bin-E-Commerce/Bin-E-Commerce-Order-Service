@@ -8,22 +8,22 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { DataSource } from "typeorm";
-import { Order } from "../../../../database/order/entities/order.entity";
-import { OrderDeliveryIssue } from "../../../../database/delivery/entities/order-delivery-issue.entity";
-import { OrderItem } from "../../../../database/order/entities/order-item.entity";
-import { OrderDeliveryConfirmationMethod } from "../../../../database/delivery/enums/order-delivery-confirmation-method.enum";
-import { OrderDeliveryConfirmationStatus } from "../../../../database/delivery/enums/order-delivery-confirmation-status.enum";
-import { OrderDeliveryIssueStatus } from "../../../../database/delivery/enums/order-delivery-issue-status.enum";
-import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
-import { PaymentStatus } from "../../../../database/order/enums/payment-status.enum";
-import { OrderRepository } from "../../repositories/order.repository";
+import { Order } from "../../../../../database/order/entities/order.entity";
+import { OrderDeliveryIssue } from "../../../../../database/delivery/entities/order-delivery-issue.entity";
+import { OrderItem } from "../../../../../database/order/entities/order-item.entity";
+import { OrderDeliveryConfirmationMethod } from "../../../../../database/delivery/enums/order-delivery-confirmation-method.enum";
+import { OrderDeliveryConfirmationStatus } from "../../../../../database/delivery/enums/order-delivery-confirmation-status.enum";
+import { OrderDeliveryIssueStatus } from "../../../../../database/delivery/enums/order-delivery-issue-status.enum";
+import { OrderFulfillmentStatus } from "../../../../../database/order/enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../../../../../database/order/enums/payment-status.enum";
+import { OrderRepository } from "../../../infrastructure/repositories/order.repository";
 import { OrderResponseMapper } from "../order/order-response-mapper.service";
 import { OrderEventsService } from "../order/order-events.service";
-import type { ShipmentStatus } from "../../../../../../../packages/common/kafka/events/shipping.events";
+import type { ShipmentStatus } from "@common/kafka/events/shipping.events";
 import {
   DeliveryConfirmationDecision,
   DeliveryConfirmationDto,
-} from "../../dto/delivery-confirmation.dto";
+} from "../../../presentation/dto/delivery-confirmation.dto";
 
 const AUTO_CONFIRMATION_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
 
