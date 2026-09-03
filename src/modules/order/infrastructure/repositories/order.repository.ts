@@ -298,7 +298,7 @@ export class OrderRepository {
             WHERE NOT EXISTS (
               SELECT 1
               FROM order_return_requests return_request
-              WHERE return_request.order_id = saleOrder.id
+              WHERE return_request.order_id = "saleOrder"."id"
                 AND return_request.status IN (:...returnStatusesExcludedFromSales)
                 AND return_request.item_ids @> jsonb_build_array(item.id::text)
             )
