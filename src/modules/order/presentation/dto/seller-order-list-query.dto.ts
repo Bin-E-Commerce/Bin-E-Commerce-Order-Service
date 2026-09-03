@@ -10,8 +10,8 @@ import {
   MaxLength,
   Min,
 } from "class-validator";
-import { OrderStatus } from "../../../database/order/enums/order-status.enum";
-import { OrderFulfillmentStatus } from "../../../database/order/enums/order-fulfillment-status.enum";
+import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
 
 export class SellerOrderListQueryDto {
   @IsOptional()

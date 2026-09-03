@@ -3,17 +3,17 @@
 import { Injectable } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { FindOptionsWhere, Repository } from "typeorm";
-import { Order } from "../../../database/order/entities/order.entity";
-import { OrderItem } from "../../../database/order/entities/order-item.entity";
-import { OrderStatus } from "../../../database/order/enums/order-status.enum";
-import { OrderFulfillmentStatus } from "../../../database/order/enums/order-fulfillment-status.enum";
-import { OrderReturnRequest } from "../../../database/returns/entities/order-return-request.entity";
-import { OrderReturnStatus } from "../../../database/returns/enums/order-return-status.enum";
-import type { SellerOrderListQueryDto } from "../dto/seller-order-list-query.dto";
+import { Order } from "../../../../database/order/entities/order.entity";
+import { OrderItem } from "../../../../database/order/entities/order-item.entity";
+import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
+import { OrderReturnRequest } from "../../../../database/returns/entities/order-return-request.entity";
+import { OrderReturnStatus } from "../../../../database/returns/enums/order-return-status.enum";
+import type { SellerOrderListQueryDto } from "../../presentation/dto/seller-order-list-query.dto";
 import type {
   CustomerOrderTabCounts,
   SellerOrderTabCounts,
-} from "../types/order-response.type";
+} from "../../application/types/order-response.type";
 
 // Các trạng thái này cho biết item đã đi vào quy trình hoàn thực tế; item bị từ chối hoặc customer tự hủy vẫn là một lượt bán hợp lệ.
 const RETURN_STATUSES_EXCLUDED_FROM_SALES = [

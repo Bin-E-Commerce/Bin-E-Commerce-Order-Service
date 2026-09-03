@@ -6,11 +6,11 @@ import { CreateCodOrderDto } from "../dto/create-cod-order.dto";
 import { CreateOrderQuoteDto } from "../dto/create-order-quote.dto";
 import { CreateOrderReturnDto } from "../dto/order-return.dto";
 import { OrderListQueryDto } from "../dto/order-list-query.dto";
-import { OrderCommandService } from "../services/order/order-command.service";
-import { OrderReturnService } from "../services/returns/order-return.service";
-import { OrderDeliveryConfirmationService } from "../services/delivery/order-delivery-confirmation.service";
+import { OrderCommandService } from "../../application/services/order/order-command.service";
+import { OrderReturnService } from "../../application/services/returns/order-return.service";
+import { OrderDeliveryConfirmationService } from "../../application/services/delivery/order-delivery-confirmation.service";
 import { DeliveryConfirmationDto } from "../dto/delivery-confirmation.dto";
-import type { OrderListResponse, OrderResponse } from "../types/order-response.type";
+import type { OrderListResponse, OrderResponse } from "../../application/types/order-response.type";
 
 // Public Order API được Gateway bảo vệ bằng JWT và permission tương ứng.
 @ApiTags("orders")

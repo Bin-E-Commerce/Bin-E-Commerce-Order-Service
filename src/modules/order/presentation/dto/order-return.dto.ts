@@ -1,7 +1,7 @@
 // DTO return giới hạn lý do/mô tả và item snapshot customer được phép yêu cầu.
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsBoolean, IsEnum, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength, ValidateNested } from "class-validator";
 import { Type } from "class-transformer";
-import { OrderReturnReason } from "../../../database/returns/enums/order-return-reason.enum";
+import { OrderReturnReason } from "../../../../database/returns/enums/order-return-reason.enum";
 
 // Request tạo yêu cầu trả hàng cho các item thuộc order của customer.
 export class CreateOrderReturnDto {

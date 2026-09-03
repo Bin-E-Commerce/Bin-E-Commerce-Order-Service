@@ -2,7 +2,7 @@
 // Worker không chứa nghiệp vụ chuyển trạng thái; nó chỉ lấy batch nhỏ và ủy quyền transaction cho OrderDeliveryConfirmationService.
 
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { OrderRepository } from "../../repositories/order.repository";
+import { OrderRepository } from "../../../infrastructure/repositories/order.repository";
 import { OrderDeliveryConfirmationService } from "./order-delivery-confirmation.service";
 
 @Injectable()

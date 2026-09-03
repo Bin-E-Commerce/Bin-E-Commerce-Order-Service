@@ -10,7 +10,7 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { Kafka, Consumer } from "kafkajs";
 import type { ShipmentStatusUpdatedEvent } from "../../../../packages/common/kafka/events/shipping.events";
-import { OrderDeliveryConfirmationService } from "../modules/order/services/delivery/order-delivery-confirmation.service";
+import { OrderDeliveryConfirmationService } from "../modules/order/application/services/delivery/order-delivery-confirmation.service";
 
 @Injectable()
 export class ShipmentStatusConsumer implements OnModuleInit, OnModuleDestroy {

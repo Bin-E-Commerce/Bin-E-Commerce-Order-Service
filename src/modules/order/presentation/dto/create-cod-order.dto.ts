@@ -8,7 +8,7 @@ import {
   IsUUID,
   MaxLength,
 } from "class-validator";
-import { PaymentMethod } from "../../../database/order/enums/payment-method.enum";
+import { PaymentMethod } from "../../../../database/order/enums/payment-method.enum";
 
 // Kiểm tra payload trước khi use case gọi các service bên ngoài hoặc mở transaction.
 export class CreateCodOrderDto {

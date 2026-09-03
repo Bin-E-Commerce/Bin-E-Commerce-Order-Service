@@ -10,10 +10,10 @@ import {
   Optional,
 } from "@nestjs/common";
 import { DataSource, QueryFailedError } from "typeorm";
-import { Order } from "../../../../database/order/entities/order.entity";
-import { OrderDeliveryIssue } from "../../../../database/delivery/entities/order-delivery-issue.entity";
-import { OrderItem } from "../../../../database/order/entities/order-item.entity";
-import { OrderStatusHistory } from "../../../../database/order/entities/order-status-history.entity";
+import { Order } from "../../../../../database/order/entities/order.entity";
+import { OrderDeliveryIssue } from "../../../../../database/delivery/entities/order-delivery-issue.entity";
+import { OrderItem } from "../../../../../database/order/entities/order-item.entity";
+import { OrderStatusHistory } from "../../../../../database/order/entities/order-status-history.entity";
 import { CartClient } from "../../clients/cart.client";
 import { AuthClient } from "../../clients/auth.client";
 import { ProductClient } from "../../clients/product.client";
@@ -28,13 +28,13 @@ import {
   IdempotencyConflictError,
   OrderCancellationConflictError,
 } from "../../errors/order.errors";
-import { OrderRepository } from "../../repositories/order.repository";
-import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
-import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
-import { PaymentStatus } from "../../../../database/order/enums/payment-status.enum";
-import { PaymentMethod } from "../../../../database/order/enums/payment-method.enum";
-import { OrderDeliveryIssueStatus } from "../../../../database/delivery/enums/order-delivery-issue-status.enum";
-import type { CreateCodOrderDto } from "../../dto/create-cod-order.dto";
+import { OrderRepository } from "../../../infrastructure/repositories/order.repository";
+import { OrderStatus } from "../../../../../database/order/enums/order-status.enum";
+import { OrderFulfillmentStatus } from "../../../../../database/order/enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../../../../../database/order/enums/payment-status.enum";
+import { PaymentMethod } from "../../../../../database/order/enums/payment-method.enum";
+import { OrderDeliveryIssueStatus } from "../../../../../database/delivery/enums/order-delivery-issue-status.enum";
+import type { CreateCodOrderDto } from "../../../presentation/dto/create-cod-order.dto";
 import type {
   OrderListResponse,
   OrderResponse,
@@ -42,9 +42,9 @@ import type {
   SellerOrderResponse,
 } from "../../types/order-response.type";
 import type { CheckoutQuoteItem } from "../../types/external-contracts.type";
-import type { OrderListQueryDto } from "../../dto/order-list-query.dto";
-import type { CancelOrderDto } from "../../dto/cancel-order.dto";
-import type { SellerOrderListQueryDto } from "../../dto/seller-order-list-query.dto";
+import type { OrderListQueryDto } from "../../../presentation/dto/order-list-query.dto";
+import type { CancelOrderDto } from "../../../presentation/dto/cancel-order.dto";
+import type { SellerOrderListQueryDto } from "../../../presentation/dto/seller-order-list-query.dto";
 import type { SellerOrderUserContext } from "../../types/seller-order-user-context.type";
 import { fromCents, toCents } from "../../utils/order-money.util";
 import { OrderResponseMapper } from "./order-response-mapper.service";

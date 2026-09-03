@@ -21,12 +21,12 @@ import { SellerOrderListQueryDto } from "../dto/seller-order-list-query.dto";
 import type {
   SellerOrderListResponse,
   SellerOrderResponse,
-} from "../types/order-response.type";
-import { OrderCommandService } from "../services/order/order-command.service";
-import { SellerOrderAccessService } from "../services/order/seller-order-access.service";
-import { OrderReturnService } from "../services/returns/order-return.service";
+} from "../../application/types/order-response.type";
+import { OrderCommandService } from "../../application/services/order/order-command.service";
+import { SellerOrderAccessService } from "../../application/services/order/seller-order-access.service";
+import { OrderReturnService } from "../../application/services/returns/order-return.service";
 import { InspectOrderReturnDto, ReviewOrderReturnDto } from "../dto/order-return.dto";
-import { OrderReturnStatus } from "../../../database/returns/enums/order-return-status.enum";
+import { OrderReturnStatus } from "../../../../database/returns/enums/order-return-status.enum";
 
 @ApiTags("seller-orders")
 @ApiBearerAuth()

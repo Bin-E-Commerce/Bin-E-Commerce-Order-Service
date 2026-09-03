@@ -1,11 +1,11 @@
 // File này định nghĩa response public của order, tách khỏi TypeORM entity và dữ liệu kỹ thuật nội bộ.
 
-import { OrderStatus } from "../../../database/order/enums/order-status.enum";
-import { PaymentMethod } from "../../../database/order/enums/payment-method.enum";
-import { OrderFulfillmentStatus } from "../../../database/order/enums/order-fulfillment-status.enum";
-import { PaymentStatus } from "../../../database/order/enums/payment-status.enum";
-import { OrderDeliveryConfirmationMethod } from "../../../database/delivery/enums/order-delivery-confirmation-method.enum";
-import { OrderDeliveryConfirmationStatus } from "../../../database/delivery/enums/order-delivery-confirmation-status.enum";
+import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
+import { PaymentMethod } from "../../../../database/order/enums/payment-method.enum";
+import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../../../../database/order/enums/payment-status.enum";
+import { OrderDeliveryConfirmationMethod } from "../../../../database/delivery/enums/order-delivery-confirmation-method.enum";
+import { OrderDeliveryConfirmationStatus } from "../../../../database/delivery/enums/order-delivery-confirmation-status.enum";
 
 // Contract trả về sau khi tạo hoặc đọc một order thuộc user hiện tại.
 export interface OrderResponse {

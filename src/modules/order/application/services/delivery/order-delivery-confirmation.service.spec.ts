@@ -4,18 +4,18 @@
 import { Test, type TestingModule } from "@nestjs/testing";
 import { createMock, type DeepMocked } from "@golevelup/ts-jest";
 import { DataSource } from "typeorm";
-import { Order } from "../../../../database/order/entities/order.entity";
-import { OrderItem } from "../../../../database/order/entities/order-item.entity";
-import { OrderStatus } from "../../../../database/order/enums/order-status.enum";
-import { OrderDeliveryIssue } from "../../../../database/delivery/entities/order-delivery-issue.entity";
-import { OrderDeliveryConfirmationStatus } from "../../../../database/delivery/enums/order-delivery-confirmation-status.enum";
-import { OrderFulfillmentStatus } from "../../../../database/order/enums/order-fulfillment-status.enum";
-import { PaymentStatus } from "../../../../database/order/enums/payment-status.enum";
+import { Order } from "../../../../../database/order/entities/order.entity";
+import { OrderItem } from "../../../../../database/order/entities/order-item.entity";
+import { OrderStatus } from "../../../../../database/order/enums/order-status.enum";
+import { OrderDeliveryIssue } from "../../../../../database/delivery/entities/order-delivery-issue.entity";
+import { OrderDeliveryConfirmationStatus } from "../../../../../database/delivery/enums/order-delivery-confirmation-status.enum";
+import { OrderFulfillmentStatus } from "../../../../../database/order/enums/order-fulfillment-status.enum";
+import { PaymentStatus } from "../../../../../database/order/enums/payment-status.enum";
 import {
   DeliveryConfirmationDecision,
   type DeliveryConfirmationDto,
-} from "../../dto/delivery-confirmation.dto";
-import { OrderRepository } from "../../repositories/order.repository";
+} from "../../../presentation/dto/delivery-confirmation.dto";
+import { OrderRepository } from "../../../infrastructure/repositories/order.repository";
 import { OrderEventsService } from "../order/order-events.service";
 import { OrderResponseMapper } from "../order/order-response-mapper.service";
 import { OrderDeliveryConfirmationService } from "./order-delivery-confirmation.service";
