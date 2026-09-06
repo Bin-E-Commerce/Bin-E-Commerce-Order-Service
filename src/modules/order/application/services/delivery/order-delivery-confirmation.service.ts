@@ -226,7 +226,10 @@ export class OrderDeliveryConfirmationService {
       eventStatus = "issue";
     });
 
-    if (eventStatus === "confirmed") await this.orderEvents.publishDeliveryConfirmed(orderId);
+    if (eventStatus === "confirmed") {
+      await this.orderEvents.publishDeliveryConfirmed(orderId);
+      await this.orderEvents.publishPurchaseCompleted?.(orderId);
+    }
     if (eventStatus === "issue") await this.orderEvents.publishDeliveryIssueReported(orderId);
 
     const order = await this.orderRepository.findOwnedById(ownerId, orderId);
@@ -264,7 +267,10 @@ export class OrderDeliveryConfirmationService {
       changed = true;
     });
 
-    if (changed) await this.orderEvents.publishDeliveryAutoConfirmed(orderId);
+    if (changed) {
+      await this.orderEvents.publishDeliveryAutoConfirmed(orderId);
+      await this.orderEvents.publishPurchaseCompleted?.(orderId);
+    }
     return changed;
   }
 
