@@ -435,6 +435,9 @@ export class OrderReturnService {
       request.ownerId,
       dto.passed ? "return.inspection.passed" : "return.inspection.failed",
     );
+    if (dto.passed) {
+      await this.events.publishPurchaseReturned?.(request.orderId, request.id, request.itemIds);
+    }
     return saved;
   }
 

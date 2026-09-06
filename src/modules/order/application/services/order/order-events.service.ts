@@ -1,7 +1,9 @@
 // File này chuyển order đã commit thành integration event cho Notification Service.
 // Service chỉ phát recipient đã được Product Service xác định bằng sellerOwnerId, không tự tin shopId từ browser.
 
-import { Injectable } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository } from "typeorm";
 import {
   OrderCancelledEvent,
   OrderCreatedEvent,
@@ -12,6 +14,7 @@ import type { ReturnChangedEvent } from "@common/kafka/events/order.events";
 import { KafkaProducerService } from "../../../../../kafka/kafka-producer.service";
 import { Order } from "../../../../../database/order/entities/order.entity";
 import { fromCents, toCents } from "../../utils/order-money.util";
+import type { OrderPurchaseEvent } from "@common/kafka/events/order.events";
 
 type SellerRecipientSource = {
   sellerOwnerId?: string | null;
@@ -34,7 +37,72 @@ type GroupedSellerRecipient = {
 
 @Injectable()
 export class OrderEventsService {
-  constructor(private readonly kafkaProducer: KafkaProducerService) {}
+  constructor(
+    private readonly kafkaProducer: KafkaProducerService,
+    @Optional() @InjectRepository(Order) private readonly orderRepository?: Repository<Order>,
+  ) {}
+
+  // Phát purchase completed sau khi order đã hoàn tất; Recommendation chỉ dùng event này làm positive signal.
+  async publishPurchaseCompleted(orderId: string): Promise<void> {
+    if (!this.orderRepository) return;
+    const order = await this.orderRepository.findOne({ where: { id: orderId }, relations: { items: true } });
+    if (!order) return;
+    const eventName = OrderEvents.PURCHASE_COMPLETED;
+    const event: OrderPurchaseEvent = {
+      eventId: `${eventName}:${order.id}`,
+      eventName,
+      eventVersion: 1,
+      source: "order-service",
+      occurredAt: order.completedAt?.toISOString() ?? new Date().toISOString(),
+      aggregateId: order.id,
+      data: {
+        orderId: order.id,
+        customerUserId: order.ownerId,
+        occurredAt: order.completedAt?.toISOString() ?? new Date().toISOString(),
+        items: (order.items ?? []).map((item) => ({
+          orderItemId: item.id,
+          productId: item.productId,
+          variantId: item.variantId,
+          categoryId: null,
+          quantity: item.quantity,
+        })),
+      },
+    };
+    await this.kafkaProducer.publish(eventName, event, order.id);
+  }
+
+  // Phát tín hiệu item đã hoàn về sau inspection để Recommendation trừ preference, không tính lại sản phẩm bị trả.
+  async publishPurchaseReturned(orderId: string, returnId: string, itemIds: string[]): Promise<void> {
+    if (!this.orderRepository || itemIds.length === 0) return;
+    const order = await this.orderRepository.findOne({ where: { id: orderId }, relations: { items: true } });
+    if (!order) return;
+    const selectedIds = new Set(itemIds);
+    const eventName = OrderEvents.PURCHASE_RETURNED;
+    const occurredAt = new Date().toISOString();
+    const event: OrderPurchaseEvent = {
+      eventId: `${eventName}:${returnId}`,
+      eventName,
+      eventVersion: 1,
+      source: "order-service",
+      occurredAt,
+      aggregateId: returnId,
+      data: {
+        orderId: order.id,
+        customerUserId: order.ownerId,
+        occurredAt,
+        items: (order.items ?? [])
+          .filter((item) => selectedIds.has(item.id))
+          .map((item) => ({
+            orderItemId: item.id,
+            productId: item.productId,
+            variantId: item.variantId,
+            categoryId: null,
+            quantity: item.quantity,
+          })),
+      },
+    };
+    await this.kafkaProducer.publish(eventName, event, returnId);
+  }
 
   // Phát sự kiện return sau khi transaction đã commit; Notification Service dùng eventId ổn định để chống trùng.
   async publishReturnChanged(input: {
