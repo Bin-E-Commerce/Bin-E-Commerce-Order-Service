@@ -30,6 +30,10 @@ export class OrderItem {
   @Column({ name: "variant_id", type: "uuid" })
   variantId!: string;
 
+  // Dữ liệu snapshot của sản phẩm tại thời điểm checkout; không tham chiếu entity Product Service.
+  @Column({ name: "category_id", type: "uuid", nullable: true })
+  categoryId!: string | null;
+
   @Column({ name: "seller_shop_id", type: "uuid", nullable: true })
   sellerShopId!: string | null;
 
@@ -61,12 +65,30 @@ export class OrderItem {
   @Column({ name: "package_weight_grams", type: "int", nullable: true })
   packageWeightGrams!: number | null;
 
-  @Column({ name: "package_length_cm", type: "numeric", precision: 10, scale: 2, nullable: true })
+  @Column({
+    name: "package_length_cm",
+    type: "numeric",
+    precision: 10,
+    scale: 2,
+    nullable: true,
+  })
   packageLengthCm!: string | null;
 
-  @Column({ name: "package_width_cm", type: "numeric", precision: 10, scale: 2, nullable: true })
+  @Column({
+    name: "package_width_cm",
+    type: "numeric",
+    precision: 10,
+    scale: 2,
+    nullable: true,
+  })
   packageWidthCm!: string | null;
 
-  @Column({ name: "package_height_cm", type: "numeric", precision: 10, scale: 2, nullable: true })
+  @Column({
+    name: "package_height_cm",
+    type: "numeric",
+    precision: 10,
+    scale: 2,
+    nullable: true,
+  })
   packageHeightCm!: string | null;
 }

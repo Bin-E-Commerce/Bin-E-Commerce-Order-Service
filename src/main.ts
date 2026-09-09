@@ -16,7 +16,7 @@ async function bootstrap(): Promise<void> {
   });
   const config = app.get(ConfigService);
   const isDev = config.get<string>("NODE_ENV") !== "production";
-  const port = config.get<number>("PORT", 3011);
+  const port = Number(config.get<string>("PORT", "3011"));
 
   app.use(helmet());
   app.setGlobalPrefix("api");

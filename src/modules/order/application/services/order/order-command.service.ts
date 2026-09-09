@@ -21,7 +21,6 @@ import { SellerShopClient } from "../../clients/seller-shop.client";
 import {
   ShippingClient,
   type GhnAddressSelectionInput,
-  type ShippingQuote,
 } from "../../clients/shipping.client";
 import {
   EmptyCartError,
@@ -320,7 +319,10 @@ export class OrderCommandService {
       throw new BadRequestException("Seller phải nhập lý do hủy đơn hàng.");
     }
     const order = await this.orderRepository.findSellerById(shopId, orderId);
-    if (!order) throw new NotFoundException("Không tìm thấy đơn hàng trong phạm vi shop.");
+    if (!order)
+      throw new NotFoundException(
+        "Không tìm thấy đơn hàng trong phạm vi shop.",
+      );
     return this.cancelOwnedOrder(order.ownerId, orderId, {
       ...dto,
       reason: normalizedReason,
@@ -349,13 +351,17 @@ export class OrderCommandService {
     deliveryConfirmationStatus: string;
     hasOpenDeliveryIssue: boolean;
   }> {
-    const order = await this.orderRepository.findReviewContextByItemId(orderItemId);
-    if (!order?.items?.[0]) throw new NotFoundException("Không tìm thấy sản phẩm trong đơn hàng.");
+    const order =
+      await this.orderRepository.findReviewContextByItemId(orderItemId);
+    if (!order?.items?.[0])
+      throw new NotFoundException("Không tìm thấy sản phẩm trong đơn hàng.");
     const item = order.items[0];
     const deliveredAt = order.deliveredAt ?? order.completedAt;
-    const openIssue = await this.dataSource.getRepository(OrderDeliveryIssue).exist({
-      where: { orderId: order.id, status: OrderDeliveryIssueStatus.OPEN },
-    });
+    const openIssue = await this.dataSource
+      .getRepository(OrderDeliveryIssue)
+      .exist({
+        where: { orderId: order.id, status: OrderDeliveryIssueStatus.OPEN },
+      });
     return {
       orderId: order.id,
       orderItemId: item.id,
@@ -376,9 +382,11 @@ export class OrderCommandService {
   async getOrderReviewContexts(ownerId: string, orderId: string) {
     const order = await this.orderRepository.findOwnedById(ownerId, orderId);
     if (!order) throw new NotFoundException("Không tìm thấy đơn hàng.");
-    const hasOpenDeliveryIssue = await this.dataSource.getRepository(OrderDeliveryIssue).exist({
-      where: { orderId, status: OrderDeliveryIssueStatus.OPEN },
-    });
+    const hasOpenDeliveryIssue = await this.dataSource
+      .getRepository(OrderDeliveryIssue)
+      .exist({
+        where: { orderId, status: OrderDeliveryIssueStatus.OPEN },
+      });
     const deliveredAt = order.deliveredAt ?? order.completedAt;
     return {
       orderId: order.id,
@@ -623,6 +631,7 @@ export class OrderCommandService {
           orderId: savedOrder.id,
           productId: item.productId,
           variantId: item.variantId,
+          categoryId: item.categoryId,
           sellerShopId: item.sellerShopId,
           sellerOwnerId: item.sellerOwnerId,
           sku: item.sku,
