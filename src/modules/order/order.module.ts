@@ -8,6 +8,7 @@ import { OrderStatusHistory } from "../../database/order/entities/order-status-h
 import { OrderController } from "./presentation/controllers/order.controller";
 import { SellerOrderController } from "./presentation/controllers/seller-order.controller";
 import { InternalOrderController } from "./presentation/controllers/internal-order.controller";
+import { InternalRecommendationController } from "./presentation/controllers/internal-recommendation.controller";
 import { AuthClient } from "./application/clients/auth.client";
 import { CartClient } from "./application/clients/cart.client";
 import { ProductClient } from "./application/clients/product.client";
@@ -40,6 +41,7 @@ import { ShipmentStatusConsumer } from "../../kafka/shipment-status.consumer";
     OrderController,
     SellerOrderController,
     InternalOrderController,
+    InternalRecommendationController,
   ],
   providers: [
     OrderRepository,

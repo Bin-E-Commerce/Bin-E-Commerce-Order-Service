@@ -40,6 +40,7 @@ export interface ShippingAddressResponse {
 export interface CheckoutQuoteItem {
   productId: string;
   variantId: string;
+  categoryId: string | null;
   sellerShopId: string | null;
   sellerOwnerId?: string | null;
   sku: string;

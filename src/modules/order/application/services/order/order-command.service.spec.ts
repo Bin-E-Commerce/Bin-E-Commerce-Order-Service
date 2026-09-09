@@ -98,6 +98,7 @@ describe("OrderCommandService", () => {
       {
         productId,
         variantId,
+        categoryId: null,
         sellerShopId: "shop-1",
         sellerOwnerId: "seller-1",
         sku: "SKU-001",

@@ -21,7 +21,7 @@ import { KafkaModule } from "./kafka/kafka.module";
       useFactory: (config: ConfigService) => ({
         type: "postgres" as const,
         host: config.get<string>("POSTGRES_HOST", "localhost"),
-        port: config.get<number>("POSTGRES_PORT", 5432),
+        port: Number(config.get<string>("POSTGRES_PORT", "5432")),
         username: config.get<string>("POSTGRES_USER"),
         password: config.get<string>("POSTGRES_PASSWORD"),
         database: config.get<string>("POSTGRES_DB"),
