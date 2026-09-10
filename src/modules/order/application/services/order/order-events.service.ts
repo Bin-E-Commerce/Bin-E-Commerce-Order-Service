@@ -1,9 +1,15 @@
 // File này chuyển order đã commit thành integration event cho Notification Service.
 // Service chỉ phát recipient đã được Product Service xác định bằng sellerOwnerId, không tự tin shopId từ browser.
 
-import { Injectable, Optional } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
+import { DataSource, EntityManager, In, Repository } from "typeorm";
 import {
   OrderCancelledEvent,
   OrderCreatedEvent,
@@ -16,6 +22,7 @@ import { Order } from "../../../../../database/order/entities/order.entity";
 import { fromCents, toCents } from "../../utils/order-money.util";
 import type { OrderPurchaseEvent } from "@common/kafka/events/order.events";
 import { OrderFulfillmentStatus } from "../../../../../database/order/enums/order-fulfillment-status.enum";
+import { OrderPurchaseEventOutboxEntity } from "../../../../../database/integration/entities/order-purchase-event-outbox.entity";
 
 type SellerRecipientSource = {
   sellerOwnerId?: string | null;
@@ -37,13 +44,34 @@ type GroupedSellerRecipient = {
 };
 
 @Injectable()
-export class OrderEventsService {
+export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(OrderEventsService.name);
+  private dispatchTimer?: NodeJS.Timeout;
+
   constructor(
     private readonly kafkaProducer: KafkaProducerService,
+    private readonly dataSource: DataSource,
     @Optional()
     @InjectRepository(Order)
     private readonly orderRepository?: Repository<Order>,
+    @Optional()
+    @InjectRepository(OrderPurchaseEventOutboxEntity)
+    private readonly purchaseOutboxRepository?: Repository<OrderPurchaseEventOutboxEntity>,
   ) {}
+
+  // Khởi động dispatcher để purchase outbox tiếp tục được gửi sau khi Kafka phục hồi.
+  onModuleInit(): void {
+    this.dispatchTimer = setInterval(
+      () => void this.dispatchPendingSafe(),
+      5000,
+    );
+    void this.dispatchPendingSafe();
+  }
+
+  // Dừng polling khi shutdown để test/watch mode không giữ process sống.
+  onModuleDestroy(): void {
+    if (this.dispatchTimer) clearInterval(this.dispatchTimer);
+  }
 
   // Replay completed purchase theo trang; eventId publishPurchaseCompleted ổn định nên downstream idempotent.
   async replayCompletedPurchases(
@@ -75,37 +103,53 @@ export class OrderEventsService {
     };
   }
 
-  // Phát purchase completed sau khi order đã hoàn tất; Recommendation chỉ dùng event này làm positive signal.
-  async publishPurchaseCompleted(orderId: string): Promise<void> {
-    if (!this.orderRepository) return;
-    const order = await this.orderRepository.findOne({
-      where: { id: orderId },
-      relations: { items: true },
-    });
-    if (!order) return;
-    const eventName = OrderEvents.PURCHASE_COMPLETED;
-    const event: OrderPurchaseEvent = {
-      eventId: `${eventName}:${order.id}`,
-      eventName,
-      eventVersion: 1,
-      source: "order-service",
-      occurredAt: order.completedAt?.toISOString() ?? new Date().toISOString(),
-      aggregateId: order.id,
-      data: {
-        orderId: order.id,
-        customerUserId: order.ownerId,
-        occurredAt:
-          order.completedAt?.toISOString() ?? new Date().toISOString(),
-        items: (order.items ?? []).map((item) => ({
-          orderItemId: item.id,
-          productId: item.productId,
-          variantId: item.variantId,
-          categoryId: item.categoryId ?? null,
-          quantity: item.quantity,
-        })),
-      },
+  // Ghi completed event vào outbox; caller truyền manager khi trạng thái order cũng đang trong transaction.
+  async enqueuePurchaseCompleted(
+    orderId: string,
+    manager?: EntityManager,
+  ): Promise<void> {
+    if (!this.orderRepository || !this.purchaseOutboxRepository) return;
+    const enqueue = async (
+      transactionManager: EntityManager,
+    ): Promise<void> => {
+      const order = await transactionManager.getRepository(Order).findOne({
+        where: { id: orderId },
+        relations: { items: true },
+      });
+      if (!order) return;
+      const event = this.toPurchaseEvent(
+        order,
+        OrderEvents.PURCHASE_COMPLETED,
+        order.id,
+      );
+      await transactionManager
+        .getRepository(OrderPurchaseEventOutboxEntity)
+        .createQueryBuilder()
+        .insert()
+        .into(OrderPurchaseEventOutboxEntity)
+        .values({
+          eventId: event.eventId,
+          topic: event.eventName,
+          aggregateId: event.aggregateId,
+          payload: event,
+          status: "PENDING",
+          availableAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .orIgnore()
+        .execute();
     };
-    await this.kafkaProducer.publish(eventName, event, order.id);
+    if (manager) {
+      await enqueue(manager);
+      return;
+    }
+    await this.dataSource.transaction(enqueue);
+  }
+
+  // Tương thích với caller cũ; event đã bền vững trong outbox rồi mới thử gửi ngay.
+  async publishPurchaseCompleted(orderId: string): Promise<void> {
+    await this.enqueuePurchaseCompleted(orderId);
+    await this.dispatchPendingSafe();
   }
 
   // Phát tín hiệu item đã hoàn về sau inspection để Recommendation trừ preference, không tính lại sản phẩm bị trả.
@@ -113,29 +157,79 @@ export class OrderEventsService {
     orderId: string,
     returnId: string,
     itemIds: string[],
+    manager?: EntityManager,
   ): Promise<void> {
-    if (!this.orderRepository || itemIds.length === 0) return;
-    const order = await this.orderRepository.findOne({
-      where: { id: orderId },
-      relations: { items: true },
-    });
-    if (!order) return;
-    const selectedIds = new Set(itemIds);
-    const eventName = OrderEvents.PURCHASE_RETURNED;
-    const occurredAt = new Date().toISOString();
-    const event: OrderPurchaseEvent = {
-      eventId: `${eventName}:${returnId}`,
+    if (
+      !this.orderRepository ||
+      !this.purchaseOutboxRepository ||
+      itemIds.length === 0
+    )
+      return;
+    const enqueue = async (
+      transactionManager: EntityManager,
+    ): Promise<void> => {
+      const order = await transactionManager.getRepository(Order).findOne({
+        where: { id: orderId },
+        relations: { items: true },
+      });
+      if (!order) return;
+      const selectedIds = new Set(itemIds);
+      const event = this.toPurchaseEvent(
+        order,
+        OrderEvents.PURCHASE_RETURNED,
+        returnId,
+        selectedIds,
+      );
+      await transactionManager
+        .getRepository(OrderPurchaseEventOutboxEntity)
+        .createQueryBuilder()
+        .insert()
+        .into(OrderPurchaseEventOutboxEntity)
+        .values({
+          eventId: event.eventId,
+          topic: event.eventName,
+          aggregateId: event.aggregateId,
+          payload: event,
+          status: "PENDING",
+          availableAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .orIgnore()
+        .execute();
+    };
+    if (manager) {
+      // Khi đang ở source transaction, chỉ ghi outbox; dispatcher chỉ được gửi sau commit.
+      await enqueue(manager);
+      return;
+    }
+    await this.dataSource.transaction(enqueue);
+    await this.dispatchPendingSafe();
+  }
+
+  // Chuẩn hóa purchase event từ order snapshot và chỉ chọn item hợp lệ khi có return correction.
+  private toPurchaseEvent(
+    order: Order,
+    eventName: OrderPurchaseEvent["eventName"],
+    aggregateId: string,
+    selectedItemIds?: Set<string>,
+  ): OrderPurchaseEvent {
+    const occurredAt =
+      eventName === OrderEvents.PURCHASE_COMPLETED
+        ? (order.completedAt?.toISOString() ?? new Date().toISOString())
+        : new Date().toISOString();
+    return {
+      eventId: `${eventName}:${aggregateId}`,
       eventName,
       eventVersion: 1,
       source: "order-service",
       occurredAt,
-      aggregateId: returnId,
+      aggregateId,
       data: {
         orderId: order.id,
         customerUserId: order.ownerId,
         occurredAt,
         items: (order.items ?? [])
-          .filter((item) => selectedIds.has(item.id))
+          .filter((item) => !selectedItemIds || selectedItemIds.has(item.id))
           .map((item) => ({
             orderItemId: item.id,
             productId: item.productId,
@@ -145,7 +239,74 @@ export class OrderEventsService {
           })),
       },
     };
-    await this.kafkaProducer.publish(eventName, event, returnId);
+  }
+
+  // Claim tối đa 20 outbox row bằng SKIP LOCKED để nhiều replica gửi song song mà không gửi trùng do cạnh tranh claim.
+  private async dispatchPending(): Promise<void> {
+    if (!this.purchaseOutboxRepository) return;
+    await this.purchaseOutboxRepository.query(
+      `UPDATE order_purchase_event_outbox
+          SET status = 'PENDING', updated_at = now()
+        WHERE status = 'PROCESSING' AND updated_at < now() - INTERVAL '1 minute'`,
+    );
+    const claimed = (await this.purchaseOutboxRepository.query(
+      `WITH claimed AS (
+         SELECT event_id FROM order_purchase_event_outbox
+         WHERE status = 'PENDING' AND available_at <= now()
+         ORDER BY created_at ASC
+         FOR UPDATE SKIP LOCKED LIMIT 20
+       )
+       UPDATE order_purchase_event_outbox outbox
+          SET status = 'PROCESSING', updated_at = now()
+         FROM claimed
+        WHERE outbox.event_id = claimed.event_id
+      RETURNING outbox.event_id`,
+    )) as Array<{ event_id: string }>;
+    if (claimed.length === 0) return;
+    const rows = await this.purchaseOutboxRepository.find({
+      where: { eventId: In(claimed.map((row) => row.event_id)) },
+      order: { createdAt: "ASC" },
+    });
+    for (const row of rows) {
+      const published = await this.kafkaProducer.publish(
+        row.topic,
+        row.payload,
+        row.aggregateId,
+      );
+      if (published) {
+        await this.purchaseOutboxRepository.update(
+          { eventId: row.eventId },
+          {
+            status: "PUBLISHED",
+            publishedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        );
+      } else {
+        const attemptCount = row.attemptCount + 1;
+        const delaySeconds = Math.min(3600, 2 ** Math.min(attemptCount, 10));
+        await this.purchaseOutboxRepository.update(
+          { eventId: row.eventId },
+          {
+            status: "PENDING",
+            attemptCount,
+            availableAt: new Date(Date.now() + delaySeconds * 1000),
+            updatedAt: new Date(),
+          },
+        );
+      }
+    }
+  }
+
+  // Bọc lỗi dispatcher để Kafka/database tạm lỗi không làm unhandled rejection trong Nest process.
+  private async dispatchPendingSafe(): Promise<void> {
+    try {
+      await this.dispatchPending();
+    } catch (error) {
+      this.logger.warn(
+        `Order purchase outbox deferred: ${error instanceof Error ? error.message : "unknown"}`,
+      );
+    }
   }
 
   // Phát sự kiện return sau khi transaction đã commit; Notification Service dùng eventId ổn định để chống trùng.

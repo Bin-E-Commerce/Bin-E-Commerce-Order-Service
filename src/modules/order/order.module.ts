@@ -25,6 +25,7 @@ import { OrderDeliveryIssue } from "../../database/delivery/entities/order-deliv
 import { OrderDeliveryConfirmationService } from "./application/services/delivery/order-delivery-confirmation.service";
 import { OrderDeliveryAutomationService } from "./application/services/delivery/order-delivery-automation.service";
 import { ShipmentStatusConsumer } from "../../kafka/shipment-status.consumer";
+import { OrderPurchaseEventOutboxEntity } from "../../database/integration/entities/order-purchase-event-outbox.entity";
 
 // Module chỉ expose controller Order; cross-service call được giữ trong client adapter tương ứng.
 @Module({
@@ -35,6 +36,7 @@ import { ShipmentStatusConsumer } from "../../kafka/shipment-status.consumer";
       OrderStatusHistory,
       OrderReturnRequest,
       OrderDeliveryIssue,
+      OrderPurchaseEventOutboxEntity,
     ]),
   ],
   controllers: [
