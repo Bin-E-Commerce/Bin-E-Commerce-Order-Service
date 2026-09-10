@@ -180,6 +180,7 @@ export class OrderDeliveryConfirmationService {
         order.deliveryConfirmedAt = new Date();
         order.completedAt = order.deliveryConfirmedAt;
         await manager.getRepository(Order).save(order);
+        await this.orderEvents.enqueuePurchaseCompleted?.(orderId, manager);
         eventStatus = "confirmed";
         return;
       }
@@ -228,7 +229,6 @@ export class OrderDeliveryConfirmationService {
 
     if (eventStatus === "confirmed") {
       await this.orderEvents.publishDeliveryConfirmed(orderId);
-      await this.orderEvents.publishPurchaseCompleted?.(orderId);
     }
     if (eventStatus === "issue") await this.orderEvents.publishDeliveryIssueReported(orderId);
 
@@ -264,12 +264,12 @@ export class OrderDeliveryConfirmationService {
       order.deliveryConfirmedAt = new Date();
       order.completedAt = order.deliveryConfirmedAt;
       await manager.getRepository(Order).save(order);
+      await this.orderEvents.enqueuePurchaseCompleted?.(orderId, manager);
       changed = true;
     });
 
     if (changed) {
       await this.orderEvents.publishDeliveryAutoConfirmed(orderId);
-      await this.orderEvents.publishPurchaseCompleted?.(orderId);
     }
     return changed;
   }

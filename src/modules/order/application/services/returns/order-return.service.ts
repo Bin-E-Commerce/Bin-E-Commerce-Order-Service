@@ -9,7 +9,7 @@ import {
   Optional,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { In, QueryFailedError, Repository } from "typeorm";
+import { DataSource, In, QueryFailedError, Repository } from "typeorm";
 import { OrderReturnRequest } from "../../../../../database/returns/entities/order-return-request.entity";
 import { OrderReturnReason } from "../../../../../database/returns/enums/order-return-reason.enum";
 import {
@@ -49,6 +49,7 @@ export class OrderReturnService {
     private readonly sellerShopClient: SellerShopClient,
     private readonly events: OrderEventsService,
     @Optional() private readonly shippingClient?: ShippingClient,
+    @Optional() private readonly dataSource?: DataSource,
   ) {}
 
   // Tạo một request cho đúng một shop; UI nhiều shop phải gọi lại endpoint theo từng nhóm item.
@@ -410,35 +411,53 @@ export class OrderReturnService {
     returnId: string,
     dto: InspectOrderReturnDto,
   ) {
+    if (!this.dataSource) {
+      throw new Error("Order DataSource is required for return inspection.");
+    }
     const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
-    const request = await this.repository.findOne({
-      where: { id: returnId, shopId },
+    const result = await this.dataSource.transaction(async (manager) => {
+      const requestRepository = manager.getRepository(OrderReturnRequest);
+      const request = await requestRepository.findOne({
+        where: { id: returnId, shopId },
+        lock: { mode: "pessimistic_write" },
+      });
+      if (!request)
+        throw new NotFoundException("Không tìm thấy yêu cầu hoàn hàng.");
+      if (request.status !== OrderReturnStatus.RECEIVED)
+        throw new ConflictException("Hàng hoàn chưa được ghi nhận tại shop.");
+      request.inspectionPassed = dto.passed;
+      request.inspectionNote = dto.note?.trim() || null;
+      request.inspectedAt = new Date();
+      request.status = dto.passed
+        ? OrderReturnStatus.REFUND_PENDING
+        : OrderReturnStatus.INSPECTION_FAILED;
+      const saved = await requestRepository.save(request);
+      const order = await manager.getRepository(Order).findOne({
+        where: { id: request.orderId },
+        relations: { items: true },
+      });
+      if (dto.passed) {
+        await this.events.publishPurchaseReturned?.(
+          request.orderId,
+          request.id,
+          request.itemIds,
+          manager,
+        );
+      }
+      return {
+        saved,
+        orderNumber: order?.orderNumber ?? "",
+        ownerId: request.ownerId,
+        orderId: request.orderId,
+      };
     });
-    if (!request)
-      throw new NotFoundException("Không tìm thấy yêu cầu hoàn hàng.");
-    if (request.status !== OrderReturnStatus.RECEIVED)
-      throw new ConflictException("Hàng hoàn chưa được ghi nhận tại shop.");
-    request.inspectionPassed = dto.passed;
-    request.inspectionNote = dto.note?.trim() || null;
-    request.inspectedAt = new Date();
-    request.status = dto.passed
-      ? OrderReturnStatus.REFUND_PENDING
-      : OrderReturnStatus.INSPECTION_FAILED;
-    const saved = await this.repository.save(request);
-    const order = await this.orders.findOwnedById(
-      request.ownerId,
-      request.orderId,
-    );
     await this.publish(
-      saved,
-      order?.orderNumber ?? "",
-      request.ownerId,
+      result.saved,
+      result.orderNumber,
+      result.ownerId,
       dto.passed ? "return.inspection.passed" : "return.inspection.failed",
     );
-    if (dto.passed) {
-      await this.events.publishPurchaseReturned?.(request.orderId, request.id, request.itemIds);
-    }
-    return saved;
+    return result.saved;
   }
 
   private validateEvidence(dto: CreateOrderReturnDto): void {

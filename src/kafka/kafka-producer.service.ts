@@ -47,15 +47,17 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
     await this.producer.disconnect().catch(() => void 0);
   }
 
-  // Gửi event theo aggregate key để các thay đổi của cùng order giữ đúng thứ tự trong Kafka partition.
-  async publish(topic: string, payload: unknown, aggregateKey: string): Promise<void> {
+  // Trả kết quả publish để outbox chỉ chuyển PUBLISHED sau khi Kafka xác nhận thành công.
+  async publish(topic: string, payload: unknown, aggregateKey: string): Promise<boolean> {
     try {
       await this.producer.send({
         topic,
         messages: [{ key: aggregateKey, value: JSON.stringify(payload) }],
       });
+      return true;
     } catch (error) {
       this.logger.error(`Failed to publish to topic "${topic}": ${String(error)}`);
+      return false;
     }
   }
 }
