@@ -9,7 +9,7 @@ import {
   Optional,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { DataSource, EntityManager, In, Repository } from "typeorm";
+import { DataSource, EntityManager, Repository } from "typeorm";
 import {
   OrderCancelledEvent,
   OrderCreatedEvent,
@@ -47,6 +47,7 @@ type GroupedSellerRecipient = {
 export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OrderEventsService.name);
   private dispatchTimer?: NodeJS.Timeout;
+  private dispatching = false;
 
   constructor(
     private readonly kafkaProducer: KafkaProducerService,
@@ -241,7 +242,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  // Claim tối đa 20 outbox row bằng SKIP LOCKED để nhiều replica gửi song song mà không gửi trùng do cạnh tranh claim.
+  // Claim tối đa 20 outbox row bằng SKIP LOCKED và trả luôn payload để không có khoảng lệch giữa bước claim và bước đọc event.
   private async dispatchPending(): Promise<void> {
     if (!this.purchaseOutboxRepository) return;
     await this.purchaseOutboxRepository.query(
@@ -249,9 +250,10 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
           SET status = 'PENDING', updated_at = now()
         WHERE status = 'PROCESSING' AND updated_at < now() - INTERVAL '1 minute'`,
     );
-    const claimed = (await this.purchaseOutboxRepository.query(
+    const [rows] = (await this.purchaseOutboxRepository.query(
       `WITH claimed AS (
-         SELECT event_id FROM order_purchase_event_outbox
+         SELECT event_id
+           FROM order_purchase_event_outbox
          WHERE status = 'PENDING' AND available_at <= now()
          ORDER BY created_at ASC
          FOR UPDATE SKIP LOCKED LIMIT 20
@@ -260,22 +262,31 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
           SET status = 'PROCESSING', updated_at = now()
          FROM claimed
         WHERE outbox.event_id = claimed.event_id
-      RETURNING outbox.event_id`,
-    )) as Array<{ event_id: string }>;
-    if (claimed.length === 0) return;
-    const rows = await this.purchaseOutboxRepository.find({
-      where: { eventId: In(claimed.map((row) => row.event_id)) },
-      order: { createdAt: "ASC" },
-    });
+      RETURNING outbox.event_id AS event_id,
+                outbox.topic AS topic,
+                outbox.aggregate_id AS aggregate_id,
+                outbox.payload AS payload,
+                outbox.attempt_count AS attempt_count`,
+    )) as [
+      Array<{
+        event_id: string;
+        topic: string;
+        aggregate_id: string;
+        payload: OrderPurchaseEvent;
+        attempt_count: number;
+      }>,
+      number,
+    ];
+    if (rows.length === 0) return;
     for (const row of rows) {
       const published = await this.kafkaProducer.publish(
         row.topic,
         row.payload,
-        row.aggregateId,
+        row.aggregate_id,
       );
       if (published) {
         await this.purchaseOutboxRepository.update(
-          { eventId: row.eventId },
+          { eventId: row.event_id },
           {
             status: "PUBLISHED",
             publishedAt: new Date(),
@@ -283,10 +294,10 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
           },
         );
       } else {
-        const attemptCount = row.attemptCount + 1;
+        const attemptCount = row.attempt_count + 1;
         const delaySeconds = Math.min(3600, 2 ** Math.min(attemptCount, 10));
         await this.purchaseOutboxRepository.update(
-          { eventId: row.eventId },
+          { eventId: row.event_id },
           {
             status: "PENDING",
             attemptCount,
@@ -300,12 +311,17 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
 
   // Bọc lỗi dispatcher để Kafka/database tạm lỗi không làm unhandled rejection trong Nest process.
   private async dispatchPendingSafe(): Promise<void> {
+    // Chỉ cho phép một vòng dispatcher chạy để tránh nhiều timer cùng claim một outbox row khi Kafka chậm.
+    if (this.dispatching) return;
+    this.dispatching = true;
     try {
       await this.dispatchPending();
     } catch (error) {
       this.logger.warn(
         `Order purchase outbox deferred: ${error instanceof Error ? error.message : "unknown"}`,
       );
+    } finally {
+      this.dispatching = false;
     }
   }
 
