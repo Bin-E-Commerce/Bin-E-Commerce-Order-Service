@@ -1,0 +1,28 @@
+# Dockerfile dùng context root repository, vì vậy mặc định loại toàn bộ context.
+*
+
+# Chỉ giữ manifest và cấu hình cần cho compiler của Order Service.
+!tsconfig.base.json
+!packages/
+!packages/common/
+!packages/common/**
+!services/
+!services/order-service/
+!services/order-service/package.json
+!services/order-service/package-lock.json
+!services/order-service/tsconfig.json
+!services/order-service/tsconfig.build.json
+!services/order-service/nest-cli.json
+!services/order-service/src/
+!services/order-service/src/**
+
+# Không gửi dependency, artifact, secret và file phát triển vào build context.
+**/node_modules
+**/dist
+**/coverage
+**/.env
+**/.env.*
+**/.git
+**/.gitignore
+**/.vscode
+**/*.log
