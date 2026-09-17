@@ -75,7 +75,7 @@ The service currently supports a COD payment method. Payment provider integratio
 | HTTP prefix | /api |
 | URI version | v1 |
 | Development docs | /docs |
-| Health endpoint | /api/health |
+| Health endpoint | /api/v1/health |
 | Primary database | PostgreSQL + TypeORM |
 | Payment method currently supported | COD |
 | Synchronous dependencies | Cart, Product, Auth, Seller, Shipping |
@@ -217,7 +217,7 @@ The service expects PostgreSQL and the configured Cart, Product, Auth, Seller an
 ### 6.2. Check health and docs
 
 ~~~powershell
-curl http://localhost:3011/api/health
+curl http://localhost:3011/api/v1/health
 ~~~
 
 Open http://localhost:3011/docs in development to inspect the generated order contract.
@@ -513,7 +513,7 @@ Shipping Service
 
 ## 16. API Surface
 
-All public application routes use /api/v1. Health is /api/health.
+All public application routes use /api/v1. Health is /api/v1/health.
 
 ### Customer order API
 
@@ -829,7 +829,7 @@ Monitor:
 The following facts should be verified during deployment:
 
 1. Order Service uses port 3011 in its environment template.
-2. CART_SERVICE_URL currently points to localhost:3010 in the Order template, while the Cart Service has a different standalone default in its own configuration. Align the full-stack wiring before testing checkout.
+2. Local standalone runs use CART_SERVICE_URL=http://localhost:3010; Docker Compose uses http://cart-service:3003. Keep the endpoint matching the execution mode.
 3. The service currently supports COD as the declared payment method. Payment status fields do not prove that an external payment gateway is implemented.
 4. Order and item snapshots are intentionally historical. They should not be used to answer current price or inventory questions.
 5. Kafka producer failure is designed not to roll back a committed order; the purchase outbox is the recovery boundary.
