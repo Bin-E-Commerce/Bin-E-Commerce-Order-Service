@@ -22,4 +22,8 @@ export class CreateCodOrderDto {
   @IsString({ message: "note phải là chuỗi." })
   @MaxLength(500, { message: "note không được dài quá 500 ký tự." })
   note?: string;
+
+  @IsOptional()
+  @IsUUID("4", { message: "cartItemId phải là UUID hợp lệ." })
+  cartItemId?: string;
 }

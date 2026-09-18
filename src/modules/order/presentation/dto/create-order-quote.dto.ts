@@ -1,5 +1,5 @@
 // DTO quote chỉ nhận địa chỉ giao và phương thức thanh toán; cart, giá và shop được đọc server-side.
-import { IsEnum, IsUUID } from "class-validator";
+import { IsEnum, IsOptional, IsUUID } from "class-validator";
 import { PaymentMethod } from "../../../../database/order/enums/payment-method.enum";
 
 // Request dùng trước checkout để hiển thị phí vận chuyển tạm tính.
@@ -9,4 +9,8 @@ export class CreateOrderQuoteDto {
 
   @IsEnum(PaymentMethod)
   paymentMethod!: PaymentMethod;
+
+  @IsOptional()
+  @IsUUID("4")
+  cartItemId?: string;
 }

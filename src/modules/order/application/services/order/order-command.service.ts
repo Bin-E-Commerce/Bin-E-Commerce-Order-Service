@@ -92,7 +92,9 @@ export class OrderCommandService {
       return this.responseMapper.toResponse(previousOrder);
     }
 
-    const cart = await this.cartClient.getActiveCart(ownerId);
+    const cart = dto.cartItemId
+      ? await this.cartClient.getActiveCart(ownerId, dto.cartItemId)
+      : await this.cartClient.getActiveCart(ownerId);
     if (cart.items.length === 0) throw new EmptyCartError();
 
     const address = await this.authClient.getOwnedAddress(
@@ -186,7 +188,11 @@ export class OrderCommandService {
     }
 
     try {
-      await this.cartClient.checkoutCart(ownerId);
+      if (dto.cartItemId) {
+        await this.cartClient.checkoutCart(ownerId, dto.cartItemId);
+      } else {
+        await this.cartClient.checkoutCart(ownerId);
+      }
       return this.responseMapper.toResponse(savedOrder);
     } catch {
       // Order và stock đã hợp lệ; trả order thành công kèm cảnh báo để retry cleanup không tạo order trùng.
@@ -201,11 +207,14 @@ export class OrderCommandService {
     ownerId: string,
     shippingAddressId: string,
     paymentMethod: PaymentMethod,
+    cartItemId?: string,
   ) {
     if (!ownerId?.trim()) throw new BadRequestException("Thiếu user context.");
     if (paymentMethod !== PaymentMethod.COD)
       throw new BadRequestException("Chỉ hỗ trợ thanh toán COD.");
-    const cart = await this.cartClient.getActiveCart(ownerId);
+    const cart = cartItemId
+      ? await this.cartClient.getActiveCart(ownerId, cartItemId)
+      : await this.cartClient.getActiveCart(ownerId);
     if (cart.items.length === 0) throw new EmptyCartError();
     const address = await this.authClient.getOwnedAddress(
       ownerId,
@@ -794,7 +803,8 @@ export class OrderCommandService {
 
   // Fingerprint giúp cùng idempotency key không bị tái sử dụng cho địa chỉ hoặc phương thức khác.
   private createFingerprint(dto: CreateCodOrderDto): string {
-    return `${dto.shippingAddressId}|${dto.paymentMethod}|${dto.note?.trim() ?? ""}`;
+    const base = `${dto.shippingAddressId}|${dto.paymentMethod}|${dto.note?.trim() ?? ""}`;
+    return dto.cartItemId ? `${base}|${dto.cartItemId}` : base;
   }
 
   // Kiểm tra context do Gateway inject trước khi chạm vào database hoặc service downstream.

@@ -16,6 +16,8 @@ import { OrderDeliveryConfirmationService } from "../modules/order/application/s
 export class ShipmentStatusConsumer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ShipmentStatusConsumer.name);
   private readonly consumer: Consumer;
+  private readonly reconnectDelayMs = 5000;
+  private isStopping = false;
 
   constructor(
     private readonly config: ConfigService,
@@ -38,28 +40,46 @@ export class ShipmentStatusConsumer implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  // Subscribe topic sau khi app khởi động; lỗi kết nối được log để không làm HTTP checkout bị sập theo Kafka.
+  // Khởi chạy consumer nền để HTTP vẫn sẵn sàng và consumer tự thử lại nếu Kafka/topic khởi động chậm.
   async onModuleInit(): Promise<void> {
-    try {
-      await this.consumer.connect();
-      await this.consumer.subscribe({
-        topic: "shipment.status.updated",
-        fromBeginning: true,
-      });
-      await this.consumer.run({
-        eachMessage: async ({ message }) =>
-          this.handleMessage(message.value?.toString()),
-      });
-      this.logger.log("Shipment status consumer connected");
-    } catch (error) {
-      this.logger.warn(
-        `Shipment status consumer connect failed (non-fatal): ${String(error)}`,
-      );
+    void this.connectWithRetry();
+  }
+
+  // Thử kết nối lại khi Kafka chưa quảng bá topic-partition lúc Order Service khởi động.
+  private async connectWithRetry(): Promise<void> {
+    while (!this.isStopping) {
+      try {
+        await this.consumer.connect();
+        await this.consumer.subscribe({
+          topic: "shipment.status.updated",
+          fromBeginning: true,
+        });
+        await this.consumer.run({
+          eachMessage: async ({ message }) =>
+            this.handleMessage(message.value?.toString()),
+        });
+        this.logger.log("Shipment status consumer connected");
+        return;
+      } catch (error) {
+        this.logger.warn(
+          `Shipment status consumer connect failed; retrying in ${this.reconnectDelayMs}ms: ${String(error)}`,
+        );
+        await this.consumer.disconnect().catch(() => undefined);
+        await this.waitBeforeReconnect();
+      }
     }
   }
 
-  // Disconnect consumer khi Nest shutdown để không giữ socket Kafka và không tạo process treo trong dev.
+  // Chờ giữa các lần thử để tránh tạo vòng lặp reconnect liên tục khi hạ tầng chưa sẵn sàng.
+  private async waitBeforeReconnect(): Promise<void> {
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, this.reconnectDelayMs),
+    );
+  }
+
+  // Đánh dấu dừng trước khi đóng consumer để retry nền không kết nối lại trong lúc Nest shutdown.
   async onModuleDestroy(): Promise<void> {
+    this.isStopping = true;
     await this.consumer.disconnect().catch(() => undefined);
   }
 

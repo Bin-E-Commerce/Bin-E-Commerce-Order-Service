@@ -1,6 +1,20 @@
 // Controller này công bố checkout, quote và order API; ownership luôn lấy từ x-user-id do Gateway xác thực.
-import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from "@nestjs/common";
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from "@nestjs/swagger";
 import { CancelOrderDto } from "../dto/cancel-order.dto";
 import { CreateCodOrderDto } from "../dto/create-cod-order.dto";
 import { CreateOrderQuoteDto } from "../dto/create-order-quote.dto";
@@ -10,7 +24,10 @@ import { OrderCommandService } from "../../application/services/order/order-comm
 import { OrderReturnService } from "../../application/services/returns/order-return.service";
 import { OrderDeliveryConfirmationService } from "../../application/services/delivery/order-delivery-confirmation.service";
 import { DeliveryConfirmationDto } from "../dto/delivery-confirmation.dto";
-import type { OrderListResponse, OrderResponse } from "../../application/types/order-response.type";
+import type {
+  OrderListResponse,
+  OrderResponse,
+} from "../../application/types/order-response.type";
 
 // Public Order API được Gateway bảo vệ bằng JWT và permission tương ứng.
 @ApiTags("orders")
@@ -33,61 +50,108 @@ export class OrderController {
     return this.deliveryConfirmationService.confirm(ownerId, orderId, dto);
   }
 
-  // Tính phí trước checkout từ cart/address server-side, không nhận item hoặc coupon từ browser.
+  // Tính phí từ cart/address server-side; cartItemId tùy chọn để Mua ngay chỉ quote một dòng hàng.
   @Post("quote")
-  quote(@Headers("x-user-id") ownerId: string, @Body() dto: CreateOrderQuoteDto) {
-    return this.orderCommandService.quoteOrder(ownerId, dto.shippingAddressId, dto.paymentMethod);
+  quote(
+    @Headers("x-user-id") ownerId: string,
+    @Body() dto: CreateOrderQuoteDto,
+  ) {
+    return this.orderCommandService.quoteOrder(
+      ownerId,
+      dto.shippingAddressId,
+      dto.paymentMethod,
+      dto.cartItemId,
+    );
   }
 
   // Tạo order COD idempotent từ cart đang hoạt động.
   @Post()
   @ApiOperation({ summary: "Create a COD order from the active cart" })
   @ApiResponse({ status: 201, description: "COD order created", type: Object })
-  createCodOrder(@Headers("x-user-id") ownerId: string, @Headers("x-user-email") ownerEmail: string | undefined, @Headers("idempotency-key") idempotencyKey: string, @Body() dto: CreateCodOrderDto): Promise<OrderResponse> {
-    return this.orderCommandService.createCodOrder(ownerId, dto, idempotencyKey, ownerEmail);
+  createCodOrder(
+    @Headers("x-user-id") ownerId: string,
+    @Headers("x-user-email") ownerEmail: string | undefined,
+    @Headers("idempotency-key") idempotencyKey: string,
+    @Body() dto: CreateCodOrderDto,
+  ): Promise<OrderResponse> {
+    return this.orderCommandService.createCodOrder(
+      ownerId,
+      dto,
+      idempotencyKey,
+      ownerEmail,
+    );
   }
 
   // Customer gửi yêu cầu return cho item của chính order, service kiểm tra thời hạn và ownership.
   @Post(":orderId/returns")
-  createReturn(@Headers("x-user-id") ownerId: string, @Param("orderId", new ParseUUIDPipe()) orderId: string, @Body() dto: CreateOrderReturnDto) {
+  createReturn(
+    @Headers("x-user-id") ownerId: string,
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+    @Body() dto: CreateOrderReturnDto,
+  ) {
     return this.orderReturnService.create(ownerId, orderId, dto);
   }
 
   // Customer xem lịch sử return request thuộc order của mình.
   @Get(":orderId/returns")
-  listReturns(@Headers("x-user-id") ownerId: string, @Param("orderId", new ParseUUIDPipe()) orderId: string) {
+  listReturns(
+    @Headers("x-user-id") ownerId: string,
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+  ) {
     return this.orderReturnService.list(ownerId, orderId);
   }
 
   // Customer xem detail return bằng ownership ở Order Service.
   @Get("returns/:returnId")
-  getReturn(@Headers("x-user-id") ownerId: string, @Param("returnId", new ParseUUIDPipe()) returnId: string) {
+  getReturn(
+    @Headers("x-user-id") ownerId: string,
+    @Param("returnId", new ParseUUIDPipe()) returnId: string,
+  ) {
     return this.orderReturnService.getForCustomer(ownerId, returnId);
   }
 
   // Customer hủy request khi seller chưa xử lý.
   @Post("returns/:returnId/cancellation")
-  cancelReturn(@Headers("x-user-id") ownerId: string, @Param("returnId", new ParseUUIDPipe()) returnId: string) {
+  cancelReturn(
+    @Headers("x-user-id") ownerId: string,
+    @Param("returnId", new ParseUUIDPipe()) returnId: string,
+  ) {
     return this.orderReturnService.cancel(ownerId, returnId);
   }
 
   // Trả lịch sử order thuộc owner hiện tại theo stage/status và pagination.
   @Get()
   @ApiOperation({ summary: "List owned orders" })
-  listOwnedOrders(@Headers("x-user-id") ownerId: string, @Query() query: OrderListQueryDto): Promise<OrderListResponse> {
+  listOwnedOrders(
+    @Headers("x-user-id") ownerId: string,
+    @Query() query: OrderListQueryDto,
+  ): Promise<OrderListResponse> {
     return this.orderCommandService.listOwnedOrders(ownerId, query);
   }
 
   // Trả detail chỉ khi order thuộc owner hiện tại.
   @Get(":orderId")
   @ApiOperation({ summary: "Get an owned order" })
-  getOwnedOrder(@Headers("x-user-id") ownerId: string, @Param("orderId", new ParseUUIDPipe()) orderId: string): Promise<OrderResponse> {
+  getOwnedOrder(
+    @Headers("x-user-id") ownerId: string,
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+  ): Promise<OrderResponse> {
     return this.orderCommandService.getOwnedOrder(ownerId, orderId);
   }
 
   // Hủy order COD trước khi shipment được lấy hàng và release reservation.
   @Post(":orderId/cancel")
-  cancelOwnedOrder(@Headers("x-user-id") ownerId: string, @Headers("x-user-email") ownerEmail: string | undefined, @Param("orderId", new ParseUUIDPipe()) orderId: string, @Body() dto: CancelOrderDto): Promise<OrderResponse> {
-    return this.orderCommandService.cancelOwnedOrder(ownerId, orderId, dto, ownerEmail);
+  cancelOwnedOrder(
+    @Headers("x-user-id") ownerId: string,
+    @Headers("x-user-email") ownerEmail: string | undefined,
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+    @Body() dto: CancelOrderDto,
+  ): Promise<OrderResponse> {
+    return this.orderCommandService.cancelOwnedOrder(
+      ownerId,
+      orderId,
+      dto,
+      ownerEmail,
+    );
   }
 }
