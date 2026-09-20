@@ -187,19 +187,13 @@ export class OrderCommandService {
       await this.orderEvents.publishCreated(savedOrder, reservation.items);
     }
 
-    try {
-      if (dto.cartItemId) {
-        await this.cartClient.checkoutCart(ownerId, dto.cartItemId);
-      } else {
-        await this.cartClient.checkoutCart(ownerId);
-      }
-      return this.responseMapper.toResponse(savedOrder);
-    } catch {
-      // Order và stock đã hợp lệ; trả order thành công kèm cảnh báo để retry cleanup không tạo order trùng.
-      return this.responseMapper.toResponse(savedOrder, [
-        "Đơn đã được tạo nhưng giỏ hàng chưa được làm sạch. Hệ thống sẽ đồng bộ lại.",
-      ]);
-    }
+    // Order và stock đã commit; dọn cart là best-effort nên không chặn response checkout.
+    // Việc tách bước này khỏi critical path giảm thêm một HTTP hop sau khi mua hàng thành công.
+    const cleanupPromise = dto.cartItemId
+      ? this.cartClient.checkoutCart(ownerId, dto.cartItemId)
+      : this.cartClient.checkoutCart(ownerId);
+    void Promise.resolve(cleanupPromise).catch(() => undefined);
+    return this.responseMapper.toResponse(savedOrder);
   }
 
   // Quote phí theo từng shop sau khi Product Service đã xác nhận snapshot giá/quantity.
