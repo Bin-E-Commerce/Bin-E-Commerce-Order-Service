@@ -35,6 +35,17 @@ import { KafkaModule } from "./kafka/kafka.module";
           config.get<string>("POSTGRES_SSL", "false") === "true"
             ? { rejectUnauthorized: false }
             : false,
+        // Giữ tối thiểu một kết nối ấm và giới hạn pool để giảm độ trễ khi dùng PostgreSQL cloud.
+        extra: {
+          min: Number(config.get<string>("POSTGRES_POOL_MIN", "1")),
+          max: Number(config.get<string>("POSTGRES_POOL_MAX", "5")),
+          idleTimeoutMillis: Number(
+            config.get<string>("POSTGRES_IDLE_TIMEOUT_MS", "30000"),
+          ),
+          connectionTimeoutMillis: Number(
+            config.get<string>("POSTGRES_CONNECTION_TIMEOUT_MS", "10000"),
+          ),
+        },
         logging: config.get<string>("TYPEORM_LOGGING", "false") === "true",
       }),
     }),
