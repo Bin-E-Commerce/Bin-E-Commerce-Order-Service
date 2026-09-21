@@ -36,7 +36,10 @@ RUN npm prune --omit=dev
 # -----------------------------------------------------------------------------
 FROM node:20-alpine AS production
 
-RUN addgroup -g 1001 -S nodejs \
+# npm/npx chỉ cần ở builder để cài dependency; runtime chỉ chạy bằng node.
+# Loại chúng khỏi final image để không mang theo dependency/tooling không cần thiết của npm.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+  && addgroup -g 1001 -S nodejs \
   && adduser -S nestjs -u 1001
 
 WORKDIR /app

@@ -36,5 +36,8 @@
     "ts-jest": "^29.2.5",
     "tsc-alias": "^1.9.4",
     "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "multer": "2.4.0"
   }
 }
