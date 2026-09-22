@@ -8,6 +8,7 @@ import { ConfigService } from "@nestjs/config";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
+import { setupHttpObservability } from "../../../packages/common/observability/http-observability";
 
 // Khởi động HTTP server với validation chặt để payload lạ không lọt vào use case.
 async function bootstrap(): Promise<void> {
@@ -20,6 +21,8 @@ async function bootstrap(): Promise<void> {
 
   app.use(helmet());
   app.setGlobalPrefix("api");
+  // Đăng ký metrics RED và request ID trước khi service bắt đầu nhận traffic.
+  setupHttpObservability(app, "order-service");
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: "1" });
   app.useGlobalPipes(
     new ValidationPipe({
