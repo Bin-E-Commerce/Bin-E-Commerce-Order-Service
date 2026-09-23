@@ -19,7 +19,11 @@ COPY services/order-service/tsconfig.json services/order-service/tsconfig.build.
 # Cài đúng phiên bản trong lockfile; devDependency như TypeScript và tsc-alias
 # chỉ tồn tại ở builder để compile và rewrite alias @common/*.
 WORKDIR /app/services/order-service
-RUN npm ci --include=dev --ignore-scripts
+# Builder luôn giữ devDependency vì TypeScript và tsc-alias chỉ phục vụ compile.
+ENV NODE_ENV=development
+RUN npm ci --include=dev --bin-links=true --ignore-scripts \
+  && test -x node_modules/.bin/tsc \
+  && test -x node_modules/.bin/tsc-alias
 
 # Chỉ đưa source của Order vào build context; không kéo source service khác vào image.
 COPY services/order-service/src ./src
