@@ -1,14 +1,15 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "./dist",
-    "rootDir": "../../",
-    "strictPropertyInitialization": false,
-    "types": ["node", "jest"],
-    "paths": {
-      "@common/*": ["../../packages/common/*"]
-    }
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.spec.ts", "**/*.e2e-spec.ts"]
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        "outDir": "./dist",
+        "rootDir": "../../",
+        "strictPropertyInitialization": false,
+        "types": ["node", "jest"],
+        "paths": {
+            "@/*": ["./src/*"],
+            "@common/*": ["../../packages/common/*"]
+        }
+    },
+    "include": ["src/**/*"],
+    "exclude": ["node_modules", "dist", "**/*.e2e-spec.ts"]
 }
