@@ -17,6 +17,8 @@ import { OrderCommandService } from '@/modules/order/application/services/order/
 import { OrderReturnService } from '@/modules/order/application/services/returns/order-return.service';
 import { UpdateReturnShippingCostDto } from '@/modules/order/presentation/dto/order-return.dto';
 import { CancelOrderDto } from '@/modules/order/presentation/dto/cancel-order.dto';
+import { InternalSellerDashboardQueryDto } from '@/modules/order/presentation/dto/internal-seller-dashboard-query.dto';
+import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
 
 @Controller({ path: 'internal/orders', version: '1' })
 export class InternalOrderController {
@@ -24,6 +26,7 @@ export class InternalOrderController {
         private readonly orderCommandService: OrderCommandService,
         private readonly config: ConfigService,
         private readonly orderReturnService: OrderReturnService,
+        private readonly sellerDashboardOrderService: SellerDashboardOrderService,
     ) {}
 
     // Trả snapshot item của shop sau khi Order Service tự kiểm tra order thuộc shop được truyền qua internal context.
@@ -159,6 +162,23 @@ export class InternalOrderController {
         return this.orderCommandService.getSoldQuantities(
             sellerOwnerId,
             productIds,
+        );
+    }
+
+    // Seller Service dùng snapshot này để ghép dashboard; token nội bộ là lớp bảo vệ duy nhất của route service-to-service.
+    @Get('seller-dashboard')
+    getSellerDashboard(
+        @Query() query: InternalSellerDashboardQueryDto,
+        @Headers('x-internal-service-token') token: string,
+    ) {
+        this.assertInternalToken(token);
+        return this.sellerDashboardOrderService.getSnapshot(
+            query.shopId,
+            { from: new Date(query.from), to: new Date(query.to) },
+            {
+                from: new Date(query.previousFrom),
+                to: new Date(query.previousTo),
+            },
         );
     }
 
