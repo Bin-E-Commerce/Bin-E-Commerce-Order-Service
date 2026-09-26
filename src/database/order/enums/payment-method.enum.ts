@@ -2,5 +2,5 @@
 
 // COD là lựa chọn duy nhất vì payment gateway và webhook chưa thuộc Phase 1.
 export enum PaymentMethod {
-  COD = "COD",
+    COD = 'COD',
 }

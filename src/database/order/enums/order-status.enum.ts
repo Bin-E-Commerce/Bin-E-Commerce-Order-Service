@@ -2,8 +2,8 @@
 
 // PENDING và FAILED giữ chỗ cho các phase có workflow; Phase 1 chỉ xác nhận sau khi giữ tồn kho thành công.
 export enum OrderStatus {
-  PENDING = "PENDING",
-  CONFIRMED = "CONFIRMED",
-  FAILED = "FAILED",
-  CANCELLED = "CANCELLED",
+    PENDING = 'PENDING',
+    CONFIRMED = 'CONFIRMED',
+    FAILED = 'FAILED',
+    CANCELLED = 'CANCELLED',
 }

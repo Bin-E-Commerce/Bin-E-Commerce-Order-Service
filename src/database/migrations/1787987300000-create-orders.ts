@@ -1,17 +1,21 @@
 // Migration này tạo aggregate Order và các snapshot/audit record của Phase 1.
 
-import { MigrationInterface, QueryRunner } from "typeorm";
+import { MigrationInterface, QueryRunner } from 'typeorm';
 
 // Tạo schema độc lập, không phụ thuộc bảng của Cart, Auth hoặc Product Service.
 export class CreateOrders1787987300000 implements MigrationInterface {
-  name = "CreateOrders1787987300000";
+    name = 'CreateOrders1787987300000';
 
-  // Dựng enum, bảng, index và constraint cần cho checkout idempotent.
-  public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`);
-    await queryRunner.query(`CREATE TYPE "order_status_enum" AS ENUM ('PENDING', 'CONFIRMED', 'FAILED', 'CANCELLED')`);
-    await queryRunner.query(`CREATE TYPE "payment_method_enum" AS ENUM ('COD')`);
-    await queryRunner.query(`
+    // Dựng enum, bảng, index và constraint cần cho checkout idempotent.
+    public async up(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`);
+        await queryRunner.query(
+            `CREATE TYPE "order_status_enum" AS ENUM ('PENDING', 'CONFIRMED', 'FAILED', 'CANCELLED')`,
+        );
+        await queryRunner.query(
+            `CREATE TYPE "payment_method_enum" AS ENUM ('COD')`,
+        );
+        await queryRunner.query(`
       CREATE TABLE "orders" (
         "id" uuid NOT NULL DEFAULT gen_random_uuid(),
         "order_number" varchar(32) NOT NULL,
@@ -35,9 +39,13 @@ export class CreateOrders1787987300000 implements MigrationInterface {
         CONSTRAINT "ck_orders_total_non_negative" CHECK ("total_amount" >= 0)
       )
     `);
-    await queryRunner.query(`CREATE UNIQUE INDEX "uq_orders_owner_idempotency_key" ON "orders" ("owner_id", "idempotency_key")`);
-    await queryRunner.query(`CREATE INDEX "idx_orders_owner_created_at" ON "orders" ("owner_id", "created_at")`);
-    await queryRunner.query(`
+        await queryRunner.query(
+            `CREATE UNIQUE INDEX "uq_orders_owner_idempotency_key" ON "orders" ("owner_id", "idempotency_key")`,
+        );
+        await queryRunner.query(
+            `CREATE INDEX "idx_orders_owner_created_at" ON "orders" ("owner_id", "created_at")`,
+        );
+        await queryRunner.query(`
       CREATE TABLE "order_items" (
         "id" uuid NOT NULL DEFAULT gen_random_uuid(),
         "order_id" uuid NOT NULL,
@@ -58,8 +66,10 @@ export class CreateOrders1787987300000 implements MigrationInterface {
         CONSTRAINT "ck_order_items_line_total_non_negative" CHECK ("line_total" >= 0)
       )
     `);
-    await queryRunner.query(`CREATE INDEX "idx_order_items_order_id" ON "order_items" ("order_id")`);
-    await queryRunner.query(`
+        await queryRunner.query(
+            `CREATE INDEX "idx_order_items_order_id" ON "order_items" ("order_id")`,
+        );
+        await queryRunner.query(`
       CREATE TABLE "order_status_history" (
         "id" uuid NOT NULL DEFAULT gen_random_uuid(),
         "order_id" uuid NOT NULL,
@@ -71,15 +81,17 @@ export class CreateOrders1787987300000 implements MigrationInterface {
         CONSTRAINT "fk_order_status_history_order" FOREIGN KEY ("order_id") REFERENCES "orders"("id") ON DELETE CASCADE
       )
     `);
-    await queryRunner.query(`CREATE INDEX "idx_order_status_history_order_id" ON "order_status_history" ("order_id", "created_at")`);
-  }
+        await queryRunner.query(
+            `CREATE INDEX "idx_order_status_history_order_id" ON "order_status_history" ("order_id", "created_at")`,
+        );
+    }
 
-  // Rollback toàn bộ schema do migration này sở hữu theo thứ tự phụ thuộc.
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP TABLE "order_status_history"`);
-    await queryRunner.query(`DROP TABLE "order_items"`);
-    await queryRunner.query(`DROP TABLE "orders"`);
-    await queryRunner.query(`DROP TYPE "payment_method_enum"`);
-    await queryRunner.query(`DROP TYPE "order_status_enum"`);
-  }
+    // Rollback toàn bộ schema do migration này sở hữu theo thứ tự phụ thuộc.
+    public async down(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`DROP TABLE "order_status_history"`);
+        await queryRunner.query(`DROP TABLE "order_items"`);
+        await queryRunner.query(`DROP TABLE "orders"`);
+        await queryRunner.query(`DROP TYPE "payment_method_enum"`);
+        await queryRunner.query(`DROP TYPE "order_status_enum"`);
+    }
 }
