@@ -8,6 +8,7 @@ import { Order } from '@/database/order/entities/order.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
+import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import type {
@@ -59,6 +60,7 @@ export class SellerDashboardOrderService {
             orderStatusCounts,
             pendingReturns,
             latestOrders,
+            recentReturnOrders,
             topProducts,
         ] = await Promise.all([
             this.getSummary(shopId, currentRange),
@@ -67,6 +69,10 @@ export class SellerDashboardOrderService {
             this.getOrderStatusCounts(shopId),
             this.getPendingReturns(shopId),
             this.getLatestOrders(shopId),
+            this.getLatestOrders(
+                shopId,
+                OrderFulfillmentStatus.RETURN_REFUND,
+            ),
             this.getTopProducts(shopId, currentRange),
         ]);
 
@@ -77,6 +83,7 @@ export class SellerDashboardOrderService {
             orderStatusCounts,
             pendingReturns,
             latestOrders,
+            recentReturnOrders,
             topProducts,
         };
     }
@@ -250,51 +257,96 @@ export class SellerDashboardOrderService {
             .getCount();
     }
 
-    // Lấy năm order mới nhất và chỉ tính tiền/item thuộc shop hiện tại.
+    // Lấy tối đa năm đơn theo shop; truy vấn riêng RETURN_REFUND giúp đơn hoàn không bị chìm dưới đơn mới hơn.
     private async getLatestOrders(
         shopId: string,
+        fulfillmentStatus?: OrderFulfillmentStatus,
     ): Promise<SellerDashboardLatestOrder[]> {
-        const rows = await this.orderRepository
+        const query = this.orderRepository
             .createQueryBuilder('ord')
-            .innerJoin(
-                'ord.items',
-                'item',
-                `item.seller_shop_id = :shopId
-                 AND NOT EXISTS (
-                    SELECT 1 FROM order_return_requests return_request
-                    WHERE return_request.order_id = ord.id
-                      AND return_request.status IN (:...returnStatusesExcludedFromSales)
-                      AND return_request.item_ids @> jsonb_build_array(item.id::text)
-                 )`,
-                { shopId },
-            )
+            .innerJoin('ord.items', 'item', 'item.seller_shop_id = :shopId', {
+                shopId,
+            })
             .select('ord.id', 'id')
             .addSelect('ord.order_number', 'orderNumber')
             .addSelect('ord.status', 'status')
             .addSelect('ord.fulfillment_status', 'fulfillmentStatus')
             .addSelect('COALESCE(SUM(item.line_total), 0)', 'grossAmount')
             .addSelect('COALESCE(SUM(item.quantity), 0)', 'itemCount')
+            .addSelect('COUNT(item.id)', 'itemLineCount')
+            // Lý do lấy từ yêu cầu hoàn mới nhất trong cùng shop/đơn; scope shop không dựa riêng vào orderId.
+            .addSelect(
+                (subQuery) =>
+                    subQuery
+                        .select('return_request.reason')
+                        .from(OrderReturnRequest, 'return_request')
+                        .where('return_request.order_id = ord.id')
+                        .andWhere('return_request.shop_id = :shopId')
+                        .orderBy('return_request.requested_at', 'DESC')
+                        .limit(1),
+                'returnReason',
+            )
+            // Mô tả có thể rỗng theo schema; giữ null để câu trả lời không tự diễn giải thêm chi tiết.
+            .addSelect(
+                (subQuery) =>
+                    subQuery
+                        .select('return_request.description')
+                        .from(OrderReturnRequest, 'return_request')
+                        .where('return_request.order_id = ord.id')
+                        .andWhere('return_request.shop_id = :shopId')
+                        .orderBy('return_request.requested_at', 'DESC')
+                        .limit(1),
+                'returnDescription',
+            )
+            .addSelect(
+                `COALESCE(
+                    JSON_AGG(
+                        JSON_BUILD_OBJECT(
+                            'productId', item.product_id,
+                            'name', item.product_name,
+                            'thumbnailUrl', item.image_url,
+                            'quantity', item.quantity,
+                            'lineTotal', item.line_total
+                        ) ORDER BY item.id
+                    ),
+                    '[]'::json
+                )`,
+                'items',
+            )
             .addSelect('ord.created_at', 'createdAt')
             .groupBy('ord.id')
             .addGroupBy('ord.order_number')
             .addGroupBy('ord.status')
             .addGroupBy('ord.fulfillment_status')
             .addGroupBy('ord.created_at')
-            .orderBy('ord.created_at', 'DESC')
-            .setParameter(
-                'returnStatusesExcludedFromSales',
-                RETURN_STATUSES_EXCLUDED_FROM_SALES,
-            )
-            .limit(5)
-            .getRawMany<{
-                id: string;
-                orderNumber: string;
-                status: OrderStatus;
-                fulfillmentStatus: OrderFulfillmentStatus;
-                grossAmount: string;
-                itemCount: string;
-                createdAt: Date;
-            }>();
+            .orderBy('ord.created_at', 'DESC');
+
+        // Bản đọc chi tiết phải giữ item đang hoàn trả; bộ lọc loại hàng trả chỉ áp dụng phép tính doanh thu.
+        if (fulfillmentStatus) {
+            query.andWhere('ord.fulfillment_status = :fulfillmentStatus', {
+                fulfillmentStatus,
+            });
+        }
+
+        const rows = await query.limit(5).getRawMany<{
+            id: string;
+            orderNumber: string;
+            status: OrderStatus;
+            fulfillmentStatus: OrderFulfillmentStatus;
+            grossAmount: string;
+            itemCount: string;
+            itemLineCount: string;
+            returnReason: OrderReturnReason | null;
+            returnDescription: string | null;
+            items: Array<{
+                productId: string;
+                name: string;
+                thumbnailUrl: string | null;
+                quantity: number;
+                lineTotal: string;
+            }>;
+            createdAt: Date;
+        }>();
 
         return rows.map((row) => ({
             id: row.id,
@@ -303,6 +355,21 @@ export class SellerDashboardOrderService {
             fulfillmentStatus: row.fulfillmentStatus,
             grossAmount: Number(row.grossAmount),
             itemCount: Number(row.itemCount),
+            itemLineCount: Number(row.itemLineCount),
+            // Chỉ công khai reason/description trên đơn đang RETURN_REFUND; lịch sử return cũ không rò vào đơn trạng thái khác.
+            returnReason:
+                row.fulfillmentStatus === OrderFulfillmentStatus.RETURN_REFUND
+                    ? row.returnReason
+                    : null,
+            returnDescription:
+                row.fulfillmentStatus === OrderFulfillmentStatus.RETURN_REFUND
+                    ? row.returnDescription
+                    : null,
+            // Giới hạn ảnh/tên gửi lên dashboard và LLM; tổng số dòng vẫn cho UI biết còn mặt hàng nào bị gọn lại.
+            items: row.items.slice(0, 4).map((item) => ({
+                ...item,
+                lineTotal: Number(item.lineTotal),
+            })),
             createdAt: new Date(row.createdAt).toISOString(),
         }));
     }

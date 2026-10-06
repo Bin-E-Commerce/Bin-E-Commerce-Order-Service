@@ -3,6 +3,7 @@
 
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
+import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
 
 export interface SellerDashboardOrderSummary {
     grossRevenue: number;
@@ -33,7 +34,19 @@ export interface SellerDashboardLatestOrder {
     fulfillmentStatus: OrderFulfillmentStatus;
     grossAmount: number;
     itemCount: number;
+    itemLineCount: number;
+    returnReason?: OrderReturnReason | null;
+    returnDescription?: string | null;
+    items: SellerDashboardOrderItem[];
     createdAt: string;
+}
+
+export interface SellerDashboardOrderItem {
+    productId: string;
+    name: string;
+    thumbnailUrl: string | null;
+    quantity: number;
+    lineTotal: number;
 }
 
 export interface SellerDashboardTopProduct {
@@ -51,5 +64,6 @@ export interface SellerDashboardOrderSnapshot {
     orderStatusCounts: SellerDashboardOrderStatusCounts;
     pendingReturns: number;
     latestOrders: SellerDashboardLatestOrder[];
+    recentReturnOrders: SellerDashboardLatestOrder[];
     topProducts: SellerDashboardTopProduct[];
 }
