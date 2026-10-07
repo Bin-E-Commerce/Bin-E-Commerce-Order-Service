@@ -37,6 +37,7 @@ export interface SellerDashboardLatestOrder {
     itemLineCount: number;
     returnReason?: OrderReturnReason | null;
     returnDescription?: string | null;
+    cancelReason?: string | null;
     items: SellerDashboardOrderItem[];
     createdAt: string;
 }
@@ -65,5 +66,16 @@ export interface SellerDashboardOrderSnapshot {
     pendingReturns: number;
     latestOrders: SellerDashboardLatestOrder[];
     recentReturnOrders: SellerDashboardLatestOrder[];
+    recentReturnOrdersHasMore: boolean;
+    actionableOrders: SellerDashboardLatestOrder[];
+    actionableOrdersHasMore: boolean;
+    cancelledOrders: SellerDashboardLatestOrder[];
+    cancelledOrdersHasMore: boolean;
+    deliveredOrders: SellerDashboardLatestOrder[];
+    deliveredOrdersHasMore: boolean;
+    completedOrders: SellerDashboardLatestOrder[];
+    completedOrdersHasMore: boolean;
+    topProductsTotalCount: number;
+    topProductsHasMore: boolean;
     topProducts: SellerDashboardTopProduct[];
 }

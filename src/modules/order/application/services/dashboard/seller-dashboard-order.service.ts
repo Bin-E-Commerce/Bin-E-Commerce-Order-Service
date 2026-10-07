@@ -35,6 +35,14 @@ interface SellerDashboardDateRange {
     to: Date;
 }
 
+interface SellerDashboardOrderQuery {
+    fulfillmentStatus?: OrderFulfillmentStatus;
+    fulfillmentStatuses?: OrderFulfillmentStatus[];
+    orderStatus?: OrderStatus;
+    actionable?: boolean;
+    limit?: number;
+}
+
 @Injectable()
 export class SellerDashboardOrderService {
     constructor(
@@ -53,15 +61,21 @@ export class SellerDashboardOrderService {
         currentRange: SellerDashboardDateRange,
         previousRange: SellerDashboardDateRange,
     ): Promise<SellerDashboardOrderSnapshot> {
+        // Danh sách đơn theo nghiệp vụ dùng truy vấn riêng có giới hạn; latestOrders chỉ là bản xem nhanh chung.
+        // Queue và các nhóm trạng thái trả hasMore để không khiến model/UI xem trang bị cắt là toàn bộ kết quả.
         const [
             current,
             previous,
             revenueTrend,
             orderStatusCounts,
             pendingReturns,
-            latestOrders,
-            recentReturnOrders,
-            topProducts,
+            latestOrderPage,
+            recentReturnOrderPage,
+            actionableOrderPage,
+            cancelledOrderPage,
+            deliveredOrderPage,
+            completedOrderPage,
+            topProductsResult,
         ] = await Promise.all([
             this.getSummary(shopId, currentRange),
             this.getSummary(shopId, previousRange),
@@ -69,12 +83,31 @@ export class SellerDashboardOrderService {
             this.getOrderStatusCounts(shopId),
             this.getPendingReturns(shopId),
             this.getLatestOrders(shopId),
-            this.getLatestOrders(
-                shopId,
-                OrderFulfillmentStatus.RETURN_REFUND,
-            ),
+            this.getLatestOrders(shopId, {
+                fulfillmentStatus: OrderFulfillmentStatus.RETURN_REFUND,
+                limit: 20,
+            }),
+            this.getLatestOrders(shopId, { actionable: true, limit: 20 }),
+            this.getLatestOrders(shopId, {
+                orderStatus: OrderStatus.CANCELLED,
+                limit: 20,
+            }),
+            // Màn hình “đã giao” là khái niệm seller-facing, nên giữ đơn ở cả bước giao tới khách và bước hoàn tất sau xác nhận.
+            this.getLatestOrders(shopId, {
+                fulfillmentStatuses: [
+                    OrderFulfillmentStatus.DELIVERED,
+                    OrderFulfillmentStatus.COMPLETED,
+                ],
+                limit: 20,
+            }),
+            this.getLatestOrders(shopId, {
+                fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
+                limit: 20,
+            }),
             this.getTopProducts(shopId, currentRange),
         ]);
+
+        const [rankedProducts, totalCount, hasMore] = topProductsResult;
 
         return {
             current,
@@ -82,13 +115,24 @@ export class SellerDashboardOrderService {
             revenueTrend,
             orderStatusCounts,
             pendingReturns,
-            latestOrders,
-            recentReturnOrders,
-            topProducts,
+            latestOrders: latestOrderPage.orders,
+            recentReturnOrders: recentReturnOrderPage.orders,
+            recentReturnOrdersHasMore: recentReturnOrderPage.hasMore,
+            actionableOrders: actionableOrderPage.orders,
+            actionableOrdersHasMore: actionableOrderPage.hasMore,
+            cancelledOrders: cancelledOrderPage.orders,
+            cancelledOrdersHasMore: cancelledOrderPage.hasMore,
+            deliveredOrders: deliveredOrderPage.orders,
+            deliveredOrdersHasMore: deliveredOrderPage.hasMore,
+            completedOrders: completedOrderPage.orders,
+            completedOrdersHasMore: completedOrderPage.hasMore,
+            topProducts: rankedProducts,
+            topProductsTotalCount: totalCount,
+            topProductsHasMore: hasMore,
         };
     }
 
-    // Chỉ những order CONFIRMED và chưa bị hủy mới được tính là doanh thu gộp hợp lệ.
+    // Chỉ đơn đã hoàn thành mới được ghi nhận doanh thu; đơn đang giao chưa phải kết quả bán cuối cùng.
     private async getSummary(
         shopId: string,
         range: SellerDashboardDateRange,
@@ -102,8 +146,9 @@ export class SellerDashboardOrderService {
             .andWhere('ord.status = :confirmedStatus', {
                 confirmedStatus: OrderStatus.CONFIRMED,
             })
-            .andWhere('ord.fulfillment_status != :cancelledStatus', {
-                cancelledStatus: OrderFulfillmentStatus.CANCELLED,
+            // Đồng bộ KPI với báo cáo sản phẩm: trạng thái hoàn tất là điều kiện chốt doanh thu.
+            .andWhere('ord.fulfillment_status = :completedStatus', {
+                completedStatus: OrderFulfillmentStatus.COMPLETED,
             })
             .andWhere(
                 `NOT EXISTS (
@@ -127,7 +172,7 @@ export class SellerDashboardOrderService {
         };
     }
 
-    // Group ngày theo Asia/Ho_Chi_Minh để biểu đồ không bị lệch ngày khi database lưu UTC.
+    // Chỉ vẽ doanh thu đơn hoàn thành và group theo giờ Việt Nam để ngày không lệch do database lưu UTC.
     private async getRevenueTrend(
         shopId: string,
         range: SellerDashboardDateRange,
@@ -145,8 +190,9 @@ export class SellerDashboardOrderService {
             .andWhere('ord.status = :confirmedStatus', {
                 confirmedStatus: OrderStatus.CONFIRMED,
             })
-            .andWhere('ord.fulfillment_status != :cancelledStatus', {
-                cancelledStatus: OrderFulfillmentStatus.CANCELLED,
+            // Dùng cùng điều kiện với KPI để điểm trên biểu đồ luôn cộng ra đúng tổng doanh thu.
+            .andWhere('ord.fulfillment_status = :completedStatus', {
+                completedStatus: OrderFulfillmentStatus.COMPLETED,
             })
             .andWhere(
                 `NOT EXISTS (
@@ -257,11 +303,12 @@ export class SellerDashboardOrderService {
             .getCount();
     }
 
-    // Lấy tối đa năm đơn theo shop; truy vấn riêng RETURN_REFUND giúp đơn hoàn không bị chìm dưới đơn mới hơn.
+    // Trả trang snapshot theo bộ lọc nghiệp vụ; hàng đợi ưu tiên có thứ tự riêng và luôn báo nếu còn kết quả.
     private async getLatestOrders(
         shopId: string,
-        fulfillmentStatus?: OrderFulfillmentStatus,
-    ): Promise<SellerDashboardLatestOrder[]> {
+        options: SellerDashboardOrderQuery = {},
+    ): Promise<{ orders: SellerDashboardLatestOrder[]; hasMore: boolean }> {
+        const limit = options.limit ?? 5;
         const query = this.orderRepository
             .createQueryBuilder('ord')
             .innerJoin('ord.items', 'item', 'item.seller_shop_id = :shopId', {
@@ -314,6 +361,7 @@ export class SellerDashboardOrderService {
                 'items',
             )
             .addSelect('ord.created_at', 'createdAt')
+            .addSelect('ord.cancel_reason', 'cancelReason')
             .groupBy('ord.id')
             .addGroupBy('ord.order_number')
             .addGroupBy('ord.status')
@@ -322,13 +370,62 @@ export class SellerDashboardOrderService {
             .orderBy('ord.created_at', 'DESC');
 
         // Bản đọc chi tiết phải giữ item đang hoàn trả; bộ lọc loại hàng trả chỉ áp dụng phép tính doanh thu.
-        if (fulfillmentStatus) {
+        if (options.fulfillmentStatus) {
             query.andWhere('ord.fulfillment_status = :fulfillmentStatus', {
-                fulfillmentStatus,
+                fulfillmentStatus: options.fulfillmentStatus,
             });
         }
 
-        const rows = await query.limit(5).getRawMany<{
+        if (options.fulfillmentStatuses?.length) {
+            // Người bán thường gọi cả DELIVERED và COMPLETED là “đã giao”; giữ hai trạng thái trong cùng tập đọc nhưng không đổi metric doanh thu.
+            query.andWhere(
+                'ord.fulfillment_status IN (:...fulfillmentStatuses)',
+                { fulfillmentStatuses: options.fulfillmentStatuses },
+            );
+        }
+
+        if (options.orderStatus) {
+            query.andWhere('ord.status = :orderStatus', {
+                orderStatus: options.orderStatus,
+            });
+        }
+
+        if (options.actionable) {
+            // Chỉ lấy việc còn cần shop thao tác; đơn đang giao/đã giao không được trộn vào hàng đợi.
+            query.andWhere(
+                `ord.status != :cancelledOrderStatus
+                    AND ord.fulfillment_status != :cancelledFulfillmentStatus
+                    AND (ord.status = :pendingStatus OR ord.fulfillment_status IN (:...actionableStatuses))`,
+                {
+                    pendingStatus: OrderStatus.PENDING,
+                    cancelledOrderStatus: OrderStatus.CANCELLED,
+                    cancelledFulfillmentStatus:
+                        OrderFulfillmentStatus.CANCELLED,
+                    actionableStatuses: [
+                        OrderFulfillmentStatus.TO_SHIP,
+                        OrderFulfillmentStatus.DELIVERY_FAILED,
+                        OrderFulfillmentStatus.RETURN_REFUND,
+                    ],
+                },
+            );
+            // Ưu tiên sự cố giao/hoàn trước, rồi đến việc shop cần làm; trong từng nhóm xử lý đơn cũ trước.
+            query
+                .orderBy(
+                    `CASE
+                        WHEN ord.fulfillment_status IN (:...urgentStatuses) THEN 0
+                        WHEN ord.status = :pendingStatus THEN 1
+                        ELSE 2
+                    END`,
+                    'ASC',
+                )
+                .setParameter('urgentStatuses', [
+                    OrderFulfillmentStatus.DELIVERY_FAILED,
+                    OrderFulfillmentStatus.RETURN_REFUND,
+                ])
+                .addOrderBy('ord.created_at', 'ASC');
+        }
+
+        const rows = await query.limit(limit + 1).getRawMany<{
             id: string;
             orderNumber: string;
             status: OrderStatus;
@@ -338,6 +435,7 @@ export class SellerDashboardOrderService {
             itemLineCount: string;
             returnReason: OrderReturnReason | null;
             returnDescription: string | null;
+            cancelReason: string | null;
             items: Array<{
                 productId: string;
                 name: string;
@@ -348,7 +446,8 @@ export class SellerDashboardOrderService {
             createdAt: Date;
         }>();
 
-        return rows.map((row) => ({
+        const hasMore = rows.length > limit;
+        const orders = rows.slice(0, limit).map((row) => ({
             id: row.id,
             orderNumber: row.orderNumber,
             status: row.status,
@@ -365,6 +464,10 @@ export class SellerDashboardOrderService {
                 row.fulfillmentStatus === OrderFulfillmentStatus.RETURN_REFUND
                     ? row.returnDescription
                     : null,
+            cancelReason:
+                row.status === OrderStatus.CANCELLED
+                    ? row.cancelReason?.trim() || null
+                    : null,
             // Giới hạn ảnh/tên gửi lên dashboard và LLM; tổng số dòng vẫn cho UI biết còn mặt hàng nào bị gọn lại.
             items: row.items.slice(0, 4).map((item) => ({
                 ...item,
@@ -372,13 +475,15 @@ export class SellerDashboardOrderService {
             })),
             createdAt: new Date(row.createdAt).toISOString(),
         }));
+
+        return { orders, hasMore };
     }
 
-    // Xếp top product theo doanh thu gộp trong kỳ đang xem, vẫn loại item hoàn hàng giống các query sales khác.
+    // Lấy tối đa 50 sản phẩm có bán trong kỳ và tổng số nhóm sản phẩm; mọi metric đều theo order, không trộn tổng bán tích lũy.
     private async getTopProducts(
         shopId: string,
         range: SellerDashboardDateRange,
-    ): Promise<SellerDashboardTopProduct[]> {
+    ): Promise<[SellerDashboardTopProduct[], number, boolean]> {
         const rows = await this.orderItemRepository
             .createQueryBuilder('item')
             .innerJoin(Order, 'ord', 'ord.id = item.order_id')
@@ -387,12 +492,14 @@ export class SellerDashboardOrderService {
             .addSelect('MAX(item.image_url)', 'thumbnailUrl')
             .addSelect('COALESCE(SUM(item.quantity), 0)', 'quantitySold')
             .addSelect('COALESCE(SUM(item.line_total), 0)', 'revenue')
+            .addSelect('COUNT(*) OVER()', 'totalCount')
             .where('item.seller_shop_id = :shopId', { shopId })
             .andWhere('ord.status = :confirmedStatus', {
                 confirmedStatus: OrderStatus.CONFIRMED,
             })
-            .andWhere('ord.fulfillment_status != :cancelledStatus', {
-                cancelledStatus: OrderFulfillmentStatus.CANCELLED,
+            // Danh sách sản phẩm có doanh thu chỉ tính đơn đã hoàn tất; đơn đang giao chưa phải kết quả bán cuối cùng.
+            .andWhere('ord.fulfillment_status = :completedStatus', {
+                completedStatus: OrderFulfillmentStatus.COMPLETED,
             })
             .andWhere(
                 `NOT EXISTS (
@@ -411,21 +518,24 @@ export class SellerDashboardOrderService {
             .groupBy('item.product_id')
             .addGroupBy('item.product_name')
             .orderBy('revenue', 'DESC')
-            .limit(5)
+            .limit(51)
             .getRawMany<{
                 productId: string;
                 name: string;
                 thumbnailUrl: string | null;
                 quantitySold: string;
                 revenue: string;
+                totalCount: string;
             }>();
 
-        return rows.map((row) => ({
+        const items = rows.slice(0, 50).map((row) => ({
             productId: row.productId,
             name: row.name,
             thumbnailUrl: row.thumbnailUrl,
             quantitySold: Number(row.quantitySold),
             revenue: Number(row.revenue),
         }));
+
+        return [items, Number(rows[0]?.totalCount ?? 0), rows.length > 50];
     }
 }
