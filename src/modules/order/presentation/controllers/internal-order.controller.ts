@@ -19,6 +19,7 @@ import { UpdateReturnShippingCostDto } from '@/modules/order/presentation/dto/or
 import { CancelOrderDto } from '@/modules/order/presentation/dto/cancel-order.dto';
 import { InternalSellerDashboardQueryDto } from '@/modules/order/presentation/dto/internal-seller-dashboard-query.dto';
 import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
+import { InternalVariantSalesQueryDto } from '@/modules/order/presentation/dto/internal-variant-sales-query.dto';
 
 @Controller({ path: 'internal/orders', version: '1' })
 export class InternalOrderController {
@@ -163,6 +164,22 @@ export class InternalOrderController {
             sellerOwnerId,
             productIds,
         );
+    }
+
+    // Seller Service gửi tối đa 100 biến thể; shop và kỳ được lọc trong Order Service trước khi trả aggregate.
+    @Get('seller-variant-sales')
+    getSellerVariantSales(
+        @Query('shopId', new ParseUUIDPipe()) shopId: string,
+        @Query() query: InternalVariantSalesQueryDto,
+        @Headers('x-internal-service-token') token: string,
+    ) {
+        this.assertInternalToken(token);
+        return this.sellerDashboardOrderService.getVariantSales({
+            shopId,
+            variantIds: query.variantIds,
+            from: new Date(query.from),
+            to: new Date(query.to),
+        });
     }
 
     // Seller Service dùng snapshot này để ghép dashboard; token nội bộ là lớp bảo vệ duy nhất của route service-to-service.
