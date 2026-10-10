@@ -1,6 +1,7 @@
 // Kiểm tra hàng đợi và lý do đơn được lọc từ Order Service, không truy cập database thật.
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
+import { ACTIVE_ORDER_RETURN_STATUSES } from '@/database/returns/enums/order-return-status.enum';
 import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
 
 describe('SellerDashboardOrderService', () => {
@@ -200,6 +201,51 @@ describe('SellerDashboardOrderService', () => {
             'ord.fulfillment_status != :cancelledStatus',
             expect.anything(),
         );
+    });
+
+    // Số bán chỉ tính theo thời điểm hoàn tất, shop, biến thể được yêu cầu và loại item đang trong quy trình hoàn.
+    it('aggregates completed variant sales in the requested shop and completion window', async () => {
+        queryBuilder.getRawMany.mockResolvedValue([
+            { variantId: 'variant-1', quantitySold: '3' },
+        ]);
+        const range = {
+            from: new Date('2026-09-01T00:00:00.000Z'),
+            to: new Date('2026-10-01T00:00:00.000Z'),
+        };
+
+        const result = await target.getVariantSales({
+            shopId: 'shop-1',
+            variantIds: ['variant-1', 'variant-2'],
+            ...range,
+        });
+
+        expect(result).toEqual([
+            { variantId: 'variant-1', quantitySold: 3 },
+        ]);
+        expect(queryBuilder.where).toHaveBeenCalledWith(
+            'item.seller_shop_id = :shopId',
+            { shopId: 'shop-1' },
+        );
+        expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+            'ord.fulfillment_status = :completedStatus',
+            { completedStatus: OrderFulfillmentStatus.COMPLETED },
+        );
+        expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+            'ord.completed_at >= :from',
+            { from: range.from },
+        );
+        expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+            'ord.completed_at < :to',
+            { to: range.to },
+        );
+        expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+            expect.stringContaining('order_return_requests'),
+        );
+        expect(queryBuilder.setParameter).toHaveBeenCalledWith(
+            'returnStatusesExcludedFromSales',
+            ACTIVE_ORDER_RETURN_STATUSES,
+        );
+        expect(queryBuilder.groupBy).toHaveBeenCalledWith('item.variant_id');
     });
 
     // KPI và biểu đồ phải cùng loại đơn; nếu lệch điều kiện, tổng trên chart không khớp con số doanh thu.

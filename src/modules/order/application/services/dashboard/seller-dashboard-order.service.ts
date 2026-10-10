@@ -1,13 +1,16 @@
 // Read model dashboard của Order Service, chịu trách nhiệm duy nhất cho số liệu order theo shop.
 // Service này không nhận owner tùy ý từ browser; chỉ được gọi qua internal token và shop scope đã xác định.
 
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
-import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
+import {
+    ACTIVE_ORDER_RETURN_STATUSES,
+    OrderReturnStatus,
+} from '@/database/returns/enums/order-return-status.enum';
 import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
@@ -53,6 +56,60 @@ export class SellerDashboardOrderService {
         @InjectRepository(OrderReturnRequest)
         private readonly returnRepository: Repository<OrderReturnRequest>,
     ) {}
+
+    // Tổng hợp số lượng bán theo từng biến thể để Agent đánh giá tốc độ bán trong đúng shop và kỳ yêu cầu.
+    // Chỉ tính đơn đã xác nhận, giao dịch hoàn tất; item đang trong quy trình hoàn bị loại theo cùng quy tắc doanh thu.
+    // Kết quả chỉ trả các biến thể có giao dịch, nên caller chỉ được gán số 0 sau khi request aggregate thành công.
+    async getVariantSales(input: {
+        shopId: string;
+        variantIds: string[];
+        from: Date;
+        to: Date;
+    }): Promise<Array<{ variantId: string; quantitySold: number }>> {
+        if (input.variantIds.length === 0) return [];
+        if (input.from >= input.to) {
+            throw new BadRequestException(
+                'Khoảng thời gian thống kê không hợp lệ.',
+            );
+        }
+
+        const rows = await this.orderItemRepository
+            .createQueryBuilder('item')
+            .innerJoin(Order, 'ord', 'ord.id = item.order_id')
+            .select('item.variant_id', 'variantId')
+            .addSelect('COALESCE(SUM(item.quantity), 0)', 'quantitySold')
+            .where('item.seller_shop_id = :shopId', { shopId: input.shopId })
+            .andWhere('item.variant_id IN (:...variantIds)', {
+                variantIds: input.variantIds,
+            })
+            .andWhere('ord.status = :confirmedStatus', {
+                confirmedStatus: OrderStatus.CONFIRMED,
+            })
+            .andWhere('ord.fulfillment_status = :completedStatus', {
+                completedStatus: OrderFulfillmentStatus.COMPLETED,
+            })
+            .andWhere(
+                `NOT EXISTS (
+                    SELECT 1 FROM order_return_requests return_request
+                    WHERE return_request.order_id = ord.id
+                      AND return_request.status IN (:...returnStatusesExcludedFromSales)
+                      AND return_request.item_ids @> jsonb_build_array(item.id::text)
+                )`,
+            )
+            .andWhere('ord.completed_at >= :from', { from: input.from })
+            .andWhere('ord.completed_at < :to', { to: input.to })
+            .setParameter(
+                'returnStatusesExcludedFromSales',
+                ACTIVE_ORDER_RETURN_STATUSES,
+            )
+            .groupBy('item.variant_id')
+            .getRawMany<{ variantId: string; quantitySold: string }>();
+
+        return rows.map((row) => ({
+            variantId: row.variantId,
+            quantitySold: Number(row.quantitySold),
+        }));
+    }
 
     // Tổng hợp một snapshot để Seller Service không phải gọi nhiều endpoint nhỏ.
     // Doanh thu dùng line_total của item thuộc shop, loại đơn chưa xác nhận và đơn đã hủy.
