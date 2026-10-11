@@ -9,6 +9,9 @@ import {
 } from 'class-validator';
 
 export class InternalVariantSalesQueryDto {
+    @IsUUID('4')
+    shopId!: string;
+
     @Transform(({ value }) =>
         typeof value === 'string' ? value.split(',').map((id) => id.trim()) : value,
     )
