@@ -3,7 +3,7 @@
 // File này kiểm tra các quy tắc tạo và tính toán của workflow hoàn hàng.
 
 import { type DeepMocked } from '@golevelup/ts-jest';
-import { QueryFailedError, Repository } from 'typeorm';
+import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
@@ -108,7 +108,7 @@ describe('OrderReturnService', () => {
     });
 
     it('creates a seller-fault return with proportional shipping refund', async () => {
-        const result = await service.create('customer-1', 'order-1', {
+        await service.create('customer-1', 'order-1', {
             itemIds: ['item-1'],
             reason: OrderReturnReason.DAMAGED,
             evidence: [
@@ -123,9 +123,12 @@ describe('OrderReturnService', () => {
         const persisted = returns.save.mock.calls[0]![0] as OrderReturnRequest;
         expect(persisted.status).toBe(OrderReturnStatus.REQUESTED);
         expect(persisted.refundAmount).toBe('110000.00');
+        expect(persisted.estimatedRefundAmount).toBe('110000.00');
         expect(persisted.refundItemAmount).toBe('100000.00');
         expect(persisted.refundShippingAmount).toBe('10000.00');
-        expect(persisted.returnShippingCost).toBe('11943.00');
+        expect(persisted.returnShippingEstimatedCost).toBe('11943.00');
+        expect(persisted.returnShippingCost).toBe('0.00');
+        expect(persisted.returnShippingFee).toBe('0.00');
         expect(events.publishReturnChanged).toHaveBeenCalled();
         expect(shipping.calculateQuote).toHaveBeenCalledWith(
             expect.objectContaining({
@@ -168,6 +171,8 @@ describe('OrderReturnService', () => {
             id: 'return-1',
             status: OrderReturnStatus.AWAITING_SHIPMENT,
             reason: OrderReturnReason.CHANGE_OF_MIND,
+            returnShippingPayer: 'CUSTOMER',
+            returnShippingEstimatedCost: '11943.00',
             refundItemAmount: '100000.00',
             refundShippingAmount: '0.00',
             returnShippingFee: '0.00',
@@ -182,6 +187,89 @@ describe('OrderReturnService', () => {
         expect(request.returnShippingCost).toBe('12346.00');
         expect(request.returnShippingFee).toBe('12346.00');
         expect(request.refundAmount).toBe('87654.00');
+        expect(request.returnShippingFinalizedAt).toBeInstanceOf(Date);
+    });
+
+    // Lý do OTHER không thể duyệt cho tới khi Seller tự phân loại payer; số hoàn được tính lại theo lựa chọn đã lưu.
+    it.each([
+        ['CUSTOMER', '0.00', '88057.00'],
+        ['SELLER', '0.00', '100000.00'],
+    ] as const)(
+        'applies the selected %s return-shipping payer',
+        async (returnShippingPayer, expectedFee, expectedRefund) => {
+            const request = {
+                id: 'return-1',
+                orderId: 'order-1',
+                ownerId: 'customer-1',
+                shopId: 'shop-1',
+                status: OrderReturnStatus.REQUESTED,
+                reason: OrderReturnReason.OTHER,
+                returnShippingPayer: null,
+                returnShippingEstimatedCost: '11943.00',
+                refundItemAmount: '100000.00',
+                refundShippingAmount: '0.00',
+                refundAmount: '100000.00',
+            } as OrderReturnRequest;
+            returns.findOne.mockResolvedValue(request);
+            returns.save.mockResolvedValue(request);
+            shops.getOwnedShopId.mockResolvedValue('shop-1');
+            orders.findOwnedById.mockResolvedValue(null);
+
+            const result = await service.review(
+                { userId: 'seller-1', email: 'seller@example.test' } as never,
+                'return-1',
+                { returnShippingPayer },
+                OrderReturnStatus.APPROVED,
+            );
+
+            expect(result.returnShippingPayer).toBe(returnShippingPayer);
+            expect(result.returnShippingFee).toBe(expectedFee);
+            expect(result.estimatedRefundAmount).toBe(expectedRefund);
+            expect(result.refundAmount).toBe(expectedRefund);
+            expect(result.status).toBe(OrderReturnStatus.AWAITING_SHIPMENT);
+        },
+    );
+
+    // Không cho phép lý do OTHER được duyệt khi Seller bỏ trống phân loại payer.
+    it('requires the seller to select a payer for OTHER before approval', async () => {
+        returns.findOne.mockResolvedValue({
+            id: 'return-1',
+            shopId: 'shop-1',
+            status: OrderReturnStatus.REQUESTED,
+            reason: OrderReturnReason.OTHER,
+        } as OrderReturnRequest);
+        shops.getOwnedShopId.mockResolvedValue('shop-1');
+
+        await expect(
+            service.review(
+                { userId: 'seller-1', email: 'seller@example.test' } as never,
+                'return-1',
+                {},
+                OrderReturnStatus.APPROVED,
+            ),
+        ).rejects.toThrow('chọn bên chịu phí');
+
+        expect(returns.save).not.toHaveBeenCalled();
+    });
+
+    // GHN quote cao hơn giá trị món hàng không được chuyển thành khoản khấu trừ lớn hơn toàn bộ tiền hoàn hàng.
+    it('rejects customer-paid return shipping above the item value', async () => {
+        const request = {
+            id: 'return-1',
+            status: OrderReturnStatus.AWAITING_SHIPMENT,
+            reason: OrderReturnReason.CHANGE_OF_MIND,
+            returnShippingPayer: 'CUSTOMER',
+            returnShippingEstimatedCost: '100000.00',
+            refundItemAmount: '100000.00',
+            refundShippingAmount: '0.00',
+            returnShippingFee: '100000.00',
+            refundAmount: '0.00',
+        } as OrderReturnRequest;
+        returns.findOne.mockResolvedValue(request);
+
+        await expect(
+            service.updateReturnShippingCost('return-1', '100001'),
+        ).rejects.toThrow('cao hơn giá trị sản phẩm');
     });
 
     it('rejects fault returns without an image evidence', async () => {
@@ -192,6 +280,125 @@ describe('OrderReturnService', () => {
                 evidence: [],
             }),
         ).rejects.toThrow('cần ít nhất một ảnh');
+    });
+
+    // Bảo vệ mapping phí cố định; OTHER vẫn để null cho đến khi Seller duyệt và chọn bên chịu.
+    it.each([
+        [OrderReturnReason.DAMAGED, 'SELLER'],
+        [OrderReturnReason.WRONG_ITEM, 'SELLER'],
+        [OrderReturnReason.MISSING_ITEM, 'SELLER'],
+        [OrderReturnReason.NOT_AS_DESCRIBED, 'SELLER'],
+        [OrderReturnReason.CHANGE_OF_MIND, 'CUSTOMER'],
+        [OrderReturnReason.OTHER, null],
+    ] as const)(
+        'assigns the agreed return-shipping payer for %s',
+        async (reason, expectedPayer) => {
+            await service.create('customer-1', 'order-1', {
+                itemIds: ['item-1'],
+                reason,
+                evidence: [
+                    {
+                        assetId: 'asset-1',
+                        url: 'https://cdn.test/evidence.webp',
+                        type: 'image',
+                    },
+                ],
+            });
+
+            const persisted = returns.save.mock
+                .calls[0]![0] as OrderReturnRequest;
+            expect(persisted.returnShippingPayer).toBe(expectedPayer);
+        },
+    );
+
+    // Estimate customer trả vượt giá trị sản phẩm thì chặn ngay, trước khi tạo yêu cầu hoặc khoản phí.
+    it('blocks a customer-paid request when its shipping estimate exceeds item value', async () => {
+        shipping.calculateQuote.mockResolvedValue({
+            fee: '100001.00',
+        } as never);
+
+        await expect(
+            service.create('customer-1', 'order-1', {
+                itemIds: ['item-1'],
+                reason: OrderReturnReason.CHANGE_OF_MIND,
+            }),
+        ).rejects.toThrow('cao hơn giá trị sản phẩm');
+
+        expect(returns.save).not.toHaveBeenCalled();
+    });
+
+    // Khi carrier trả phí cao hơn sau lúc cấp nhãn, Order ghi REJECTED/ghi chú và phục hồi trạng thái order gốc đúng một lần.
+    it('rejects an over-limit carrier fee after the canceled label and notifies both parties', async () => {
+        const request = {
+            id: 'return-1',
+            orderId: 'order-1',
+            ownerId: 'customer-1',
+            shopId: 'shop-1',
+            sellerUserId: null,
+            status: OrderReturnStatus.AWAITING_SHIPMENT,
+            returnShippingPayer: 'CUSTOMER',
+            refundItemAmount: '100000.00',
+            returnShippingEstimatedCost: '11943.00',
+            returnShippingCost: '0.00',
+            returnShippingFee: '0.00',
+            returnShippingFinalizedAt: null,
+            customerReturnShippingReceivableAmount: '0.00',
+            reviewNote: null,
+        } as OrderReturnRequest;
+        const order = {
+            id: 'order-1',
+            orderNumber: 'BIN-0001',
+            fulfillmentStatus: OrderFulfillmentStatus.RETURN_REFUND,
+            deliveryConfirmationStatus: 'CONFIRMED',
+        };
+        const requestRepository = {
+            findOne: jest.fn().mockResolvedValue(request),
+            save: jest.fn(async (value) => value),
+        };
+        const orderRepository = {
+            findOne: jest.fn().mockResolvedValue(order),
+            save: jest.fn(async (value) => value),
+        };
+        const manager = {
+            getRepository: (entity: Function) =>
+                entity === OrderReturnRequest
+                    ? requestRepository
+                    : orderRepository,
+        };
+        const dataSource = {
+            transaction: jest.fn(async (callback) => callback(manager)),
+        } as unknown as DataSource;
+        service = new OrderReturnService(
+            returns,
+            orders,
+            shops,
+            events,
+            shipping,
+            dataSource,
+        );
+
+        const result = await service.rejectForReturnShippingCostLimit(
+            'return-1',
+            '120000.00',
+        );
+        await service.rejectForReturnShippingCostLimit('return-1', '120000.00');
+
+        expect(result.status).toBe(OrderReturnStatus.REJECTED);
+        expect(result.returnShippingCost).toBe('0.00');
+        expect(result.returnShippingFee).toBe('0.00');
+        expect(result.returnShippingFinalizedAt).toBeNull();
+        expect(result.reviewNote).toContain('vận đơn đã được hủy');
+        expect(order.fulfillmentStatus).toBe(OrderFulfillmentStatus.COMPLETED);
+        expect(orderRepository.save).toHaveBeenCalledTimes(1);
+        expect(events.publishReturnChanged).toHaveBeenCalledWith(
+            expect.objectContaining({
+                eventName: 'return.rejected',
+                customerUserId: 'customer-1',
+                sellerUserId: null,
+                status: OrderReturnStatus.REJECTED,
+            }),
+        );
+        expect(events.publishReturnChanged).toHaveBeenCalledTimes(1);
     });
 
     it('rejects a request spanning multiple shops', async () => {

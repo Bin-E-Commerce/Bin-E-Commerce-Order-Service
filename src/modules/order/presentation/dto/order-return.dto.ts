@@ -58,6 +58,10 @@ export class ReviewOrderReturnDto {
     @IsString()
     @MaxLength(500)
     note?: string;
+
+    @IsOptional()
+    @IsIn(['CUSTOMER', 'SELLER'])
+    returnShippingPayer?: 'CUSTOMER' | 'SELLER';
 }
 
 export class InspectOrderReturnDto {
