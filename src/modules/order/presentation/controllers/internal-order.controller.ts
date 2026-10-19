@@ -94,7 +94,7 @@ export class InternalOrderController {
         return this.orderReturnService.getShippingContext(returnId);
     }
 
-    // Shipping Service ghi nhận chi phí reverse shipment thực tế sau khi GHN tạo vận đơn hoàn.
+    // Shipping Service chỉ chốt chi phí thực tế sau khi carrier xác nhận đã nhận kiện.
     @Post('returns/:returnId/return-shipping-cost')
     updateReturnShippingCost(
         @Param('returnId', new ParseUUIDPipe()) returnId: string,
@@ -103,6 +103,20 @@ export class InternalOrderController {
     ) {
         this.assertInternalToken(token);
         return this.orderReturnService.updateReturnShippingCost(
+            returnId,
+            dto.amount,
+        );
+    }
+
+    // Shipping Service gọi sau khi hủy nhãn carrier có phí vượt giá trị món khách chọn hoàn.
+    @Post('returns/:returnId/reject-shipping-limit')
+    rejectReturnForShippingCostLimit(
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Headers('x-internal-service-token') token: string,
+        @Body() dto: UpdateReturnShippingCostDto,
+    ) {
+        this.assertInternalToken(token);
+        return this.orderReturnService.rejectForReturnShippingCostLimit(
             returnId,
             dto.amount,
         );

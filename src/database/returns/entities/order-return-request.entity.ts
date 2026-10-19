@@ -13,6 +13,10 @@ import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.
 // Một request thuộc một customer order và một shop scope.
 @Entity('order_return_requests')
 @Index(['orderId', 'shopId', 'status'])
+@Index('uq_order_return_refund_request_id', ['refundRequestId'], {
+    unique: true,
+    where: '"refund_request_id" IS NOT NULL',
+})
 @Index('uq_order_return_active_order_shop', ['orderId', 'shopId'], {
     unique: true,
     where: `"status" IN ('REQUESTED', 'AWAITING_SHIPMENT', 'IN_TRANSIT', 'SHIPMENT_FAILED', 'RECEIVED', 'REFUND_PENDING')`,
@@ -68,6 +72,15 @@ export class OrderReturnRequest {
     refundAmount!: string;
 
     @Column({
+        name: 'estimated_refund_amount',
+        type: 'numeric',
+        precision: 14,
+        scale: 2,
+        default: 0,
+    })
+    estimatedRefundAmount!: string;
+
+    @Column({
         name: 'refund_item_amount',
         type: 'numeric',
         precision: 14,
@@ -95,6 +108,15 @@ export class OrderReturnRequest {
     returnShippingFee!: string;
 
     @Column({
+        name: 'return_shipping_estimated_cost',
+        type: 'numeric',
+        precision: 14,
+        scale: 2,
+        default: 0,
+    })
+    returnShippingEstimatedCost!: string;
+
+    @Column({
         name: 'return_shipping_cost',
         type: 'numeric',
         precision: 14,
@@ -102,6 +124,30 @@ export class OrderReturnRequest {
         default: 0,
     })
     returnShippingCost!: string;
+
+    @Column({
+        name: 'return_shipping_payer',
+        type: 'varchar',
+        length: 16,
+        nullable: true,
+    })
+    returnShippingPayer!: 'CUSTOMER' | 'SELLER' | null;
+
+    @Column({
+        name: 'return_shipping_finalized_at',
+        type: 'timestamptz',
+        nullable: true,
+    })
+    returnShippingFinalizedAt!: Date | null;
+
+    @Column({
+        name: 'customer_return_shipping_receivable_amount',
+        type: 'numeric',
+        precision: 14,
+        scale: 2,
+        default: 0,
+    })
+    customerReturnShippingReceivableAmount!: string;
 
     @Column({ name: 'seller_user_id', type: 'uuid', nullable: true })
     sellerUserId!: string | null;
@@ -119,6 +165,48 @@ export class OrderReturnRequest {
 
     @Column({ name: 'inspected_at', type: 'timestamptz', nullable: true })
     inspectedAt!: Date | null;
+
+    @Column({
+        name: 'refund_method',
+        type: 'varchar',
+        length: 40,
+        nullable: true,
+    })
+    refundMethod!: 'VNPAY' | 'COD_MANUAL' | null;
+
+    @Column({
+        name: 'refund_request_id',
+        type: 'varchar',
+        length: 32,
+        nullable: true,
+    })
+    refundRequestId!: string | null;
+
+    @Column({
+        name: 'refund_transaction_reference',
+        type: 'varchar',
+        length: 180,
+        nullable: true,
+    })
+    refundTransactionReference!: string | null;
+
+    @Column({ name: 'refund_proof', type: 'jsonb', nullable: true })
+    refundProof!: Record<string, unknown> | null;
+
+    @Column({
+        name: 'refund_processed_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    refundProcessedBy!: string | null;
+
+    @Column({
+        name: 'refund_processed_at',
+        type: 'timestamptz',
+        nullable: true,
+    })
+    refundProcessedAt!: Date | null;
 
     @Column({
         name: 'requested_at',
