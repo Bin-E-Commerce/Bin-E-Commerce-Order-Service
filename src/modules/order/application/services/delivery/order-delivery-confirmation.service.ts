@@ -19,6 +19,9 @@ import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
 import { OrderRepository } from '@/modules/order/infrastructure/repositories/order.repository';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
+import { Inject, Optional } from '@nestjs/common';
+import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
+import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { ShipmentStatus } from '@common/kafka/events/shipping.events';
 import {
     DeliveryConfirmationDecision,
@@ -56,6 +59,9 @@ export class OrderDeliveryConfirmationService {
         private readonly responseMapper: OrderResponseMapper,
         private readonly orderEvents: OrderEventsService,
         private readonly dataSource: DataSource,
+        @Optional()
+        @Inject(SELLER_WALLET_REPOSITORY)
+        private readonly sellerWalletRepository?: SellerWalletRepositoryPort,
     ) {}
 
     // Ghi nhận DELIVERED từ Shipping, mở cửa sổ ba ngày và phát event sau khi transaction commit.
@@ -259,6 +265,10 @@ export class OrderDeliveryConfirmationService {
         if (eventStatus === 'confirmed') {
             await this.orderEvents.publishDeliveryConfirmed(orderId);
         }
+        // Lần xác nhận đầu và retry đều thử release; ledger source key làm lần gọi lặp không thể cộng trùng.
+        if (dto.decision === DeliveryConfirmationDecision.RECEIVED) {
+            await this.sellerWalletRepository?.releaseCompletedOrder(orderId);
+        }
         if (eventStatus === 'issue')
             await this.orderEvents.publishDeliveryIssueReported(orderId);
 
@@ -306,6 +316,8 @@ export class OrderDeliveryConfirmationService {
 
         if (changed) {
             await this.orderEvents.publishDeliveryAutoConfirmed(orderId);
+            // Auto-confirm dùng cùng mốc giải phóng với xác nhận thủ công, không chờ hết cửa sổ hoàn hàng.
+            await this.sellerWalletRepository?.releaseCompletedOrder(orderId);
         }
         return changed;
     }

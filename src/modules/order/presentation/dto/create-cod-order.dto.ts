@@ -1,4 +1,4 @@
-// DTO này là contract đầu vào cho checkout COD.
+// DTO này là contract đầu vào cho checkout COD hoặc VNPay.
 // Client chỉ được gửi địa chỉ, phương thức thanh toán và ghi chú; giá, item và tổng tiền do server tính.
 
 import {
@@ -15,7 +15,7 @@ export class CreateCodOrderDto {
     @IsUUID('4', { message: 'shippingAddressId phải là UUID hợp lệ.' })
     shippingAddressId!: string;
 
-    @IsEnum(PaymentMethod, { message: 'Phase 1 chỉ hỗ trợ thanh toán COD.' })
+    @IsEnum(PaymentMethod, { message: 'Phương thức thanh toán không hợp lệ.' })
     paymentMethod!: PaymentMethod;
 
     @IsOptional()

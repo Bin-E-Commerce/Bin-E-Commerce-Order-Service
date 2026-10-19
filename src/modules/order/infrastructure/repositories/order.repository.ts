@@ -132,7 +132,7 @@ export class OrderRepository {
         };
     }
 
-    // Đếm order có item thuộc shop theo từng stage và chỉ đếm return request còn việc Seller phải xử lý.
+    // Đếm order đã đủ điều kiện hiển thị trong Seller Center theo stage; Sandbox đã trả tiền được tính như đơn VNPay bình thường.
     async countSellerTabs(shopId: string): Promise<SellerOrderTabCounts> {
         const [row, actionableReturnRow] = await Promise.all([
             this.repository
@@ -166,6 +166,15 @@ export class OrderRepository {
               AND seller_item.seller_shop_id = :shopId
           )`,
                     { shopId },
+                )
+                // Attempt PAID là bằng chứng bền vững: đơn đã hoàn tiền vẫn giữ lịch sử, còn checkout chưa trả tiền vẫn bị ẩn.
+                .andWhere(
+                    `(
+                    order.is_sandbox = false OR EXISTS (
+                        SELECT 1 FROM payment_attempts paid_attempt
+                        WHERE paid_attempt.order_id = order.id AND paid_attempt.status = 'PAID'
+                    )
+                )`,
                 )
                 .setParameters({
                     toShip: OrderFulfillmentStatus.TO_SHIP,
@@ -231,6 +240,14 @@ export class OrderRepository {
                 { shopId },
             )
             .where('order.id IN (:...orderIds)', { orderIds })
+            .andWhere(
+                `(
+                order.is_sandbox = false OR EXISTS (
+                    SELECT 1 FROM payment_attempts paid_attempt
+                    WHERE paid_attempt.order_id = order.id AND paid_attempt.status = 'PAID'
+                )
+            )`,
+            )
             .getMany();
         const orderById = new Map(orders.map((order) => [order.id, order]));
         return [
@@ -253,6 +270,14 @@ export class OrderRepository {
             )
             .leftJoinAndSelect('order.statusHistory', 'statusHistory')
             .where('order.id = :orderId', { orderId })
+            .andWhere(
+                `(
+                order.is_sandbox = false OR EXISTS (
+                    SELECT 1 FROM payment_attempts paid_attempt
+                    WHERE paid_attempt.order_id = order.id AND paid_attempt.status = 'PAID'
+                )
+            )`,
+            )
             .andWhere(
                 `EXISTS (
           SELECT 1
@@ -284,7 +309,7 @@ export class OrderRepository {
             .getOne();
     }
 
-    // Tổng hợp số lượng bán theo từng item thay vì theo trạng thái tổng của order.
+    // Tổng hợp số lượng bán theo từng item; sale Sandbox đã xác nhận được tính như giao dịch LIVE.
     // Order RETURN_REFUND vẫn giữ các item không hoàn để không làm mất lượt bán của sản phẩm khác trong cùng đơn.
     // Chỉ item đã đi vào quy trình hoàn mới bị loại; request bị từ chối hoặc customer tự hủy vẫn được tính như một sale.
     async findSoldQuantities(
@@ -359,7 +384,7 @@ export class OrderRepository {
             .getMany();
     }
 
-    // Tập trung điều kiện shop/status/search để list và count dùng cùng một tập dữ liệu.
+    // Tập trung điều kiện shop/status/search để list và count dùng cùng một tập dữ liệu; đơn Sandbox đã PAID đi đủ các stage như LIVE.
     private createSellerFilterQuery(
         shopId: string,
         query: SellerOrderListQueryDto,
@@ -372,6 +397,15 @@ export class OrderRepository {
             AND seller_item.seller_shop_id = :shopId
         )`,
             { shopId },
+        );
+        // Dựa vào attempt gốc thay vì trạng thái hiện tại để đơn đã refund vẫn còn trong lịch sử Seller Center.
+        filterQuery.andWhere(
+            `(
+                order.is_sandbox = false OR EXISTS (
+                    SELECT 1 FROM payment_attempts paid_attempt
+                    WHERE paid_attempt.order_id = order.id AND paid_attempt.status = 'PAID'
+                )
+            )`,
         );
 
         if (query.status) {

@@ -24,6 +24,7 @@ import { OrderResponseMapper } from '@/modules/order/application/services/order/
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { SellerOrderAccessService } from '@/modules/order/application/services/order/seller-order-access.service';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
+import { PaymentService } from '@/modules/order/application/services/payment/payment.service';
 
 // Logger tối giản dùng cho TestingModule, không làm nhiễu output của unit test.
 class MockLoggerService {
@@ -143,6 +144,14 @@ describe('OrderCommandService', () => {
                 { provide: OrderEventsService, useValue: mockOrderEvents },
                 { provide: OrderResponseMapper, useValue: mockResponseMapper },
                 { provide: DataSource, useValue: mockDataSource },
+                {
+                    provide: PaymentService,
+                    useValue: {
+                        assertVnpayCheckoutAllowed: jest.fn(),
+                        isSandboxMode: jest.fn().mockReturnValue(false),
+                        startVnpayPayment: jest.fn(),
+                    },
+                },
             ],
         })
             .setLogger(new MockLoggerService())

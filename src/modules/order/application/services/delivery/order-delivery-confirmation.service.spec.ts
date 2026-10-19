@@ -19,6 +19,7 @@ import { OrderRepository } from '@/modules/order/infrastructure/repositories/ord
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
 import { OrderDeliveryConfirmationService } from '@/modules/order/application/services/delivery/order-delivery-confirmation.service';
+import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
 
 describe('OrderDeliveryConfirmationService', () => {
     let target: OrderDeliveryConfirmationService;
@@ -26,6 +27,7 @@ describe('OrderDeliveryConfirmationService', () => {
     let mockResponseMapper: DeepMocked<OrderResponseMapper>;
     let mockOrderEvents: DeepMocked<OrderEventsService>;
     let mockDataSource: DeepMocked<DataSource>;
+    let mockSellerWalletRepository: { releaseCompletedOrder: jest.Mock };
 
     const ownerId = '11111111-1111-4111-8111-111111111111';
     const orderId = '22222222-2222-4222-8222-222222222222';
@@ -92,6 +94,9 @@ describe('OrderDeliveryConfirmationService', () => {
         mockResponseMapper = createMock<OrderResponseMapper>();
         mockOrderEvents = createMock<OrderEventsService>();
         mockDataSource = createMock<DataSource>();
+        mockSellerWalletRepository = {
+            releaseCompletedOrder: jest.fn().mockResolvedValue(undefined),
+        };
 
         const module: TestingModule = await Test.createTestingModule({
             providers: [
@@ -100,6 +105,10 @@ describe('OrderDeliveryConfirmationService', () => {
                 { provide: OrderResponseMapper, useValue: mockResponseMapper },
                 { provide: OrderEventsService, useValue: mockOrderEvents },
                 { provide: DataSource, useValue: mockDataSource },
+                {
+                    provide: SELLER_WALLET_REPOSITORY,
+                    useValue: mockSellerWalletRepository,
+                },
             ],
         }).compile();
         target = module.get<OrderDeliveryConfirmationService>(
@@ -198,6 +207,9 @@ describe('OrderDeliveryConfirmationService', () => {
         expect(mockOrderEvents.publishDeliveryConfirmed).toHaveBeenCalledWith(
             orderId,
         );
+        expect(
+            mockSellerWalletRepository.releaseCompletedOrder,
+        ).toHaveBeenCalledWith(orderId);
     });
 
     // Customer báo issue thì order phải rời tab Chờ xác nhận sang Trả hàng/Hoàn tiền, nhưng issue vẫn mở cho Seller xử lý.
@@ -240,5 +252,20 @@ describe('OrderDeliveryConfirmationService', () => {
         expect(
             mockOrderEvents.publishDeliveryAutoConfirmed,
         ).not.toHaveBeenCalled();
+    });
+
+    // Auto-complete là cùng mốc nghiệp vụ COMPLETED nên phải thử giải phóng tiền hàng đúng một lần.
+    it('should release seller funds when the delivery confirmation window expires', async () => {
+        const order = createDeliveredOrder();
+        order.deliveryConfirmationDeadline = new Date(Date.now() - 60_000);
+        mockTransaction(order);
+
+        const completed = await target.autoComplete(orderId);
+
+        expect(completed).toBe(true);
+        expect(order.fulfillmentStatus).toBe(OrderFulfillmentStatus.COMPLETED);
+        expect(
+            mockSellerWalletRepository.releaseCompletedOrder,
+        ).toHaveBeenCalledWith(orderId);
     });
 });

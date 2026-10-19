@@ -90,6 +90,7 @@ export class OrderResponseMapper {
             paymentStatus:
                 order.paymentStatus ?? PaymentStatus.COD_PENDING_COLLECTION,
             paymentMethod: order.paymentMethod,
+            isSandbox: order.isSandbox,
             shopItemTotal: this.sumLineTotals(items),
             shippingFee: order.shippingFee,
             shippingFeeBreakdown: order.shippingFeeBreakdown ?? [],
@@ -118,6 +119,7 @@ export class OrderResponseMapper {
             paymentStatus:
                 order.paymentStatus ?? PaymentStatus.COD_PENDING_COLLECTION,
             paymentMethod: order.paymentMethod,
+            isSandbox: order.isSandbox,
             shopItemTotal: this.sumLineTotals(items),
             shippingFee: order.shippingFee,
             shippingFeeBreakdown: order.shippingFeeBreakdown ?? [],
