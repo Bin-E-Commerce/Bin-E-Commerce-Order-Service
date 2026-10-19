@@ -111,6 +111,34 @@ export class Order {
     })
     paymentMethod!: PaymentMethod;
 
+    @Column({ name: 'payment_expires_at', type: 'timestamptz', nullable: true })
+    paymentExpiresAt!: Date | null;
+
+    @Column({ name: 'is_sandbox', type: 'boolean', default: false })
+    isSandbox!: boolean;
+
+    @Column({ name: 'cod_remitted_at', type: 'timestamptz', nullable: true })
+    codRemittedAt!: Date | null;
+
+    @Column({
+        name: 'cod_remittance_reference',
+        type: 'varchar',
+        length: 120,
+        nullable: true,
+    })
+    codRemittanceReference!: string | null;
+
+    @Column({
+        name: 'cod_remittance_confirmed_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    codRemittanceConfirmedBy!: string | null;
+
+    @Column({ name: 'checkout_cart_item_id', type: 'uuid', nullable: true })
+    checkoutCartItemId!: string | null;
+
     @Column({ name: 'shipping_address_id', type: 'uuid' })
     shippingAddressId!: string;
 

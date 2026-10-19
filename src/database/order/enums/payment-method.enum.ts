@@ -1,6 +1,5 @@
-// File này giới hạn phương thức thanh toán mà checkout Phase 1 hỗ trợ.
-
-// COD là lựa chọn duy nhất vì payment gateway và webhook chưa thuộc Phase 1.
+// File này định nghĩa các phương thức thanh toán được backend chấp nhận.
 export enum PaymentMethod {
     COD = 'COD',
+    VNPAY = 'VNPAY',
 }

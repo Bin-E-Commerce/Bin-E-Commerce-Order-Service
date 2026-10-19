@@ -27,6 +27,20 @@ import { OrderDeliveryAutomationService } from '@/modules/order/application/serv
 import { ShipmentStatusConsumer } from '@/kafka/shipment-status.consumer';
 import { OrderPurchaseEventOutboxEntity } from '@/database/integration/entities/order-purchase-event-outbox.entity';
 import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
+import { PaymentAttempt } from '@/database/payment/entities/payment-attempt.entity';
+import { SellerWallet } from '@/database/payment/entities/seller-wallet.entity';
+import { SellerWalletLedger } from '@/database/payment/entities/seller-wallet-ledger.entity';
+import { VnpayIpnController } from '@/modules/order/presentation/controllers/vnpay-ipn.controller';
+import { PaymentService } from '@/modules/order/application/services/payment/payment.service';
+import { VnpayGatewayService } from '@/modules/order/application/services/payment/vnpay-gateway.service';
+import { SellerWalletRepository } from '@/modules/order/infrastructure/repositories/seller-wallet.repository';
+import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
+import { SellerFinanceController } from '@/modules/order/presentation/controllers/seller-finance.controller';
+import { AdminFinanceController } from '@/modules/order/presentation/controllers/admin-finance.controller';
+import { WalletDeposit } from '@/database/payment/entities/wallet-deposit.entity';
+import { WalletWithdrawalRequest } from '@/database/payment/entities/wallet-withdrawal-request.entity';
+import { PlatformFinanceLedger } from '@/database/payment/entities/platform-finance-ledger.entity';
+import { FinanceSettlementBatch } from '@/database/payment/entities/finance-settlement-batch.entity';
 
 // Module chỉ expose controller Order; cross-service call được giữ trong client adapter tương ứng.
 @Module({
@@ -38,6 +52,13 @@ import { SellerDashboardOrderService } from '@/modules/order/application/service
             OrderReturnRequest,
             OrderDeliveryIssue,
             OrderPurchaseEventOutboxEntity,
+            PaymentAttempt,
+            SellerWallet,
+            SellerWalletLedger,
+            WalletDeposit,
+            WalletWithdrawalRequest,
+            PlatformFinanceLedger,
+            FinanceSettlementBatch,
         ]),
     ],
     controllers: [
@@ -45,6 +66,9 @@ import { SellerDashboardOrderService } from '@/modules/order/application/service
         SellerOrderController,
         InternalOrderController,
         InternalRecommendationController,
+        VnpayIpnController,
+        SellerFinanceController,
+        AdminFinanceController,
     ],
     providers: [
         OrderRepository,
@@ -62,6 +86,13 @@ import { SellerDashboardOrderService } from '@/modules/order/application/service
         OrderDeliveryAutomationService,
         SellerDashboardOrderService,
         ShipmentStatusConsumer,
+        PaymentService,
+        VnpayGatewayService,
+        SellerWalletRepository,
+        {
+            provide: SELLER_WALLET_REPOSITORY,
+            useExisting: SellerWalletRepository,
+        },
     ],
 })
 export class OrderModule {}
