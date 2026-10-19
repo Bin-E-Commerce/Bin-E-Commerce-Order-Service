@@ -58,7 +58,7 @@ export class SellerDashboardOrderService {
     ) {}
 
     // Tổng hợp số lượng bán theo từng biến thể để Agent đánh giá tốc độ bán trong đúng shop và kỳ yêu cầu.
-    // Chỉ tính đơn đã xác nhận, giao dịch hoàn tất; item đang trong quy trình hoàn bị loại theo cùng quy tắc doanh thu.
+    // Đơn VNPay Sandbox đã xác minh được tính như sale bình thường; chỉ item trong quy trình hoàn mới bị loại khỏi tổng.
     // Kết quả chỉ trả các biến thể có giao dịch, nên caller chỉ được gán số 0 sau khi request aggregate thành công.
     async getVariantSales(input: {
         shopId: string;
@@ -112,7 +112,7 @@ export class SellerDashboardOrderService {
     }
 
     // Tổng hợp một snapshot để Seller Service không phải gọi nhiều endpoint nhỏ.
-    // Doanh thu dùng line_total của item thuộc shop, loại đơn chưa xác nhận và đơn đã hủy.
+    // Doanh thu dùng line_total của item thuộc shop; Sandbox đã PAID theo cùng điều kiện xác nhận, hoàn tất và trả hàng.
     async getSnapshot(
         shopId: string,
         currentRange: SellerDashboardDateRange,
@@ -229,7 +229,7 @@ export class SellerDashboardOrderService {
         };
     }
 
-    // Chỉ vẽ doanh thu đơn hoàn thành và group theo giờ Việt Nam để ngày không lệch do database lưu UTC.
+    // Chỉ vẽ doanh thu đơn hoàn thành, gồm Sandbox đã PAID; group theo giờ Việt Nam để ngày không lệch do DB lưu UTC.
     private async getRevenueTrend(
         shopId: string,
         range: SellerDashboardDateRange,
@@ -280,7 +280,7 @@ export class SellerDashboardOrderService {
         }));
     }
 
-    // Đếm trạng thái toàn shop để phần Việc cần xử lý luôn phản ánh queue hiện tại.
+    // Đếm trạng thái toàn shop; chỉ đưa Sandbox đã xác nhận thanh toán vào tổng để checkout pending không thành việc seller.
     private async getOrderStatusCounts(
         shopId: string,
     ): Promise<SellerDashboardOrderStatusCounts> {
@@ -323,6 +323,15 @@ export class SellerDashboardOrderService {
                 )`,
                 { shopId },
             )
+            // Chỉ đưa Sandbox có attempt đã xác nhận vào dashboard; attempt giữ trạng thái PAID kể cả khi tiền được hoàn sau đó.
+            .andWhere(
+                `(
+                ord.is_sandbox = false OR EXISTS (
+                    SELECT 1 FROM payment_attempts paid_attempt
+                    WHERE paid_attempt.order_id = ord.id AND paid_attempt.status = 'PAID'
+                )
+            )`,
+            )
             .setParameters({
                 pendingConfirmation: OrderStatus.PENDING,
                 pendingShipment: OrderFulfillmentStatus.TO_SHIP,
@@ -346,10 +355,11 @@ export class SellerDashboardOrderService {
         };
     }
 
-    // Return queue dùng cùng nhóm trạng thái actionable với Seller Order API hiện có.
+    // Return queue dùng cùng nhóm trạng thái actionable với Seller Order API; return Sandbox đã PAID cũng được xử lý.
     private async getPendingReturns(shopId: string): Promise<number> {
         return this.returnRepository
             .createQueryBuilder('return_request')
+            .innerJoin(Order, 'ord', 'ord.id = return_request.order_id')
             .where('return_request.shop_id = :shopId', { shopId })
             .andWhere('return_request.status IN (:...statuses)', {
                 statuses: [
@@ -360,7 +370,7 @@ export class SellerDashboardOrderService {
             .getCount();
     }
 
-    // Trả trang snapshot theo bộ lọc nghiệp vụ; hàng đợi ưu tiên có thứ tự riêng và luôn báo nếu còn kết quả.
+    // Trả trang snapshot theo bộ lọc nghiệp vụ; Sandbox chỉ vào read model sau khi payment PAID và được ưu tiên như đơn thường.
     private async getLatestOrders(
         shopId: string,
         options: SellerDashboardOrderQuery = {},
@@ -371,6 +381,15 @@ export class SellerDashboardOrderService {
             .innerJoin('ord.items', 'item', 'item.seller_shop_id = :shopId', {
                 shopId,
             })
+            // Dùng bằng chứng attempt thay cho payment_status hiện tại để lịch sử đơn hoàn tiền vẫn tồn tại.
+            .where(
+                `(
+                ord.is_sandbox = false OR EXISTS (
+                    SELECT 1 FROM payment_attempts paid_attempt
+                    WHERE paid_attempt.order_id = ord.id AND paid_attempt.status = 'PAID'
+                )
+            )`,
+            )
             .select('ord.id', 'id')
             .addSelect('ord.order_number', 'orderNumber')
             .addSelect('ord.status', 'status')
@@ -536,7 +555,7 @@ export class SellerDashboardOrderService {
         return { orders, hasMore };
     }
 
-    // Lấy tối đa 50 sản phẩm có bán trong kỳ và tổng số nhóm sản phẩm; mọi metric đều theo order, không trộn tổng bán tích lũy.
+    // Lấy tối đa 50 sản phẩm có bán trong kỳ, kể cả Sandbox đã PAID; metric vẫn chỉ tính order hoàn tất trong kỳ.
     private async getTopProducts(
         shopId: string,
         range: SellerDashboardDateRange,

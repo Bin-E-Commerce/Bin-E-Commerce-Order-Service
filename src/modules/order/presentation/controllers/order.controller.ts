@@ -4,6 +4,7 @@ import {
     Controller,
     Get,
     Headers,
+    Ip,
     Param,
     ParseUUIDPipe,
     Post,
@@ -77,12 +78,14 @@ export class OrderController {
         @Headers('x-user-email') ownerEmail: string | undefined,
         @Headers('idempotency-key') idempotencyKey: string,
         @Body() dto: CreateCodOrderDto,
+        @Ip() ipAddress: string,
     ): Promise<OrderResponse> {
         return this.orderCommandService.createCodOrder(
             ownerId,
             dto,
             idempotencyKey,
             ownerEmail,
+            ipAddress,
         );
     }
 

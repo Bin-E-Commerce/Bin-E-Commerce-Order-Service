@@ -15,6 +15,7 @@ export interface OrderResponse {
     fulfillmentStatus?: OrderFulfillmentStatus;
     paymentStatus?: PaymentStatus;
     paymentMethod: PaymentMethod;
+    paymentUrl?: string;
     subtotal: string;
     shippingFee: string;
     totalAmount: string;
@@ -92,6 +93,7 @@ export interface SellerOrderListItemResponse {
     fulfillmentStatus?: OrderFulfillmentStatus;
     paymentStatus?: PaymentStatus;
     paymentMethod: PaymentMethod;
+    isSandbox: boolean;
     shopItemTotal: string;
     shippingFee: string;
     shippingFeeBreakdown: Array<Record<string, unknown>>;
@@ -139,6 +141,7 @@ export interface SellerOrderResponse {
     fulfillmentStatus: OrderFulfillmentStatus;
     paymentStatus: PaymentStatus;
     paymentMethod: PaymentMethod;
+    isSandbox: boolean;
     shopItemTotal: string;
     shippingFee: string;
     shippingFeeBreakdown: Array<Record<string, unknown>>;

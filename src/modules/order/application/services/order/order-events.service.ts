@@ -77,7 +77,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
         if (this.dispatchTimer) clearInterval(this.dispatchTimer);
     }
 
-    // Replay completed purchase theo trang; eventId publishPurchaseCompleted ổn định nên downstream idempotent.
+    // Replay purchase đã hoàn tất theo trang; cả Sandbox đã thanh toán được phát cùng eventId ổn định để downstream idempotent.
     async replayCompletedPurchases(
         page: number,
         pageSize: number,
@@ -108,7 +108,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
         };
     }
 
-    // Ghi completed event vào outbox; caller truyền manager khi trạng thái order cũng đang trong transaction.
+    // Ghi completed event vào outbox cho mọi order đã hoàn tất; caller truyền manager nếu trạng thái đang ở trong transaction.
     async enqueuePurchaseCompleted(
         orderId: string,
         manager?: EntityManager,
@@ -159,7 +159,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
         await this.dispatchPendingSafe();
     }
 
-    // Phát tín hiệu item đã hoàn về sau inspection để Recommendation trừ preference, không tính lại sản phẩm bị trả.
+    // Phát tín hiệu item đã hoàn về sau inspection để Recommendation trừ preference cho cả giao dịch Sandbox đã ghi nhận như sale.
     async publishPurchaseReturned(
         orderId: string,
         returnId: string,
@@ -459,7 +459,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
             data: {
                 orderId: order.id,
                 orderNumber: order.orderNumber,
-                paymentMethod: 'COD',
+                paymentMethod: order.paymentMethod,
                 totalAmount: order.totalAmount,
                 createdAt: occurredAt,
                 customerUserId: order.ownerId,
@@ -498,7 +498,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
             data: {
                 orderId: order.id,
                 orderNumber: order.orderNumber,
-                paymentMethod: 'COD',
+                paymentMethod: order.paymentMethod,
                 totalAmount: order.totalAmount,
                 createdAt: order.createdAt?.toISOString() ?? cancelledAt,
                 cancelledAt,
