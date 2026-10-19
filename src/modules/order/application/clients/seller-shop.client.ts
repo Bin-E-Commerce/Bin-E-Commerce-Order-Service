@@ -15,6 +15,15 @@ interface SellerShopProfileResponse {
     };
 }
 
+// Dữ liệu payout chỉ được lấy sau khi service seller đã xác thực quyền tài chính và ownership.
+export interface SellerPayoutAccount {
+    shopId: string;
+    bankCode: string | null;
+    bankName: string | null;
+    accountHolder: string | null;
+    accountNumber: string | null;
+}
+
 @Injectable()
 export class SellerShopClient {
     private readonly targetBase: string;
@@ -72,5 +81,49 @@ export class SellerShopClient {
             );
         }
         return shopId;
+    }
+
+    // Lấy snapshot ngân hàng riêng qua endpoint seller được bảo vệ bởi SELLER_FINANCE_READ.
+    async getPayoutAccount(
+        currentUser: SellerOrderUserContext,
+    ): Promise<SellerPayoutAccount> {
+        let response: Response;
+        try {
+            response = await fetch(
+                `${this.targetBase}/api/v1/seller/shop/profile/payout-account`,
+                {
+                    headers: {
+                        accept: 'application/json',
+                        'x-user-id': currentUser.userId,
+                        'x-user-email': currentUser.email,
+                        'x-user-permissions': currentUser.permissions.join(','),
+                    },
+                    signal: AbortSignal.timeout(5_000),
+                },
+            );
+        } catch {
+            throw new BadGatewayException(
+                'Không thể xác minh tài khoản nhận tiền lúc này.',
+            );
+        }
+        if (
+            response.status === 401 ||
+            response.status === 403 ||
+            response.status === 404
+        ) {
+            throw new NotFoundException(
+                'Chưa thiết lập được tài khoản nhận tiền của shop.',
+            );
+        }
+        if (!response.ok)
+            throw new BadGatewayException(
+                'Seller Service chưa sẵn sàng để xác minh tài khoản nhận tiền.',
+            );
+        const account = (await response.json()) as SellerPayoutAccount;
+        if (!account.shopId)
+            throw new NotFoundException(
+                'Chưa thiết lập được tài khoản nhận tiền của shop.',
+            );
+        return account;
     }
 }
