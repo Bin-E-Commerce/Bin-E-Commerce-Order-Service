@@ -8,7 +8,7 @@ import { OrderReturnRequest } from '@/database/returns/entities/order-return-req
 import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
-import { OrderRepository } from '@/modules/order/infrastructure/repositories/order.repository';
+import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
 import { SellerShopClient } from '@/modules/order/application/clients/seller-shop.client';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import { ShippingClient } from '@/modules/order/application/clients/shipping.client';
@@ -90,6 +90,7 @@ describe('OrderReturnService', () => {
         } as unknown as DeepMocked<OrderEventsService>;
         shipping = {
             calculateQuote: jest.fn(),
+            getReturnShipmentState: jest.fn().mockResolvedValue(null),
         } as unknown as DeepMocked<ShippingClient>;
         shipping.calculateQuote.mockResolvedValue({ fee: '11942.86' } as never);
         service = new OrderReturnService(
@@ -250,6 +251,39 @@ describe('OrderReturnService', () => {
         ).rejects.toThrow('chọn bên chịu phí');
 
         expect(returns.save).not.toHaveBeenCalled();
+    });
+
+    // Migration cũ để OTHER ở AWAITING_SHIPMENT không được phép kẹt vĩnh viễn; seller có thể phân loại payer một lần.
+    it('reopens a legacy OTHER request in AWAITING_SHIPMENT for payer review', async () => {
+        const request = {
+            id: 'return-legacy',
+            orderId: 'order-1',
+            ownerId: 'customer-1',
+            shopId: 'shop-1',
+            status: OrderReturnStatus.AWAITING_SHIPMENT,
+            reason: OrderReturnReason.OTHER,
+            returnShippingPayer: null,
+            returnShippingEstimatedCost: '11943.00',
+            refundItemAmount: '100000.00',
+            refundShippingAmount: '0.00',
+            refundAmount: '100000.00',
+        } as OrderReturnRequest;
+        returns.findOne.mockResolvedValue(request);
+        returns.save.mockResolvedValue(request);
+        shops.getOwnedShopId.mockResolvedValue('shop-1');
+        orders.findOwnedById.mockResolvedValue(null);
+
+        const result = await service.review(
+            { userId: 'seller-1', email: 'seller@example.test' } as never,
+            'return-legacy',
+            { returnShippingPayer: 'SELLER' },
+            OrderReturnStatus.APPROVED,
+        );
+
+        expect(result.returnShippingPayer).toBe('SELLER');
+        expect(result.status).toBe(OrderReturnStatus.AWAITING_SHIPMENT);
+        expect(result.estimatedRefundAmount).toBe('100000.00');
+        expect(returns.save).toHaveBeenCalledWith(request);
     });
 
     // GHN quote cao hơn giá trị món hàng không được chuyển thành khoản khấu trừ lớn hơn toàn bộ tiền hoàn hàng.
