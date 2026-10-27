@@ -9,6 +9,7 @@ import {
     MaxLength,
     MinLength,
     IsUUID,
+    IsBoolean,
 } from 'class-validator';
 
 export class CreateWalletDepositDto {
@@ -24,6 +25,10 @@ export class CreateWalletWithdrawalDto {
 }
 
 export class AdminWalletWithdrawalActionDto {
+    @IsOptional()
+    @IsBoolean()
+    manualTransferAcknowledged?: boolean;
+
     @IsOptional()
     @IsString()
     @MaxLength(120)
