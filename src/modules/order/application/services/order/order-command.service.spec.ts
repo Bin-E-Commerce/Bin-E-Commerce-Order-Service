@@ -11,7 +11,7 @@ import { AuthClient } from '@/modules/order/application/clients/auth.client';
 import { CartClient } from '@/modules/order/application/clients/cart.client';
 import { ProductClient } from '@/modules/order/application/clients/product.client';
 import { SellerShopClient } from '@/modules/order/application/clients/seller-shop.client';
-import { CreateCodOrderDto } from '@/modules/order/presentation/dto/create-cod-order.dto';
+import { CreateCodOrderDto } from '@/modules/order/presentation/dto/orders/create-cod-order.dto';
 import {
     EmptyCartError,
     IdempotencyConflictError,
@@ -19,12 +19,12 @@ import {
 import { PaymentMethod } from '@/database/order/enums/payment-method.enum';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
-import { OrderRepository } from '@/modules/order/infrastructure/repositories/order.repository';
+import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { SellerOrderAccessService } from '@/modules/order/application/services/order/seller-order-access.service';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
-import { PaymentService } from '@/modules/order/application/services/payment/payment.service';
+import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
 
 // Logger tối giản dùng cho TestingModule, không làm nhiễu output của unit test.
 class MockLoggerService {
@@ -147,9 +147,9 @@ describe('OrderCommandService', () => {
                 {
                     provide: PaymentService,
                     useValue: {
-                        assertVnpayCheckoutAllowed: jest.fn(),
+                        assertPay2sCheckoutAllowed: jest.fn(),
                         isSandboxMode: jest.fn().mockReturnValue(false),
-                        startVnpayPayment: jest.fn(),
+                        startPay2sPayment: jest.fn(),
                     },
                 },
             ],

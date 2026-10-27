@@ -22,7 +22,7 @@ import { Order } from '@/database/order/entities/order.entity';
 import {
     fromCents,
     toCents,
-} from '@/modules/order/application/utils/order-money.util';
+} from '@/modules/order/application/utils/money/order-money.util';
 import type { OrderPurchaseEvent } from '@common/kafka/events/order.events';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { OrderPurchaseEventOutboxEntity } from '@/database/integration/entities/order-purchase-event-outbox.entity';
@@ -283,7 +283,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
                 event_id: string;
                 topic: string;
                 aggregate_id: string;
-                payload: OrderPurchaseEvent;
+                payload: OrderCreatedEvent | OrderPurchaseEvent;
                 attempt_count: number;
             }>,
             number,
@@ -445,11 +445,56 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
         items: SellerRecipientSource[],
         customerEmail?: string,
     ): Promise<void> {
-        const recipients = this.groupSellerRecipients(items);
+        const event = this.toOrderCreatedEvent(order, items, customerEmail);
+        if (!this.orderRepository || !this.purchaseOutboxRepository) {
+            await this.kafkaProducer.publish(
+                OrderEvents.CREATED,
+                event,
+                order.id,
+            );
+            return;
+        }
+        await this.enqueueOutboxEvent(event);
+        await this.dispatchPendingSafe();
+    }
 
+    // Ghi order-created cùng transaction thanh toán để IPN trùng hoặc process restart không làm mất notification.
+    async enqueueCreatedForOrder(
+        orderId: string,
+        manager: EntityManager,
+    ): Promise<void> {
+        if (!this.purchaseOutboxRepository) return;
+        const order = await manager.getRepository(Order).findOne({
+            where: { id: orderId },
+            relations: { items: true },
+        });
+        if (!order) return;
+        const items = (order.items ?? []).map((item) => ({
+            sellerOwnerId: item.sellerOwnerId,
+            sellerShopId: item.sellerShopId,
+            quantity: item.quantity,
+            lineTotal: item.lineTotal,
+            productName: item.productName,
+            variantName: item.variantName,
+            imageUrl: item.imageUrl,
+            unitPrice: item.unitPrice,
+        }));
+        await this.enqueueOutboxEvent(
+            this.toOrderCreatedEvent(order, items),
+            manager,
+        );
+    }
+
+    // Chuẩn hóa notification snapshot một lần để luồng COD và Pay2S tạo cùng event contract.
+    private toOrderCreatedEvent(
+        order: Order,
+        items: SellerRecipientSource[],
+        customerEmail?: string,
+    ): OrderCreatedEvent {
+        const recipients = this.groupSellerRecipients(items);
         const occurredAt =
             order.createdAt?.toISOString() ?? new Date().toISOString();
-        const event: OrderCreatedEvent = {
+        return {
             eventId: `order-created:${order.id}`,
             eventName: OrderEvents.CREATED,
             eventVersion: 1,
@@ -468,8 +513,37 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
                 recipients: this.toEventRecipients(recipients),
             },
         };
+    }
 
-        await this.kafkaProducer.publish(OrderEvents.CREATED, event, order.id);
+    // Ghi event idempotent vào outbox hiện có; nếu được truyền transaction thì event chỉ commit cùng nguồn dữ liệu.
+    private async enqueueOutboxEvent(
+        event: OrderCreatedEvent | OrderPurchaseEvent,
+        manager?: EntityManager,
+    ): Promise<void> {
+        if (!this.purchaseOutboxRepository) return;
+        const enqueue = async (transactionManager: EntityManager) => {
+            await transactionManager
+                .getRepository(OrderPurchaseEventOutboxEntity)
+                .createQueryBuilder()
+                .insert()
+                .into(OrderPurchaseEventOutboxEntity)
+                .values({
+                    eventId: event.eventId,
+                    topic: event.eventName,
+                    aggregateId: event.aggregateId,
+                    payload: event,
+                    status: 'PENDING',
+                    availableAt: new Date(),
+                    updatedAt: new Date(),
+                })
+                .orIgnore()
+                .execute();
+        };
+        if (manager) {
+            await enqueue(manager);
+            return;
+        }
+        await this.dataSource.transaction(enqueue);
     }
 
     // Phát event sau khi transaction hủy đã commit để customer và các seller nhận cùng một kết quả cuối cùng.

@@ -1,4 +1,4 @@
-// Entity lưu từng lần thanh toán VNPay; không giữ thông tin thẻ và không coi return URL là bằng chứng thanh toán.
+// Entity lưu từng lần thanh toán Pay2S; không giữ thông tin ngân hàng và không coi return URL là bằng chứng thanh toán.
 import {
     Column,
     CreateDateColumn,
@@ -30,6 +30,22 @@ export class PaymentAttempt {
 
     @Column({ name: 'merchant_reference', type: 'varchar', length: 64 })
     merchantReference!: string;
+
+    @Column({
+        name: 'provider_request_id',
+        type: 'varchar',
+        length: 80,
+        nullable: true,
+    })
+    providerRequestId!: string | null;
+
+    @Column({
+        name: 'provider_order_info',
+        type: 'varchar',
+        length: 180,
+        nullable: true,
+    })
+    providerOrderInfo!: string | null;
 
     @Column({
         name: 'provider_transaction_id',
@@ -68,11 +84,42 @@ export class PaymentAttempt {
     @Column({ name: 'expires_at', type: 'timestamptz' })
     expiresAt!: Date;
 
-    @Column({ name: 'provider_create_date', type: 'char', length: 14 })
-    providerCreateDate!: string;
+    @Column({
+        name: 'provider_create_date',
+        type: 'char',
+        length: 14,
+        nullable: true,
+    })
+    providerCreateDate!: string | null;
 
     @Column({ name: 'confirmed_at', type: 'timestamptz', nullable: true })
     confirmedAt!: Date | null;
+
+    @Column({
+        name: 'refund_transaction_reference',
+        type: 'varchar',
+        length: 180,
+        nullable: true,
+    })
+    refundTransactionReference!: string | null;
+
+    @Column({ name: 'refund_proof', type: 'jsonb', nullable: true })
+    refundProof!: Record<string, unknown> | null;
+
+    @Column({
+        name: 'refund_processed_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    refundProcessedBy!: string | null;
+
+    @Column({
+        name: 'refund_processed_at',
+        type: 'timestamptz',
+        nullable: true,
+    })
+    refundProcessedAt!: Date | null;
 
     @Column({
         name: 'provider_response',
