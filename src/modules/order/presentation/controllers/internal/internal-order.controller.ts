@@ -15,11 +15,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { OrderReturnService } from '@/modules/order/application/services/returns/order-return.service';
-import { UpdateReturnShippingCostDto } from '@/modules/order/presentation/dto/order-return.dto';
-import { CancelOrderDto } from '@/modules/order/presentation/dto/cancel-order.dto';
-import { InternalSellerDashboardQueryDto } from '@/modules/order/presentation/dto/internal-seller-dashboard-query.dto';
+import { UpdateReturnShippingCostDto } from '@/modules/order/presentation/dto/orders/order-return.dto';
+import { CancelOrderDto } from '@/modules/order/presentation/dto/orders/cancel-order.dto';
+import { InternalSellerDashboardQueryDto } from '@/modules/order/presentation/dto/internal/internal-seller-dashboard-query.dto';
 import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
-import { InternalVariantSalesQueryDto } from '@/modules/order/presentation/dto/internal-variant-sales-query.dto';
+import { InternalVariantSalesQueryDto } from '@/modules/order/presentation/dto/internal/internal-variant-sales-query.dto';
 
 @Controller({ path: 'internal/orders', version: '1' })
 export class InternalOrderController {

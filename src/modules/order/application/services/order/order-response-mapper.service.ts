@@ -9,12 +9,12 @@ import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import {
     fromCents,
     toCents,
-} from '@/modules/order/application/utils/order-money.util';
+} from '@/modules/order/application/utils/money/order-money.util';
 import type {
     OrderResponse,
     SellerOrderListItemResponse,
     SellerOrderResponse,
-} from '@/modules/order/application/types/order-response.type';
+} from '@/modules/order/application/types/order/order-response.type';
 
 // Không leak idempotency key, fingerprint hay ownerId ra public response.
 @Injectable()

@@ -14,8 +14,8 @@ import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
 import {
     DeliveryConfirmationDecision,
     type DeliveryConfirmationDto,
-} from '@/modules/order/presentation/dto/delivery-confirmation.dto';
-import { OrderRepository } from '@/modules/order/infrastructure/repositories/order.repository';
+} from '@/modules/order/presentation/dto/orders/delivery-confirmation.dto';
+import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
 import { OrderDeliveryConfirmationService } from '@/modules/order/application/services/delivery/order-delivery-confirmation.service';

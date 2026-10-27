@@ -11,7 +11,7 @@ import {
 import type {
     CheckoutReservationResponse,
     ReservationLine,
-} from '@/modules/order/application/types/external-contracts.type';
+} from '@/modules/order/application/types/order/external-contracts.type';
 
 // Adapter này giữ mapping status từ Product Service ở ngoài application service.
 @Injectable()

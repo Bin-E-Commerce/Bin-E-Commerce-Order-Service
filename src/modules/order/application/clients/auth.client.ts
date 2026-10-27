@@ -7,7 +7,7 @@ import {
     CheckoutResourceNotFoundError,
     OrderDependencyUnavailableError,
 } from '@/modules/order/application/errors/order.errors';
-import type { ShippingAddressResponse } from '@/modules/order/application/types/external-contracts.type';
+import type { ShippingAddressResponse } from '@/modules/order/application/types/order/external-contracts.type';
 
 // Chỉ expose một thao tác đọc địa chỉ thuộc owner hiện tại cho use case checkout.
 @Injectable()

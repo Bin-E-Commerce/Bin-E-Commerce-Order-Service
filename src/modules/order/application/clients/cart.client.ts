@@ -8,7 +8,7 @@ import {
     CheckoutResourceNotFoundError,
     OrderDependencyUnavailableError,
 } from '@/modules/order/application/errors/order.errors';
-import type { ActiveCartResponse } from '@/modules/order/application/types/external-contracts.type';
+import type { ActiveCartResponse } from '@/modules/order/application/types/order/external-contracts.type';
 
 // Đóng gói URL, token và mapping lỗi của Cart Service ở một adapter duy nhất.
 @Injectable()

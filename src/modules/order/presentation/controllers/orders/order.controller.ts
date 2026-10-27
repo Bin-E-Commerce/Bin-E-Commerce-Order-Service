@@ -16,19 +16,19 @@ import {
     ApiResponse,
     ApiTags,
 } from '@nestjs/swagger';
-import { CancelOrderDto } from '@/modules/order/presentation/dto/cancel-order.dto';
-import { CreateCodOrderDto } from '@/modules/order/presentation/dto/create-cod-order.dto';
-import { CreateOrderQuoteDto } from '@/modules/order/presentation/dto/create-order-quote.dto';
-import { CreateOrderReturnDto } from '@/modules/order/presentation/dto/order-return.dto';
-import { OrderListQueryDto } from '@/modules/order/presentation/dto/order-list-query.dto';
+import { CancelOrderDto } from '@/modules/order/presentation/dto/orders/cancel-order.dto';
+import { CreateCodOrderDto } from '@/modules/order/presentation/dto/orders/create-cod-order.dto';
+import { CreateOrderQuoteDto } from '@/modules/order/presentation/dto/orders/create-order-quote.dto';
+import { CreateOrderReturnDto } from '@/modules/order/presentation/dto/orders/order-return.dto';
+import { OrderListQueryDto } from '@/modules/order/presentation/dto/orders/order-list-query.dto';
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { OrderReturnService } from '@/modules/order/application/services/returns/order-return.service';
 import { OrderDeliveryConfirmationService } from '@/modules/order/application/services/delivery/order-delivery-confirmation.service';
-import { DeliveryConfirmationDto } from '@/modules/order/presentation/dto/delivery-confirmation.dto';
+import { DeliveryConfirmationDto } from '@/modules/order/presentation/dto/orders/delivery-confirmation.dto';
 import type {
     OrderListResponse,
     OrderResponse,
-} from '@/modules/order/application/types/order-response.type';
+} from '@/modules/order/application/types/order/order-response.type';
 
 // Public Order API được Gateway bảo vệ bằng JWT và permission tương ứng.
 @ApiTags('orders')
