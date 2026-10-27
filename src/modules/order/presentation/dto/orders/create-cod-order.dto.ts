@@ -1,4 +1,4 @@
-// DTO này là contract đầu vào cho checkout COD hoặc VNPay.
+// DTO này là contract đầu vào cho checkout COD hoặc Pay2S.
 // Client chỉ được gửi địa chỉ, phương thức thanh toán và ghi chú; giá, item và tổng tiền do server tính.
 
 import {

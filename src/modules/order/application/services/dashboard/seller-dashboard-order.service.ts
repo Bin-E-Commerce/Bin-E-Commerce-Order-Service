@@ -21,7 +21,7 @@ import type {
     SellerDashboardOrderSummary,
     SellerDashboardRevenuePoint,
     SellerDashboardTopProduct,
-} from '@/modules/order/application/types/seller-dashboard-order.type';
+} from '@/modules/order/application/types/order/seller-dashboard-order.type';
 
 // Chỉ loại item đã thực sự đi vào quy trình hoàn; request bị từ chối hoặc customer tự hủy vẫn là sale hợp lệ.
 const RETURN_STATUSES_EXCLUDED_FROM_SALES = [
@@ -58,7 +58,7 @@ export class SellerDashboardOrderService {
     ) {}
 
     // Tổng hợp số lượng bán theo từng biến thể để Agent đánh giá tốc độ bán trong đúng shop và kỳ yêu cầu.
-    // Đơn VNPay Sandbox đã xác minh được tính như sale bình thường; chỉ item trong quy trình hoàn mới bị loại khỏi tổng.
+    // Đơn Pay2S Sandbox đã xác minh được tính như sale bình thường; chỉ item trong quy trình hoàn mới bị loại khỏi tổng.
     // Kết quả chỉ trả các biến thể có giao dịch, nên caller chỉ được gán số 0 sau khi request aggregate thành công.
     async getVariantSales(input: {
         shopId: string;

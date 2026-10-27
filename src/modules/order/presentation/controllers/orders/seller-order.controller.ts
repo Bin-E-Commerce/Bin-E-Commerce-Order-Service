@@ -17,18 +17,18 @@ import {
     ApiResponse,
     ApiTags,
 } from '@nestjs/swagger';
-import { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/seller-order-list-query.dto';
+import { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/orders/seller-order-list-query.dto';
 import type {
     SellerOrderListResponse,
     SellerOrderResponse,
-} from '@/modules/order/application/types/order-response.type';
+} from '@/modules/order/application/types/order/order-response.type';
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { SellerOrderAccessService } from '@/modules/order/application/services/order/seller-order-access.service';
 import { OrderReturnService } from '@/modules/order/application/services/returns/order-return.service';
 import {
     InspectOrderReturnDto,
     ReviewOrderReturnDto,
-} from '@/modules/order/presentation/dto/order-return.dto';
+} from '@/modules/order/presentation/dto/orders/order-return.dto';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
 
 @ApiTags('seller-orders')

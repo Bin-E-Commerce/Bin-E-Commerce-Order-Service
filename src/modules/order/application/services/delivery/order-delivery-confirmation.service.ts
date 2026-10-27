@@ -16,7 +16,7 @@ import { OrderDeliveryConfirmationStatus } from '@/database/delivery/enums/order
 import { OrderDeliveryIssueStatus } from '@/database/delivery/enums/order-delivery-issue-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
-import { OrderRepository } from '@/modules/order/infrastructure/repositories/order.repository';
+import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import { Inject, Optional } from '@nestjs/common';
@@ -26,7 +26,7 @@ import type { ShipmentStatus } from '@common/kafka/events/shipping.events';
 import {
     DeliveryConfirmationDecision,
     DeliveryConfirmationDto,
-} from '@/modules/order/presentation/dto/delivery-confirmation.dto';
+} from '@/modules/order/presentation/dto/orders/delivery-confirmation.dto';
 
 const AUTO_CONFIRMATION_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
 

@@ -7,7 +7,7 @@ import {
     OnModuleDestroy,
     OnModuleInit,
 } from '@nestjs/common';
-import { OrderRepository } from '@/modules/order/infrastructure/repositories/order.repository';
+import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
 import { OrderDeliveryConfirmationService } from '@/modules/order/application/services/delivery/order-delivery-confirmation.service';
 
 @Injectable()

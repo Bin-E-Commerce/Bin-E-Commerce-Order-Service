@@ -7,7 +7,7 @@ import {
     NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { SellerOrderUserContext } from '@/modules/order/application/types/seller-order-user-context.type';
+import type { SellerOrderUserContext } from '@/modules/order/application/types/order/seller-order-user-context.type';
 
 interface SellerShopProfileResponse {
     shop?: {

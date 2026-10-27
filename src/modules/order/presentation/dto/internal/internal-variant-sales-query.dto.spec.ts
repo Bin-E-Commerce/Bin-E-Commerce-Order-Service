@@ -1,7 +1,7 @@
 // Kiểm tra DTO của endpoint nội bộ khớp toàn bộ query string mà Seller Service gửi qua ValidationPipe.
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { InternalVariantSalesQueryDto } from '@/modules/order/presentation/dto/internal-variant-sales-query.dto';
+import { InternalVariantSalesQueryDto } from '@/modules/order/presentation/dto/internal/internal-variant-sales-query.dto';
 
 describe('InternalVariantSalesQueryDto', () => {
     // shopId phải được khai báo và validate để whitelist không từ chối query trước khi controller chạy.
