@@ -2,18 +2,18 @@
 
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { FindOptionsWhere, Repository } from 'typeorm';
+import { FindOptionsWhere, Not, Repository } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
-import type { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/seller-order-list-query.dto';
+import type { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/orders/seller-order-list-query.dto';
 import type {
     CustomerOrderTabCounts,
     SellerOrderTabCounts,
-} from '@/modules/order/application/types/order-response.type';
+} from '@/modules/order/application/types/order/order-response.type';
 
 // Các trạng thái này cho biết item đã đi vào quy trình hoàn thực tế; item bị từ chối hoặc customer tự hủy vẫn là một lượt bán hợp lệ.
 const RETURN_STATUSES_EXCLUDED_FROM_SALES = [
@@ -53,7 +53,8 @@ export class OrderRepository {
         });
     }
 
-    // Dùng findAndCount để tổng số luôn phản ánh đúng filter owner/status của trang hiện tại.
+    // Đơn Pay2S chưa thanh toán không được tính là đơn seller cần lấy hàng.
+    // Dùng cùng điều kiện ở danh sách và badge để số lượng tab khớp dữ liệu hiển thị.
     findOwnedPage(
         ownerId: string,
         page: number,
@@ -62,7 +63,13 @@ export class OrderRepository {
         stage?: OrderFulfillmentStatus,
     ): Promise<[Order[], number]> {
         const where: FindOptionsWhere<Order> = stage
-            ? { ownerId, fulfillmentStatus: stage }
+            ? {
+                  ownerId,
+                  fulfillmentStatus: stage,
+                  ...(stage === OrderFulfillmentStatus.TO_SHIP
+                      ? { status: Not(OrderStatus.PENDING) }
+                      : {}),
+              }
             : status
               ? { ownerId, status }
               : { ownerId };
@@ -84,8 +91,12 @@ export class OrderRepository {
                 'COUNT(*) FILTER (WHERE order.status = :pendingStatus)',
                 'pendingPayment',
             )
+            // Chỉ đơn đã qua thanh toán mới chuyển sang hàng đợi shop lấy hàng; PENDING vẫn thuộc tab thanh toán.
             .addSelect(
-                'COUNT(*) FILTER (WHERE order.fulfillment_status = :toShip)',
+                `COUNT(*) FILTER (
+                    WHERE order.fulfillment_status = :toShip
+                      AND order.status <> :pendingStatus
+                )`,
                 'toShip',
             )
             .addSelect(
@@ -132,7 +143,7 @@ export class OrderRepository {
         };
     }
 
-    // Đếm order đã đủ điều kiện hiển thị trong Seller Center theo stage; Sandbox đã trả tiền được tính như đơn VNPay bình thường.
+    // Đếm order đã đủ điều kiện hiển thị trong Seller Center theo stage; Sandbox đã trả tiền được tính như đơn Pay2S bình thường.
     async countSellerTabs(shopId: string): Promise<SellerOrderTabCounts> {
         const [row, actionableReturnRow] = await Promise.all([
             this.repository
@@ -176,6 +187,10 @@ export class OrderRepository {
                     )
                 )`,
                 )
+                // Seller chỉ nhận đơn đã thanh toán hoặc COD đã xác nhận; PENDING chưa thể xử lý giao hàng.
+                .andWhere('order.status <> :pendingOrderStatus', {
+                    pendingOrderStatus: OrderStatus.PENDING,
+                })
                 .setParameters({
                     toShip: OrderFulfillmentStatus.TO_SHIP,
                     shipping: OrderFulfillmentStatus.SHIPPING,
@@ -248,6 +263,9 @@ export class OrderRepository {
                 )
             )`,
             )
+            .andWhere('order.status <> :pendingOrderStatus', {
+                pendingOrderStatus: OrderStatus.PENDING,
+            })
             .getMany();
         const orderById = new Map(orders.map((order) => [order.id, order]));
         return [
@@ -278,6 +296,9 @@ export class OrderRepository {
                 )
             )`,
             )
+            .andWhere('order.status <> :pendingOrderStatus', {
+                pendingOrderStatus: OrderStatus.PENDING,
+            })
             .andWhere(
                 `EXISTS (
           SELECT 1
@@ -407,6 +428,10 @@ export class OrderRepository {
                 )
             )`,
         );
+        // Không đưa đơn đang chờ tiền vào danh sách thao tác của seller, kể cả môi trường LIVE.
+        filterQuery.andWhere('order.status <> :pendingOrderStatus', {
+            pendingOrderStatus: OrderStatus.PENDING,
+        });
 
         if (query.status) {
             filterQuery.andWhere('order.status = :status', {

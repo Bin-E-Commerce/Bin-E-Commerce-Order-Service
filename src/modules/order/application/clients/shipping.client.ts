@@ -50,6 +50,11 @@ export interface OrderShippingQuoteInput {
     codAmount: number;
 }
 
+export interface ReturnShipmentReviewState {
+    id: string;
+    status: string;
+}
+
 @Injectable()
 export class ShippingClient {
     private readonly targetBase: string;
@@ -105,5 +110,41 @@ export class ShippingClient {
                 'GHN chưa hỗ trợ giao tới địa chỉ này.',
             );
         return payload;
+    }
+
+    // Kiểm tra return legacy trước khi seller đổi payer; chỉ cho phép chỉnh khi vận đơn chưa chạy qua mốc bất biến.
+    async getReturnShipmentState(
+        returnRequestId: string,
+    ): Promise<ReturnShipmentReviewState | null> {
+        let response: Response;
+        try {
+            response = await fetch(
+                `${this.targetBase}/api/v1/internal/shipments/returns/${returnRequestId}`,
+                {
+                    headers: {
+                        accept: 'application/json',
+                        'x-internal-service-token': this.internalToken,
+                    },
+                    signal: AbortSignal.timeout(8_000),
+                },
+            );
+        } catch {
+            throw new BadGatewayException('Shipping Service chưa sẵn sàng.');
+        }
+        if (response.status === 404) return null;
+        const payload = (await response.json().catch(() => ({}))) as {
+            id?: unknown;
+            status?: unknown;
+            message?: string;
+        };
+        if (!response.ok || typeof payload.id !== 'string')
+            throw new BadGatewayException(
+                payload.message ??
+                    'Không thể kiểm tra trạng thái vận đơn hoàn hàng.',
+            );
+        return {
+            id: payload.id,
+            status: typeof payload.status === 'string' ? payload.status : '',
+        };
     }
 }

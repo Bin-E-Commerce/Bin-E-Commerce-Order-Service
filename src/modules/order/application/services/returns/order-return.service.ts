@@ -19,13 +19,13 @@ import {
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { OrderDeliveryConfirmationStatus } from '@/database/delivery/enums/order-delivery-confirmation-status.enum';
-import { OrderRepository } from '@/modules/order/infrastructure/repositories/order.repository';
+import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
 import { SellerShopClient } from '@/modules/order/application/clients/seller-shop.client';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import {
     fromCents,
     toCents,
-} from '@/modules/order/application/utils/order-money.util';
+} from '@/modules/order/application/utils/money/order-money.util';
 import {
     ShippingClient,
     type GhnAddressSelectionInput,
@@ -34,9 +34,9 @@ import type {
     CreateOrderReturnDto,
     InspectOrderReturnDto,
     ReviewOrderReturnDto,
-} from '@/modules/order/presentation/dto/order-return.dto';
-import type { SellerOrderUserContext } from '@/modules/order/application/types/seller-order-user-context.type';
-import { PaymentService } from '@/modules/order/application/services/payment/payment.service';
+} from '@/modules/order/presentation/dto/orders/order-return.dto';
+import type { SellerOrderUserContext } from '@/modules/order/application/types/order/seller-order-user-context.type';
+import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
 import { Inject } from '@nestjs/common';
 import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
@@ -56,7 +56,7 @@ export class OrderReturnService {
         private readonly orders: OrderRepository,
         private readonly sellerShopClient: SellerShopClient,
         private readonly events: OrderEventsService,
-        @Optional() private readonly shippingClient?: ShippingClient,
+        private readonly shippingClient: ShippingClient,
         @Optional() private readonly dataSource?: DataSource,
         @Optional() private readonly paymentService?: PaymentService,
         @Optional()
@@ -278,7 +278,28 @@ export class OrderReturnService {
         });
         if (!request)
             throw new NotFoundException('Không tìm thấy yêu cầu hoàn hàng.');
-        if (request.status !== OrderReturnStatus.REQUESTED)
+        // Dữ liệu cũ OTHER có thể đã được duyệt trước migration nhưng chưa chọn payer;
+        // chỉ mở lại đúng trạng thái AWAITING_SHIPMENT này để seller phân loại, không hồi sinh các return đã chạy vận chuyển.
+        const isLegacyOtherAwaitingReview =
+            request.status === OrderReturnStatus.AWAITING_SHIPMENT &&
+            request.reason === OrderReturnReason.OTHER &&
+            request.returnShippingPayer === null;
+        if (isLegacyOtherAwaitingReview) {
+            const shipment =
+                await this.shippingClient?.getReturnShipmentState(returnId);
+            // READY_TO_SHIP/PICKUP_ASSIGNED còn có thể đổi payer trước khi carrier nhận kiện; các mốc sau đó phải giữ nguyên audit phí.
+            if (
+                shipment &&
+                !['READY_TO_SHIP', 'PICKUP_ASSIGNED'].includes(shipment.status)
+            )
+                throw new ConflictException(
+                    'Vận đơn hoàn đã chạy, không thể phân loại lại bên chịu phí.',
+                );
+        }
+        if (
+            request.status !== OrderReturnStatus.REQUESTED &&
+            !isLegacyOtherAwaitingReview
+        )
             throw new ConflictException('Yêu cầu đã được xử lý.');
         const reviewNote = dto.note?.trim() || '';
         if (status === OrderReturnStatus.REJECTED && reviewNote.length < 10) {
@@ -740,15 +761,7 @@ export class OrderReturnService {
                 result.saved.returnShippingCost,
             );
         }
-        if (
-            dto.passed &&
-            result.saved.status === OrderReturnStatus.REFUND_PENDING
-        ) {
-            // VNPay refund bắt đầu sau commit; lỗi provider giữ yêu cầu ở REFUND_PENDING để có thể đối soát lại.
-            await this.paymentService
-                ?.refundVnpayReturn(result.saved.id, currentUser.userId)
-                .catch(() => undefined);
-        }
+        // Pay2S/COD đều chờ admin xác nhận chuyển khoản thủ công sau khi số tiền hoàn đã được chốt.
         return result.saved;
     }
 
