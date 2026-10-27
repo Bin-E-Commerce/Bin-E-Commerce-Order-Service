@@ -1,4 +1,4 @@
-// Application service này điều phối checkout COD/VNPay và các thao tác order theo quyền owner/shop.
+// Application service này điều phối checkout COD/Pay2S và các thao tác order theo quyền owner/shop.
 // Thứ tự bắt buộc: đọc cart → xác nhận địa chỉ → reserve product → commit order → đóng cart.
 // Product Service là nguồn sự thật cho giá và tồn kho; browser và Cart snapshot không được quyết định tổng tiền.
 // Nếu commit order thất bại sau khi reserve, service gọi compensation release để không làm mất tồn kho.
@@ -14,7 +14,6 @@ import { Order } from '@/database/order/entities/order.entity';
 import { OrderDeliveryIssue } from '@/database/delivery/entities/order-delivery-issue.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { OrderStatusHistory } from '@/database/order/entities/order-status-history.entity';
-import { PaymentAttempt } from '@/database/payment/entities/payment-attempt.entity';
 import { CartClient } from '@/modules/order/application/clients/cart.client';
 import { AuthClient } from '@/modules/order/application/clients/auth.client';
 import { ProductClient } from '@/modules/order/application/clients/product.client';
@@ -28,32 +27,32 @@ import {
     IdempotencyConflictError,
     OrderCancellationConflictError,
 } from '@/modules/order/application/errors/order.errors';
-import { OrderRepository } from '@/modules/order/infrastructure/repositories/order.repository';
+import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
 import { PaymentMethod } from '@/database/order/enums/payment-method.enum';
 import { OrderDeliveryIssueStatus } from '@/database/delivery/enums/order-delivery-issue-status.enum';
-import type { CreateCodOrderDto } from '@/modules/order/presentation/dto/create-cod-order.dto';
+import type { CreateCodOrderDto } from '@/modules/order/presentation/dto/orders/create-cod-order.dto';
 import type {
     OrderListResponse,
     OrderResponse,
     SellerOrderListResponse,
     SellerOrderResponse,
-} from '@/modules/order/application/types/order-response.type';
-import type { CheckoutQuoteItem } from '@/modules/order/application/types/external-contracts.type';
-import type { OrderListQueryDto } from '@/modules/order/presentation/dto/order-list-query.dto';
-import type { CancelOrderDto } from '@/modules/order/presentation/dto/cancel-order.dto';
-import type { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/seller-order-list-query.dto';
-import type { SellerOrderUserContext } from '@/modules/order/application/types/seller-order-user-context.type';
+} from '@/modules/order/application/types/order/order-response.type';
+import type { CheckoutQuoteItem } from '@/modules/order/application/types/order/external-contracts.type';
+import type { OrderListQueryDto } from '@/modules/order/presentation/dto/orders/order-list-query.dto';
+import type { CancelOrderDto } from '@/modules/order/presentation/dto/orders/cancel-order.dto';
+import type { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/orders/seller-order-list-query.dto';
+import type { SellerOrderUserContext } from '@/modules/order/application/types/order/seller-order-user-context.type';
 import {
     fromCents,
     toCents,
-} from '@/modules/order/application/utils/order-money.util';
+} from '@/modules/order/application/utils/money/order-money.util';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
 import { SellerOrderAccessService } from '@/modules/order/application/services/order/seller-order-access.service';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
-import { PaymentService } from '@/modules/order/application/services/payment/payment.service';
+import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
 
 const REVIEW_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -84,7 +83,7 @@ export class OrderCommandService {
     ): Promise<OrderResponse> {
         this.validateRequestContext(ownerId, idempotencyKey);
         if (
-            ![PaymentMethod.COD, PaymentMethod.VNPAY].includes(
+            ![PaymentMethod.COD, PaymentMethod.PAY2S].includes(
                 dto.paymentMethod,
             )
         ) {
@@ -92,9 +91,9 @@ export class OrderCommandService {
                 'Phương thức thanh toán không được hỗ trợ.',
             );
         }
-        // VNPay bị khóa thì từ chối trước mọi side effect, gồm quote và reservation tồn kho.
-        if (dto.paymentMethod === PaymentMethod.VNPAY) {
-            this.paymentService.assertVnpayCheckoutAllowed();
+        // Pay2S bị khóa thì từ chối trước mọi side effect, gồm quote và reservation tồn kho.
+        if (dto.paymentMethod === PaymentMethod.PAY2S) {
+            this.paymentService.assertPay2sCheckoutAllowed();
         }
 
         const fingerprint = this.createFingerprint(dto);
@@ -109,10 +108,10 @@ export class OrderCommandService {
             const previousResponse =
                 this.responseMapper.toResponse(previousOrder);
             if (
-                previousOrder.paymentMethod === PaymentMethod.VNPAY &&
+                previousOrder.paymentMethod === PaymentMethod.PAY2S &&
                 previousOrder.status === OrderStatus.PENDING
             ) {
-                const payment = await this.paymentService.startVnpayPayment(
+                const payment = await this.paymentService.startPay2sPayment(
                     previousOrder,
                     ipAddress,
                 );
@@ -201,11 +200,11 @@ export class OrderCommandService {
                     // Request đồng thời có thể tới sau commit order nhưng trước lúc request thắng tạo payment attempt.
                     // Cùng idempotency key phải trả cùng trải nghiệm thanh toán, không để customer nhận order URL thiếu payment URL.
                     if (
-                        concurrentOrder.paymentMethod === PaymentMethod.VNPAY &&
+                        concurrentOrder.paymentMethod === PaymentMethod.PAY2S &&
                         concurrentOrder.status === OrderStatus.PENDING
                     ) {
                         const payment =
-                            await this.paymentService.startVnpayPayment(
+                            await this.paymentService.startPay2sPayment(
                                 concurrentOrder,
                                 ipAddress,
                             );
@@ -231,24 +230,19 @@ export class OrderCommandService {
             throw error;
         }
 
-        if (dto.paymentMethod === PaymentMethod.VNPAY) {
-            try {
-                const payment = await this.paymentService.startVnpayPayment(
-                    savedOrder,
-                    ipAddress,
-                );
-                // Thanh toán chưa được IPN xác nhận nên chưa phát thông báo seller; cart được đóng sau khi order/attempt đã lưu.
-                return {
-                    ...this.responseMapper.toResponse(savedOrder),
-                    paymentUrl: payment.paymentUrl,
-                };
-            } catch (error) {
-                // Nếu không thể mở phiên VNPay thì hủy order pending và bù trừ stock reservation trước khi trả lỗi.
-                await this.cancelUnpaidVnpayOrder(savedOrder).catch(
-                    () => undefined,
-                );
-                throw error;
-            }
+        if (dto.paymentMethod === PaymentMethod.PAY2S) {
+            // Không hủy order khi create link timeout hoặc mất response: Pay2S có thể đã tạo link,
+            // nên attempt/merchantReference phải còn PENDING để lần retry dùng lại orderId cũ.
+            // Worker hết hạn sẽ cancel và gọi Pay2S cancel sau khi cửa sổ thanh toán thực sự kết thúc.
+            const payment = await this.paymentService.startPay2sPayment(
+                savedOrder,
+                ipAddress,
+            );
+            // Thanh toán chưa được IPN xác nhận nên chưa phát thông báo seller; cart được đóng sau khi order/attempt đã lưu.
+            return {
+                ...this.responseMapper.toResponse(savedOrder),
+                paymentUrl: payment.paymentUrl,
+            };
         }
 
         // Phát event sau khi order và item đã commit; notification lỗi không làm checkout thất bại vì producer xử lý best-effort.
@@ -283,7 +277,7 @@ export class OrderCommandService {
     ) {
         if (!ownerId?.trim())
             throw new BadRequestException('Thiếu user context.');
-        if (![PaymentMethod.COD, PaymentMethod.VNPAY].includes(paymentMethod))
+        if (![PaymentMethod.COD, PaymentMethod.PAY2S].includes(paymentMethod))
             throw new BadRequestException(
                 'Phương thức thanh toán không được hỗ trợ.',
             );
@@ -368,11 +362,11 @@ export class OrderCommandService {
                 'Không tìm thấy đơn hàng trong phạm vi shop.',
             );
         if (
-            order.paymentMethod === PaymentMethod.VNPAY &&
+            order.paymentMethod === PaymentMethod.PAY2S &&
             order.paymentStatus !== PaymentStatus.PAID
         ) {
             throw new BadRequestException(
-                'Chỉ được tạo vận đơn sau khi VNPay xác nhận thanh toán.',
+                'Chỉ được tạo vận đơn sau khi Pay2S xác nhận thanh toán.',
             );
         }
         return {
@@ -750,23 +744,23 @@ export class OrderCommandService {
                 orderNumber: this.generateOrderNumber(),
                 ownerId: input.ownerId,
                 status:
-                    input.dto.paymentMethod === PaymentMethod.VNPAY
+                    input.dto.paymentMethod === PaymentMethod.PAY2S
                         ? OrderStatus.PENDING
                         : OrderStatus.CONFIRMED,
                 fulfillmentStatus: OrderFulfillmentStatus.TO_SHIP,
                 paymentStatus:
-                    input.dto.paymentMethod === PaymentMethod.VNPAY
+                    input.dto.paymentMethod === PaymentMethod.PAY2S
                         ? PaymentStatus.PENDING
                         : PaymentStatus.COD_PENDING_COLLECTION,
                 paymentMethod: input.dto.paymentMethod,
                 paymentExpiresAt:
-                    input.dto.paymentMethod === PaymentMethod.VNPAY
+                    input.dto.paymentMethod === PaymentMethod.PAY2S
                         ? new Date(Date.now() + 15 * 60_000)
                         : null,
                 checkoutCartItemId: input.dto.cartItemId ?? null,
                 // Lưu nguồn gateway để audit; mọi nghiệp vụ order sau khi callback hợp lệ vẫn xử lý như payment thành công.
                 isSandbox:
-                    input.dto.paymentMethod === PaymentMethod.VNPAY &&
+                    input.dto.paymentMethod === PaymentMethod.PAY2S &&
                     this.paymentService.isSandboxMode(),
                 shippingAddressId: input.dto.shippingAddressId,
                 shippingAddress: input.address,
@@ -816,12 +810,12 @@ export class OrderCommandService {
                     orderId: savedOrder.id,
                     fromStatus: null,
                     toStatus:
-                        input.dto.paymentMethod === PaymentMethod.VNPAY
+                        input.dto.paymentMethod === PaymentMethod.PAY2S
                             ? OrderStatus.PENDING
                             : OrderStatus.CONFIRMED,
                     reason:
-                        input.dto.paymentMethod === PaymentMethod.VNPAY
-                            ? 'Checkout VNPay đang chờ xác nhận thanh toán.'
+                        input.dto.paymentMethod === PaymentMethod.PAY2S
+                            ? 'Checkout Pay2S đang chờ xác nhận thanh toán.'
                             : 'Checkout COD đã xác nhận và giữ tồn kho thành công.',
                 }),
             );
@@ -829,62 +823,6 @@ export class OrderCommandService {
             savedOrder.items = orderItems;
             return savedOrder;
         });
-    }
-
-    // Hủy riêng order VNPay chưa thu tiền; luồng hủy customer hiện chỉ nhận order CONFIRMED nên không áp dụng được ở đây.
-    // Transaction khóa order để callback IPN và compensation không cùng lúc xác nhận/hủy một order.
-    // Chỉ sau commit mới gọi Product Service giải phóng reservation bằng key/variants đã lưu.
-    private async cancelUnpaidVnpayOrder(order: Order): Promise<void> {
-        const cancelled = await this.dataSource.transaction(async (manager) => {
-            const orderRepository = manager.getRepository(Order);
-            const lockedOrder = await orderRepository.findOne({
-                where: { id: order.id },
-                relations: { items: true },
-                lock: { mode: 'pessimistic_write' },
-            });
-            // Nếu IPN đã thắng race thì không được hủy đơn đã thanh toán; expiry worker cũng chỉ xử lý PENDING.
-            if (
-                !lockedOrder ||
-                lockedOrder.status !== OrderStatus.PENDING ||
-                lockedOrder.paymentStatus !== PaymentStatus.PENDING
-            ) {
-                return null;
-            }
-            const previousStatus = lockedOrder.status;
-            lockedOrder.status = OrderStatus.CANCELLED;
-            lockedOrder.fulfillmentStatus = OrderFulfillmentStatus.CANCELLED;
-            lockedOrder.paymentStatus = PaymentStatus.FAILED;
-            lockedOrder.cancelReason = 'Không khởi tạo được phiên thanh toán.';
-            lockedOrder.cancelledAt = new Date();
-            await orderRepository.save(lockedOrder);
-            await manager
-                .getRepository(PaymentAttempt)
-                .createQueryBuilder()
-                .update(PaymentAttempt)
-                .set({ status: 'EXPIRED' })
-                .where('order_id = :orderId AND status = :status', {
-                    orderId: order.id,
-                    status: 'PENDING',
-                })
-                .execute();
-            await manager.getRepository(OrderStatusHistory).save({
-                orderId: lockedOrder.id,
-                fromStatus: previousStatus,
-                toStatus: OrderStatus.CANCELLED,
-                reason: lockedOrder.cancelReason,
-            });
-            return lockedOrder;
-        });
-
-        if (!cancelled) return;
-        // Inventory release là idempotent theo idempotencyKey; lỗi external không rollback được order đã đóng.
-        await this.productClient.release(
-            cancelled.idempotencyKey,
-            (cancelled.items ?? []).map((item) => ({
-                variantId: item.variantId,
-                quantity: item.quantity,
-            })),
-        );
     }
 
     // Group item theo seller shop và cộng quote riêng để không làm lộ hoặc cộng nhầm doanh thu shop khác.
@@ -971,7 +909,7 @@ export class OrderCommandService {
                     widthCm: width,
                     heightCm: height,
                     value,
-                    // GHN chỉ thu hộ khi COD; VNPay đã thu tiền online nên không được cộng COD fee.
+                    // GHN chỉ thu hộ khi COD; Pay2S đã thu tiền online nên không được cộng COD fee.
                     codAmount: paymentMethod === PaymentMethod.COD ? value : 0,
                 });
             }),
