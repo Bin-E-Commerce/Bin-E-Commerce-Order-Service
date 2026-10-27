@@ -1,6 +1,7 @@
-// Controller admin ghi nhận các thao tác đối soát; quyền tài chính được kiểm tra lại từ header do Gateway xác thực.
+// Controller finance admin giới hạn quyền payout và chuyển nghiệp vụ chi hộ vào application service.
 import {
     Body,
+    BadRequestException,
     Controller,
     ForbiddenException,
     Get,
@@ -9,26 +10,42 @@ import {
     ParseUUIDPipe,
     Post,
     Query,
+    ServiceUnavailableException,
 } from '@nestjs/common';
-import { PaymentService } from '@/modules/order/application/services/payment/payment.service';
-import { ConfirmCodRemittanceDto } from '@/modules/order/presentation/dto/confirm-cod-remittance.dto';
-import { ConfirmCodRefundDto } from '@/modules/order/presentation/dto/confirm-cod-refund.dto';
+import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
+import { SepayPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/sepay-payout-reconciliation.service';
+import { AdminSellerPayoutService } from '@/modules/order/application/services/payment/payouts/admin-seller-payout.service';
+import { ConfirmCodRemittanceDto } from '@/modules/order/presentation/dto/finance/confirm-cod-remittance.dto';
+import { ConfirmCodRefundDto } from '@/modules/order/presentation/dto/finance/confirm-cod-refund.dto';
 import { Inject } from '@nestjs/common';
 import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
 import {
     AdminWalletWithdrawalActionDto,
     CreateFinanceSettlementBatchDto,
-} from '@/modules/order/presentation/dto/wallet-finance.dto';
+} from '@/modules/order/presentation/dto/finance/wallet-finance.dto';
 
-// Route quản lý đối soát và payout thủ công; không tự gọi ngân hàng hoặc chuyển tiền thật.
+// Route quản lý dòng tiền; payout payOS chỉ được khởi tạo bởi admin có permission tài chính tương ứng.
 @Controller({ path: 'admin/finance', version: '1' })
 export class AdminFinanceController {
+    @Inject(AdminSellerPayoutService)
+    private readonly sellerPayout: AdminSellerPayoutService;
+
     constructor(
         private readonly paymentService: PaymentService,
+        private readonly payoutReconciliation: SepayPayoutReconciliationService,
         @Inject(SELLER_WALLET_REPOSITORY)
         private readonly walletRepository: SellerWalletRepositoryPort,
     ) {}
+
+    // Chỉ quyền payout được biết Kênh Chi payOS đã truy cập được hay chưa; response chỉ có trạng thái và số dư.
+    @Get('payout-readiness')
+    async getPayoutReadiness(
+        @Headers('x-user-permissions') permissionsHeader: string,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.payout');
+        return this.sellerPayout.getReadiness();
+    }
 
     // Admin overview tổng hợp số dư mô phỏng và trang ledger; không chứa thông tin ngân hàng thô.
     @Get('overview')
@@ -74,7 +91,21 @@ export class AdminFinanceController {
         );
     }
 
-    // Raw account number chỉ phục vụ nhân sự được cấp quyền payout để thực hiện chuyển khoản thủ công bên ngoài.
+    // Trả các đơn COD đã hoàn tất nhưng chưa remittance; trang admin chỉ nhận dữ liệu cần để đối soát và không đọc hồ sơ khách.
+    @Get('cod-remittances')
+    async getPendingCodRemittances(
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Query('page') pageValue?: string,
+        @Query('pageSize') pageSizeValue?: string,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.read');
+        return this.walletRepository.listPendingCodRemittances(
+            this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
+            this.toBoundedInteger(pageSizeValue, 20, 1, 100),
+        );
+    }
+
+    // Trả tài khoản seller và memo đối soát chỉ khi admin có quyền payout; số tài khoản không xuất hiện ở danh sách.
     @Get('withdrawals/:withdrawalId')
     async getWithdrawal(
         @Headers('x-user-permissions') permissionsHeader: string,
@@ -84,7 +115,33 @@ export class AdminFinanceController {
         return this.walletRepository.getAdminWithdrawal(withdrawalId);
     }
 
-    // Admin đánh dấu đã nhận xử lý; thao tác không chạm số dư vì tiền vẫn đang giữ chỗ.
+    // Gửi hoặc retry an toàn payout payOS; mã tham chiếu và idempotency key do backend cố định theo yêu cầu.
+    @Post('withdrawals/:withdrawalId/payout')
+    async payoutWithdrawal(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('withdrawalId', new ParseUUIDPipe()) withdrawalId: string,
+        @Body() dto: AdminWalletWithdrawalActionDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.payout');
+        return this.sellerPayout.processWithdrawal({
+            withdrawalId,
+            adminId,
+            note: dto.note,
+        });
+    }
+
+    // Đọc lại lệnh payOS đang PROCESSING; route chỉ đồng bộ trạng thái, không tạo thêm lệnh chuyển tiền.
+    @Post('withdrawals/:withdrawalId/payout/sync')
+    async syncWithdrawalPayout(
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('withdrawalId', new ParseUUIDPipe()) withdrawalId: string,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.payout');
+        return this.sellerPayout.syncWithdrawal(withdrawalId);
+    }
+
+    // Giữ endpoint cũ cho yêu cầu PROCESSING đã khởi tạo theo SePay/app ngân hàng; giao diện mới không dùng route này.
     @Post('withdrawals/:withdrawalId/processing')
     async markWithdrawalProcessing(
         @Headers('x-user-id') adminId: string,
@@ -93,6 +150,14 @@ export class AdminFinanceController {
         @Body() dto: AdminWalletWithdrawalActionDto,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.payout');
+        if (!this.payoutReconciliation.getReadiness().ready)
+            throw new ServiceUnavailableException(
+                'Webhook tiền ra SePay chưa được cấu hình đầy đủ.',
+            );
+        if (dto.manualTransferAcknowledged !== true)
+            throw new BadRequestException(
+                'Cần xác nhận sẽ chuyển tiền qua ứng dụng ngân hàng.',
+            );
         await this.walletRepository.transitionWithdrawal({
             withdrawalId,
             adminId,
@@ -102,26 +167,7 @@ export class AdminFinanceController {
         return { updated: true };
     }
 
-    // Chỉ sau khi admin nhập mã tham chiếu chuyển ngoài hệ thống, số giữ chỗ mới bị trừ hẳn.
-    @Post('withdrawals/:withdrawalId/paid')
-    async confirmWithdrawalPaid(
-        @Headers('x-user-id') adminId: string,
-        @Headers('x-user-permissions') permissionsHeader: string,
-        @Param('withdrawalId', new ParseUUIDPipe()) withdrawalId: string,
-        @Body() dto: AdminWalletWithdrawalActionDto,
-    ) {
-        this.assertPermission(permissionsHeader, 'admin.finance.payout');
-        await this.walletRepository.transitionWithdrawal({
-            withdrawalId,
-            adminId,
-            status: 'PAID',
-            reference: dto.reference,
-            note: dto.note,
-        });
-        return { updated: true };
-    }
-
-    // Từ chối hoàn phần giữ chỗ về số dư seller trong cùng transaction với audit status.
+    // Chỉ từ chối khi chưa bắt đầu chuyển khoản; sau đó phải chờ webhook để tránh nhả tiền trong lúc bank callback trễ.
     @Post('withdrawals/:withdrawalId/reject')
     async rejectWithdrawal(
         @Headers('x-user-id') adminId: string,
@@ -134,24 +180,6 @@ export class AdminFinanceController {
             withdrawalId,
             adminId,
             status: 'REJECTED',
-            note: dto.note,
-        });
-        return { updated: true };
-    }
-
-    // Ghi nhận lỗi chuyển khoản cũng giải phóng tiền đã giữ chỗ để seller có thể thử lại.
-    @Post('withdrawals/:withdrawalId/fail')
-    async failWithdrawal(
-        @Headers('x-user-id') adminId: string,
-        @Headers('x-user-permissions') permissionsHeader: string,
-        @Param('withdrawalId', new ParseUUIDPipe()) withdrawalId: string,
-        @Body() dto: AdminWalletWithdrawalActionDto,
-    ) {
-        this.assertPermission(permissionsHeader, 'admin.finance.payout');
-        await this.walletRepository.transitionWithdrawal({
-            withdrawalId,
-            adminId,
-            status: 'FAILED',
             note: dto.note,
         });
         return { updated: true };
@@ -235,12 +263,13 @@ export class AdminFinanceController {
         return { confirmed: true };
     }
 
-    // Finance admin chỉ retry yêu cầu REFUND_FAILED; request mơ hồ giữ cùng requestId và không được tạo lệnh mới.
-    @Post('vnpay-refunds/:returnId/retry')
-    async retryVnpayRefund(
+    // Admin xác nhận Pay2S đã hoàn bằng chuyển khoản ngoài hệ thống; proof/amount được kiểm tra trong repository.
+    @Post('refunds/:returnId/confirmation')
+    async confirmPay2sRefund(
         @Headers('x-user-id') adminId: string,
         @Headers('x-user-permissions') permissionsHeader: string,
         @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Body() dto: ConfirmCodRefundDto,
     ): Promise<{ accepted: true }> {
         const permissions = (permissionsHeader ?? '')
             .split(',')
@@ -249,7 +278,38 @@ export class AdminFinanceController {
             throw new ForbiddenException(
                 'Bạn không có quyền đối soát tài chính.',
             );
-        await this.paymentService.retryVnpayRefund(returnId, adminId);
+        await this.paymentService.recordPay2sRefund({
+            returnRequestId: returnId,
+            adminId,
+            reference: dto.reference,
+            amount: dto.amount,
+            proof: dto.proof,
+        });
+        return { accepted: true };
+    }
+
+    // Admin hoàn khoản Pay2S đến muộn theo order; case này không có return request và không làm giảm ví seller.
+    @Post('late-refunds/:orderId/confirmation')
+    async confirmPay2sLateRefund(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('orderId', new ParseUUIDPipe()) orderId: string,
+        @Body() dto: ConfirmCodRefundDto,
+    ): Promise<{ accepted: true }> {
+        const permissions = (permissionsHeader ?? '')
+            .split(',')
+            .map((item) => item.trim());
+        if (!permissions.includes('admin.finance.reconcile'))
+            throw new ForbiddenException(
+                'Bạn không có quyền đối soát tài chính.',
+            );
+        await this.paymentService.recordPay2sLateRefund({
+            orderId,
+            adminId,
+            reference: dto.reference,
+            amount: dto.amount,
+            proof: dto.proof,
+        });
         return { accepted: true };
     }
 
