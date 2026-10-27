@@ -37,11 +37,27 @@ export class WalletDeposit {
     })
     providerTransactionId!: string | null;
 
+    @Column({
+        name: 'provider_request_id',
+        type: 'varchar',
+        length: 80,
+        nullable: true,
+    })
+    providerRequestId!: string | null;
+
+    @Column({
+        name: 'provider_order_info',
+        type: 'varchar',
+        length: 180,
+        nullable: true,
+    })
+    providerOrderInfo!: string | null;
+
     @Column({ type: 'varchar', length: 20, default: 'PENDING' })
     status!: 'PENDING' | 'PAID' | 'FAILED' | 'EXPIRED';
 
     @Column({ type: 'varchar', length: 20, default: 'SANDBOX' })
-    environment!: 'SANDBOX';
+    environment!: 'SANDBOX' | 'LIVE';
 
     @Column({ type: 'numeric', precision: 14, scale: 2 })
     amount!: string;

@@ -1,12 +1,17 @@
 // Cổng nghiệp vụ ví seller; application service không truy vấn trực tiếp hoặc phụ thuộc TypeORM.
-import type { SellerWalletSnapshot } from '@/modules/order/application/types/seller-wallet.type';
+import type { SellerWalletSnapshot } from '@/modules/order/application/types/finance/seller-wallet.type';
 import type {
     AdminFinanceSnapshot,
+    AdminCodRemittanceRecord,
     AdminWalletWithdrawalRecord,
     PlatformFinanceLedgerRecord,
     WalletDepositRecord,
     WalletWithdrawalRecord,
-} from '@/modules/order/application/types/wallet-finance.type';
+} from '@/modules/order/application/types/finance/wallet-finance.type';
+import type {
+    WithdrawalPayoutFailureResult,
+    WithdrawalTransferReconciliationResult,
+} from '@/modules/order/application/types/payments/sepay-payout.type';
 
 export const SELLER_WALLET_REPOSITORY = Symbol('SELLER_WALLET_REPOSITORY');
 
@@ -21,6 +26,20 @@ export interface SellerWalletRepositoryPort {
     reverseRefund(returnRequestId: string): Promise<void>;
     recordCodRefund(input: {
         returnRequestId: string;
+        adminId: string;
+        reference: string;
+        amount: string;
+        proof: Record<string, unknown>;
+    }): Promise<void>;
+    recordPay2sRefund(input: {
+        returnRequestId: string;
+        adminId: string;
+        reference: string;
+        amount: string;
+        proof: Record<string, unknown>;
+    }): Promise<void>;
+    recordPay2sLateRefund(input: {
+        orderId: string;
         adminId: string;
         reference: string;
         amount: string;
@@ -46,7 +65,14 @@ export interface SellerWalletRepositoryPort {
         amount: string;
         merchantReference: string;
         expiresAt: Date;
+        environment?: 'LIVE' | 'SANDBOX';
+        providerRequestId?: string;
     }): Promise<WalletDepositRecord>;
+    updateWalletDepositProvider(input: {
+        depositId: string;
+        providerOrderInfo: string;
+        providerResponse: Record<string, unknown>;
+    }): Promise<void>;
     getWalletDepositByReference(merchantReference: string): Promise<{
         id: string;
         shopId: string;
@@ -88,16 +114,37 @@ export interface SellerWalletRepositoryPort {
         pageSize: number,
         status?: string,
     ): Promise<{ items: WalletWithdrawalRecord[]; total: number }>;
+    listPendingCodRemittances(
+        page: number,
+        pageSize: number,
+    ): Promise<{ items: AdminCodRemittanceRecord[]; total: number }>;
     getAdminWithdrawal(
         withdrawalId: string,
     ): Promise<AdminWalletWithdrawalRecord>;
     transitionWithdrawal(input: {
         withdrawalId: string;
         adminId: string;
-        status: 'PROCESSING' | 'PAID' | 'REJECTED' | 'FAILED';
-        reference?: string;
+        status: 'PROCESSING' | 'REJECTED';
         note?: string;
     }): Promise<void>;
+    prepareWithdrawalPayout(input: {
+        withdrawalId: string;
+        adminId: string;
+        transferReference: string;
+        note?: string;
+    }): Promise<void>;
+    reconcileWithdrawalTransfer(input: {
+        withdrawalId: string;
+        amount: string;
+        providerTransactionId: string;
+        reference: string;
+        processedBy?: string;
+    }): Promise<WithdrawalTransferReconciliationResult>;
+    failWithdrawalPayout(input: {
+        withdrawalId: string;
+        providerReference: string;
+        note: string;
+    }): Promise<WithdrawalPayoutFailureResult>;
     getPlatformLedger(
         page: number,
         pageSize: number,

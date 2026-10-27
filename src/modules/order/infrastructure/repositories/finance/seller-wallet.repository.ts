@@ -7,7 +7,7 @@ import {
     OnModuleDestroy,
     OnModuleInit,
 } from '@nestjs/common';
-import { DataSource, EntityManager, In } from 'typeorm';
+import { DataSource, EntityManager, In, IsNull } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { SellerWallet } from '@/database/payment/entities/seller-wallet.entity';
@@ -25,16 +25,22 @@ import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment
 import {
     fromCents,
     toCents,
-} from '@/modules/order/application/utils/order-money.util';
+} from '@/modules/order/application/utils/money/order-money.util';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
-import type { SellerWalletSnapshot } from '@/modules/order/application/types/seller-wallet.type';
+import type { SellerWalletSnapshot } from '@/modules/order/application/types/finance/seller-wallet.type';
 import type {
     AdminFinanceSnapshot,
+    AdminCodRemittanceRecord,
     AdminWalletWithdrawalRecord,
     PlatformFinanceLedgerRecord,
     WalletDepositRecord,
     WalletWithdrawalRecord,
-} from '@/modules/order/application/types/wallet-finance.type';
+} from '@/modules/order/application/types/finance/wallet-finance.type';
+import type {
+    WithdrawalPayoutFailureResult,
+    WithdrawalTransferReconciliationResult,
+} from '@/modules/order/application/types/payments/sepay-payout.type';
+import { createWithdrawalTransferMemo } from '@/modules/order/application/utils/payments/withdrawal-transfer-memo.util';
 
 // Chống ghi trùng theo nguồn order/shop; ví chỉ nhận tiền hàng, không nhận phí giao hoặc phí gateway.
 @Injectable()
@@ -64,6 +70,7 @@ export class SellerWalletRepository
     // Bắt lỗi worker nền để không tạo unhandled rejection; ledger chưa đổi sẽ được thử lại ở lượt kế tiếp.
     private async runReleaseSafely(): Promise<void> {
         try {
+            await this.expirePendingWalletDeposits();
             await this.releaseEligibleBalances();
         } catch (error) {
             this.logger.error(
@@ -73,14 +80,32 @@ export class SellerWalletRepository
         }
     }
 
-    // Ghi tiền hàng đầy đủ vào pending cho từng shop sau khi payment LIVE hoặc Sandbox đã được xác nhận.
+    // Đánh dấu link đã hết hạn để seller không tiếp tục dùng; IPN thành công đã ký vẫn được reconcile và cộng ví.
+    private async expirePendingWalletDeposits(): Promise<void> {
+        await this.dataSource
+            .getRepository(WalletDeposit)
+            .createQueryBuilder()
+            .update(WalletDeposit)
+            .set({
+                status: 'EXPIRED',
+                providerResponse: () =>
+                    `jsonb_build_object('reason', 'wallet_deposit_expired', 'expiredAt', now())`,
+            })
+            .where('status = :status AND expires_at <= :now', {
+                status: 'PENDING',
+                now: new Date(),
+            })
+            .execute();
+    }
+
+    // Ghi tiền hàng vào pending sau khi Pay2S được xác nhận hoặc khách đã trả COD; COD vẫn chờ remittance trước khi release.
     async creditOrderPending(orderId: string): Promise<void> {
         await this.dataSource.transaction(async (manager) =>
             this.creditOrderPendingInTransaction(manager, orderId),
         );
     }
 
-    // Hoàn tất order là mốc mở khóa tiền ngay; worker nền vẫn chạy để bù nếu lần release trực tiếp lỗi.
+    // Hoàn tất order kích hoạt đối soát ví; COD chưa remittance chỉ được ghi pending và worker sẽ thử lại nếu transaction lỗi.
     async releaseCompletedOrder(orderId: string): Promise<void> {
         await this.dataSource.transaction(async (manager) => {
             const order = await manager
@@ -92,11 +117,7 @@ export class SellerWalletRepository
                 order.paymentStatus !== PaymentStatus.PAID
             )
                 return;
-            if (
-                order.paymentMethod === PaymentMethod.COD &&
-                !order.codRemittedAt
-            )
-                return;
+            // COD đã thu từ khách được ghi vào pending khi đơn hoàn tất; chỉ bước release chờ admin xác nhận remittance.
             await this.releaseEligibleBalances(manager, orderId);
         });
     }
@@ -239,13 +260,15 @@ export class SellerWalletRepository
         });
     }
 
-    // Tạo top-up Sandbox riêng với đơn hàng để mã tham chiếu và idempotency không dùng chung PaymentAttempt.
+    // Tạo top-up Pay2S riêng với đơn hàng để mã tham chiếu và idempotency không dùng chung PaymentAttempt.
     async createWalletDeposit(input: {
         shopId: string;
         sellerUserId: string;
         amount: string;
         merchantReference: string;
         expiresAt: Date;
+        environment?: 'LIVE' | 'SANDBOX';
+        providerRequestId?: string;
     }): Promise<WalletDepositRecord> {
         const amount = toCents(input.amount);
         // `toCents` lưu đơn vị 1/100 đồng, nên ngưỡng VND phải đổi sang cents trước khi so sánh.
@@ -260,14 +283,41 @@ export class SellerWalletRepository
                 sellerUserId: input.sellerUserId,
                 merchantReference: input.merchantReference,
                 providerTransactionId: null,
+                providerRequestId: input.providerRequestId ?? null,
+                providerOrderInfo: null,
                 status: 'PENDING',
-                environment: 'SANDBOX',
+                environment: input.environment ?? 'SANDBOX',
                 amount: fromCents(amount),
                 expiresAt: input.expiresAt,
                 providerResponse: null,
                 confirmedAt: null,
             });
         return this.toDepositRecord(deposit);
+    }
+
+    // Lưu mã orderInfo thực tế và response Pay2S sau khi tạo link; dữ liệu này phục vụ audit mà không lộ ra UI.
+    async updateWalletDepositProvider(input: {
+        depositId: string;
+        providerOrderInfo: string;
+        providerResponse: Record<string, unknown>;
+    }): Promise<void> {
+        await this.dataSource
+            .getRepository(WalletDeposit)
+            .createQueryBuilder()
+            .update(WalletDeposit)
+            .set({
+                providerOrderInfo: input.providerOrderInfo,
+                providerResponse: () => ':providerResponse::jsonb',
+            })
+            .setParameter(
+                'providerResponse',
+                JSON.stringify(input.providerResponse),
+            )
+            .where('id = :depositId AND status = :pending', {
+                depositId: input.depositId,
+                pending: 'PENDING',
+            })
+            .execute();
     }
 
     // Tra cứu theo mã merchant đã ký trong IPN; callback không thể chọn shop hoặc số tiền.
@@ -287,7 +337,7 @@ export class SellerWalletRepository
         };
     }
 
-    // IPN hợp lệ ghi top-up, ví khả dụng và sổ nền tảng cùng transaction; trạng thái đã PAID chỉ ACK giao dịch trùng.
+    // IPN hợp lệ ghi top-up, ví khả dụng và sổ nền tảng cùng transaction; EXPIRED vẫn được ghi có nếu provider xác nhận đã thu tiền.
     async confirmWalletDeposit(input: {
         depositId: string;
         transactionId: string;
@@ -304,7 +354,9 @@ export class SellerWalletRepository
                 return deposit.providerTransactionId === input.transactionId
                     ? 'DUPLICATE'
                     : 'NOT_PENDING';
-            if (deposit.status !== 'PENDING') return 'NOT_PENDING';
+            // Expiry chỉ khóa việc tạo link mới; IPN thành công có chữ ký là bằng chứng tiền đã vào nên vẫn phải ghi có.
+            if (!['PENDING', 'EXPIRED'].includes(deposit.status))
+                return 'NOT_PENDING';
             const walletRepository = manager.getRepository(SellerWallet);
             await manager.query(
                 `INSERT INTO "seller_wallets" ("shop_id") VALUES ($1) ON CONFLICT ("shop_id") DO NOTHING`,
@@ -476,9 +528,10 @@ export class SellerWalletRepository
         const manager = this.dataSource.manager;
         const [totals] = (await manager.query(`
             SELECT
-                COALESCE((SELECT SUM(amount) FROM platform_finance_ledger WHERE kind <> 'CUSTOMER_RETURN_SHIPPING_RECEIVABLE'), 0)::text AS platform_balance,
+                COALESCE((SELECT SUM(amount) FROM platform_finance_ledger WHERE kind NOT IN ('CUSTOMER_RETURN_SHIPPING_RECEIVABLE','SHIPPING_FUND_ALLOCATION','SHIPPING_FUND_REFUND')), 0)::text AS platform_balance,
                 COALESCE((SELECT SUM(pending_balance + available_balance) FROM seller_wallets), 0)::text AS seller_payable,
                 COALESCE((SELECT SUM(reserved_balance) FROM seller_wallets), 0)::text AS reserved_withdrawals,
+                COALESCE((SELECT SUM(amount) FROM platform_finance_ledger WHERE kind IN ('SHIPPING_FUND_ALLOCATION','SHIPPING_FUND_REFUND')), 0)::text AS shipping_fund_balance,
                 COALESCE((SELECT SUM(amount) FROM platform_finance_ledger WHERE kind = 'CUSTOMER_RETURN_SHIPPING_RECEIVABLE'), 0)::text AS customer_return_shipping_receivable,
                 (SELECT COUNT(*)::int FROM wallet_withdrawal_requests WHERE status IN ('REQUESTED','PROCESSING')) AS pending_withdrawals,
                 COALESCE((SELECT SUM(amount) FROM wallet_deposits WHERE status = 'PAID'), 0)::text AS deposits
@@ -486,6 +539,7 @@ export class SellerWalletRepository
             platform_balance: string;
             seller_payable: string;
             reserved_withdrawals: string;
+            shipping_fund_balance: string;
             customer_return_shipping_receivable: string;
             pending_withdrawals: number;
             deposits: string;
@@ -511,6 +565,7 @@ export class SellerWalletRepository
             platformBalance: totals.platform_balance,
             sellerPayableBalance: totals.seller_payable,
             reservedWithdrawalBalance: totals.reserved_withdrawals,
+            shippingFundBalance: totals.shipping_fund_balance,
             customerReturnShippingReceivable:
                 totals.customer_return_shipping_receivable,
             pendingWithdrawals: Number(totals.pending_withdrawals),
@@ -555,6 +610,46 @@ export class SellerWalletRepository
         };
     }
 
+    // Chỉ liệt kê COD đã hoàn tất và được đánh dấu đã thu nhưng chưa có remittance; phân trang để màn admin không quét toàn bộ lịch sử.
+    async listPendingCodRemittances(
+        page: number,
+        pageSize: number,
+    ): Promise<{ items: AdminCodRemittanceRecord[]; total: number }> {
+        const [orders, total] = await this.dataSource
+            .getRepository(Order)
+            .findAndCount({
+                select: {
+                    id: true,
+                    orderNumber: true,
+                    totalAmount: true,
+                    completedAt: true,
+                    createdAt: true,
+                },
+                where: {
+                    paymentMethod: PaymentMethod.COD,
+                    paymentStatus: PaymentStatus.PAID,
+                    fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
+                    codRemittedAt: IsNull(),
+                },
+                order: { completedAt: 'ASC', createdAt: 'ASC' },
+                skip: (page - 1) * pageSize,
+                take: pageSize,
+            });
+
+        return {
+            items: orders.map((order) => ({
+                orderId: order.id,
+                orderNumber: order.orderNumber,
+                amount: order.totalAmount,
+                completedAt: (
+                    order.completedAt ?? order.createdAt
+                ).toISOString(),
+                createdAt: order.createdAt.toISOString(),
+            })),
+            total,
+        };
+    }
+
     // Đọc tài khoản đầy đủ chỉ tại route admin tài chính; mọi danh sách thông thường dùng số đã che.
     async getAdminWithdrawal(
         withdrawalId: string,
@@ -569,25 +664,23 @@ export class SellerWalletRepository
             throw new BadRequestException('Không tìm thấy yêu cầu rút tiền.');
         return {
             ...this.toWithdrawalRecord(row),
+            bankCode: row.bankCode,
             accountNumber: row.accountNumber,
             sellerUserId: row.sellerUserId,
+            transferMemo: createWithdrawalTransferMemo(row.id),
         };
     }
 
-    // Admin chỉ xác nhận kết quả chuyển khoản ngoài hệ thống; transition khóa request và ví để chốt tiền đúng một lần.
+    // Admin chỉ mở bước chuyển khoản khi request còn mới hoặc từ chối trước khi tiền được gửi đi.
+    // Sau PROCESSING, chỉ webhook OUT đã xác thực mới được chốt PAID để tránh giải phóng tiền khi callback ngân hàng đến trễ.
     async transitionWithdrawal(input: {
         withdrawalId: string;
         adminId: string;
-        status: 'PROCESSING' | 'PAID' | 'REJECTED' | 'FAILED';
-        reference?: string;
+        status: 'PROCESSING' | 'REJECTED';
         note?: string;
     }): Promise<void> {
         if (!input.adminId.trim())
             throw new BadRequestException('Thiếu danh tính admin.');
-        if (input.status === 'PAID' && !input.reference?.trim())
-            throw new BadRequestException(
-                'Cần mã tham chiếu chuyển khoản để xác nhận đã chi.',
-            );
         await this.dataSource.transaction(async (manager) => {
             const repository = manager.getRepository(WalletWithdrawalRequest);
             const request = await repository.findOne({
@@ -606,19 +699,10 @@ export class SellerWalletRepository
                     );
                 request.status = 'PROCESSING';
             } else {
-                if (request.status === input.status) {
-                    if (
-                        input.status !== 'PAID' ||
-                        request.transferReference === input.reference?.trim()
-                    )
-                        return;
+                if (request.status === input.status) return;
+                if (request.status !== 'REQUESTED')
                     throw new ConflictException(
-                        'Yêu cầu đã được xác nhận với mã tham chiếu khác.',
-                    );
-                }
-                if (!['REQUESTED', 'PROCESSING'].includes(request.status))
-                    throw new ConflictException(
-                        'Yêu cầu đã được xử lý trước đó.',
+                        'Chỉ có thể từ chối trước khi bắt đầu chuyển khoản.',
                     );
                 const wallet = await manager
                     .getRepository(SellerWallet)
@@ -638,44 +722,18 @@ export class SellerWalletRepository
                 );
                 const ledgerRepository =
                     manager.getRepository(SellerWalletLedger);
-                if (input.status === 'PAID') {
-                    // Khoản reserve đã trừ available khi tạo request; PAID chỉ giải phóng reserved và ghi dòng chi thật ở platform ledger.
-                    await ledgerRepository.save({
-                        shopId: request.shopId,
-                        orderId: null,
-                        returnRequestId: null,
-                        kind: 'WITHDRAWAL_PAID',
-                        amount: '0.00',
-                        sourceKey: `withdrawal:${request.id}:paid`,
-                        availableAt: null,
-                    });
-                    await manager.getRepository(PlatformFinanceLedger).save({
-                        kind: 'SELLER_PAYOUT',
-                        amount: fromCents(-toCents(request.amount)),
-                        sourceKey: `withdrawal:${request.id}:paid`,
-                        shopId: request.shopId,
-                        orderId: null,
-                        returnRequestId: null,
-                        reference: input.reference!.trim(),
-                        settlementBatchId: null,
-                        createdBy: input.adminId,
-                    });
-                    request.transferReference = input.reference!.trim();
-                } else {
-                    wallet.availableBalance = fromCents(
-                        toCents(wallet.availableBalance) +
-                            toCents(request.amount),
-                    );
-                    await ledgerRepository.save({
-                        shopId: request.shopId,
-                        orderId: null,
-                        returnRequestId: null,
-                        kind: 'WITHDRAWAL_RELEASED',
-                        amount: request.amount,
-                        sourceKey: `withdrawal:${request.id}:release`,
-                        availableAt: null,
-                    });
-                }
+                wallet.availableBalance = fromCents(
+                    toCents(wallet.availableBalance) + toCents(request.amount),
+                );
+                await ledgerRepository.save({
+                    shopId: request.shopId,
+                    orderId: null,
+                    returnRequestId: null,
+                    kind: 'WITHDRAWAL_RELEASED',
+                    amount: request.amount,
+                    sourceKey: `withdrawal:${request.id}:release`,
+                    availableAt: null,
+                });
                 await manager.getRepository(SellerWallet).save(wallet);
                 request.status = input.status;
                 request.processedBy = input.adminId;
@@ -683,6 +741,183 @@ export class SellerWalletRepository
             }
             request.adminNote = input.note?.trim() || request.adminNote;
             await repository.save(request);
+        });
+    }
+
+    // Khóa yêu cầu cho payout payOS trước khi gọi provider; marker giúp phân biệt lệnh tự động với luồng SePay/app ngân hàng cũ.
+    // Retry chỉ được tiếp tục khi cùng reference đã được lưu, còn PROCESSING cũ bị từ chối để không tạo khoản chi trùng.
+    async prepareWithdrawalPayout(input: {
+        withdrawalId: string;
+        adminId: string;
+        transferReference: string;
+        note?: string;
+    }): Promise<void> {
+        if (!input.adminId.trim() || !input.transferReference.trim())
+            throw new BadRequestException(
+                'Thiếu danh tính admin hoặc mã tham chiếu payout.',
+            );
+        await this.dataSource.transaction(async (manager) => {
+            const repository = manager.getRepository(WalletWithdrawalRequest);
+            const request = await repository.findOne({
+                where: { id: input.withdrawalId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            if (!request)
+                throw new BadRequestException(
+                    'Không tìm thấy yêu cầu rút tiền.',
+                );
+            if (
+                request.status === 'PROCESSING' &&
+                request.transferReference === input.transferReference
+            )
+                return;
+            if (request.status !== 'REQUESTED')
+                throw new ConflictException(
+                    'Yêu cầu không còn ở trạng thái chờ hoặc đã thuộc luồng payout khác.',
+                );
+
+            request.status = 'PROCESSING';
+            request.transferReference = input.transferReference;
+            request.processedBy = input.adminId;
+            request.processedAt = new Date();
+            request.adminNote = input.note?.trim() || request.adminNote;
+            await repository.save(request);
+        });
+    }
+
+    // Chốt payout sau khi provider đã xác nhận thành công; khóa request và ví để amount, trạng thái và ledger đổi cùng transaction.
+    // Webhook SePay và truy vấn payOS dùng chung đường ghi sổ; mã giao dịch lặp được ACK, mã khác sau PAID bị chặn.
+    async reconcileWithdrawalTransfer(input: {
+        withdrawalId: string;
+        amount: string;
+        providerTransactionId: string;
+        reference: string;
+        processedBy?: string;
+    }): Promise<WithdrawalTransferReconciliationResult> {
+        return this.dataSource.transaction(async (manager) => {
+            const requestRepository = manager.getRepository(
+                WalletWithdrawalRequest,
+            );
+            const request = await requestRepository.findOne({
+                where: { id: input.withdrawalId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            if (!request) return 'NOT_FOUND';
+            if (toCents(request.amount) !== toCents(input.amount))
+                return 'AMOUNT_MISMATCH';
+            if (request.status === 'PAID')
+                // SePay khuyến nghị khử trùng lặp theo ID event; reference ngân hàng có thể không duy nhất giữa nhiều giao dịch.
+                return request.transferReference === input.providerTransactionId
+                    ? 'DUPLICATE'
+                    : 'ALREADY_PAID';
+            if (request.status !== 'PROCESSING') return 'NOT_PROCESSING';
+
+            const walletRepository = manager.getRepository(SellerWallet);
+            const wallet = await walletRepository.findOne({
+                where: { shopId: request.shopId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            if (
+                !wallet ||
+                toCents(wallet.reservedBalance) < toCents(request.amount)
+            )
+                throw new ConflictException(
+                    'Số tiền giữ chỗ không khớp yêu cầu rút.',
+                );
+
+            // Khoản reserve đã trừ available lúc seller gửi yêu cầu; webhook chỉ xóa reserved và ghi chi thực ở platform ledger.
+            wallet.reservedBalance = fromCents(
+                toCents(wallet.reservedBalance) - toCents(request.amount),
+            );
+            await manager.getRepository(SellerWalletLedger).save({
+                shopId: request.shopId,
+                orderId: null,
+                returnRequestId: null,
+                kind: 'WITHDRAWAL_PAID',
+                amount: '0.00',
+                sourceKey: `withdrawal:${request.id}:paid`,
+                availableAt: null,
+            });
+            await manager.getRepository(PlatformFinanceLedger).save({
+                kind: 'SELLER_PAYOUT',
+                amount: fromCents(-toCents(request.amount)),
+                sourceKey: `withdrawal:${request.id}:paid`,
+                shopId: request.shopId,
+                orderId: null,
+                returnRequestId: null,
+                reference: input.reference,
+                settlementBatchId: null,
+                createdBy: input.processedBy ?? 'SEPAY_WEBHOOK',
+            });
+            await walletRepository.save(wallet);
+            request.status = 'PAID';
+            // Lưu ID event SePay để lần gửi lại nhận biết chính xác; mã tham chiếu ngân hàng nằm trong platform ledger.
+            request.transferReference = input.providerTransactionId;
+            request.processedBy = input.processedBy ?? 'SEPAY_WEBHOOK';
+            request.processedAt = new Date();
+            await requestRepository.save(request);
+            return 'PAID';
+        });
+    }
+
+    // Chỉ trả reserve khi provider xác nhận payout thất bại cuối cùng; khóa ví và ghi ledger hoàn lại trong cùng transaction.
+    // Webhook hoặc lần đồng bộ lặp chỉ nhận DUPLICATE, còn PAID/luồng khác tuyệt đối không được hoàn tiền lần nữa.
+    async failWithdrawalPayout(input: {
+        withdrawalId: string;
+        providerReference: string;
+        note: string;
+    }): Promise<WithdrawalPayoutFailureResult> {
+        return this.dataSource.transaction(async (manager) => {
+            const requestRepository = manager.getRepository(
+                WalletWithdrawalRequest,
+            );
+            const request = await requestRepository.findOne({
+                where: { id: input.withdrawalId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            if (!request) return 'NOT_FOUND';
+            if (request.status === 'FAILED')
+                return request.transferReference === input.providerReference
+                    ? 'DUPLICATE'
+                    : 'NOT_PROCESSING';
+            if (request.status !== 'PROCESSING') return 'NOT_PROCESSING';
+
+            const walletRepository = manager.getRepository(SellerWallet);
+            const wallet = await walletRepository.findOne({
+                where: { shopId: request.shopId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            if (
+                !wallet ||
+                toCents(wallet.reservedBalance) < toCents(request.amount)
+            )
+                throw new ConflictException(
+                    'Số tiền giữ chỗ không khớp yêu cầu rút.',
+                );
+
+            wallet.reservedBalance = fromCents(
+                toCents(wallet.reservedBalance) - toCents(request.amount),
+            );
+            wallet.availableBalance = fromCents(
+                toCents(wallet.availableBalance) + toCents(request.amount),
+            );
+            await manager.getRepository(SellerWalletLedger).save({
+                shopId: request.shopId,
+                orderId: null,
+                returnRequestId: null,
+                kind: 'WITHDRAWAL_RELEASED',
+                amount: request.amount,
+                sourceKey: `withdrawal:${request.id}:release`,
+                availableAt: null,
+            });
+            await walletRepository.save(wallet);
+            request.status = 'FAILED';
+            request.transferReference = input.providerReference;
+            request.adminNote = input.note.trim().slice(0, 500);
+            request.processedBy = 'PAYOS_API';
+            request.processedAt = new Date();
+            await requestRepository.save(request);
+            return 'FAILED';
         });
     }
 
@@ -734,14 +969,16 @@ export class SellerWalletRepository
                 throw new ConflictException(
                     'Có giao dịch không tồn tại hoặc đã thuộc đợt đối soát khác.',
                 );
-            // Khoản phải thu chưa được thu tiền nên không thể ghép vào đợt đối soát tiền mặt với VNPay/ngân hàng.
+            // Khoản phải thu chưa được thu tiền nên không thể ghép vào đợt đối soát tiền mặt với Pay2S/ngân hàng.
             if (
                 rows.some(
-                    (row) => row.kind === 'CUSTOMER_RETURN_SHIPPING_RECEIVABLE',
+                    (row) =>
+                        row.kind === 'CUSTOMER_RETURN_SHIPPING_RECEIVABLE' ||
+                        row.kind.startsWith('SHIPPING_FUND_'),
                 )
             )
                 throw new ConflictException(
-                    'Khoản phí hoàn khách chưa trả không thể ghép vào đợt đối soát tiền mặt.',
+                    'Khoản chưa thu hoặc bút toán phân bổ quỹ ship không thể ghép vào đợt đối soát tiền mặt.',
                 );
             const batch = await manager
                 .getRepository(FinanceSettlementBatch)
@@ -825,145 +1062,172 @@ export class SellerWalletRepository
     // Nếu chưa có bút toán sale (ví dụ COD được hoàn trước remittance), seller chưa từng nhận khoản đó nên không ghi nợ.
     // Hai khóa nguồn riêng cho pending/available khiến retry an toàn; transaction bảo vệ số dư và ledger cùng nhau.
     async reverseRefund(returnRequestId: string): Promise<void> {
-        await this.dataSource.transaction(async (manager) => {
-            const request = await manager
-                .getRepository(OrderReturnRequest)
-                .findOne({
-                    where: { id: returnRequestId },
-                    lock: { mode: 'pessimistic_write' },
-                });
-            if (!request || request.status !== 'REFUNDED') return;
-            if (request.refundMethod === 'VNPAY') {
-                const platformLedger = manager.getRepository(
-                    PlatformFinanceLedger,
-                );
-                const sourceKey = `refund:${request.id}:platform`;
-                if (!(await platformLedger.exist({ where: { sourceKey } }))) {
-                    await platformLedger.save({
-                        kind: 'VNPAY_REFUND',
-                        amount: fromCents(-toCents(request.refundAmount)),
-                        sourceKey,
-                        shopId: request.shopId,
-                        orderId: request.orderId,
-                        returnRequestId: request.id,
-                        reference: request.refundTransactionReference,
-                        settlementBatchId: null,
-                        createdBy: request.refundProcessedBy,
-                    });
-                }
-            }
-            const amount = toCents(request.refundItemAmount);
-            if (amount <= 0n) return;
-            const ledgerRepository = manager.getRepository(SellerWalletLedger);
-            const saleLedger = await ledgerRepository.findOne({
-                where: {
-                    sourceKey: `sale:${request.orderId}:${request.shopId}`,
-                },
-            });
-            if (!saleLedger) return;
-            // Sale ledger đầu tiên đã trừ return hoàn trước thời điểm ghi; không đảo lần hai nếu remittance race.
-            if (
-                request.refundProcessedAt &&
-                request.refundProcessedAt <= saleLedger.createdAt
-            )
-                return;
+        await this.dataSource.transaction((manager) =>
+            this.reverseRefundInTransaction(manager, returnRequestId),
+        );
+    }
 
-            const wallet = await manager.getRepository(SellerWallet).findOne({
-                where: { shopId: request.shopId },
+    // Chạy phần reverse trong transaction của caller để trạng thái REFUNDED, platform ledger và số dư seller commit/rollback cùng nhau.
+    private async reverseRefundInTransaction(
+        manager: EntityManager,
+        returnRequestId: string,
+    ): Promise<void> {
+        const request = await manager
+            .getRepository(OrderReturnRequest)
+            .findOne({
+                where: { id: returnRequestId },
                 lock: { mode: 'pessimistic_write' },
             });
-            if (!wallet)
-                throw new Error(
-                    'Không tìm thấy ví shop để điều chỉnh hoàn tiền.',
-                );
+        if (!request || request.status !== 'REFUNDED') return;
+        if (request.refundMethod === 'PAY2S_MANUAL') {
+            const platformLedger = manager.getRepository(PlatformFinanceLedger);
+            const sourceKey = `pay2s-refund:${request.id}:platform`;
+            const legacySourceKey = `refund:${request.id}:platform`;
+            // Manual refund đã ghi ledger trước khi đảo ví; kiểm tra cả key cũ để retry không tạo dòng platform thứ hai.
+            const existingPlatformLedger = await platformLedger.findOne({
+                where: [{ sourceKey }, { sourceKey: legacySourceKey }],
+            });
+            if (!existingPlatformLedger) {
+                await platformLedger.save({
+                    kind: 'PAY2S_REFUND_MANUAL',
+                    amount: fromCents(-toCents(request.refundAmount)),
+                    sourceKey,
+                    shopId: request.shopId,
+                    orderId: request.orderId,
+                    returnRequestId: request.id,
+                    reference: request.refundTransactionReference,
+                    settlementBatchId: null,
+                    createdBy: request.refundProcessedBy,
+                });
+            }
+        }
+        // Hủy phần ship đã hoàn cho khách khỏi quỹ phân bổ; item refund không làm giảm quỹ ship.
+        if (toCents(request.refundShippingAmount) > 0n) {
+            const sourceKey = `shipping-fund:refund:${request.id}`;
+            const platformLedger = manager.getRepository(PlatformFinanceLedger);
+            if (!(await platformLedger.exist({ where: { sourceKey } }))) {
+                await platformLedger.save({
+                    kind: 'SHIPPING_FUND_REFUND',
+                    amount: fromCents(-toCents(request.refundShippingAmount)),
+                    sourceKey,
+                    shopId: request.shopId,
+                    orderId: request.orderId,
+                    returnRequestId: request.id,
+                    reference: request.refundTransactionReference,
+                    settlementBatchId: null,
+                    createdBy: request.refundProcessedBy,
+                });
+            }
+        }
+        const amount = toCents(request.refundItemAmount);
+        if (amount <= 0n) return;
+        const ledgerRepository = manager.getRepository(SellerWalletLedger);
+        const saleLedger = await ledgerRepository.findOne({
+            where: {
+                sourceKey: `sale:${request.orderId}:${request.shopId}`,
+            },
+        });
+        if (!saleLedger) return;
+        // Sale ledger đầu tiên đã trừ return hoàn trước thời điểm ghi; không đảo lần hai nếu remittance race.
+        if (
+            request.refundProcessedAt &&
+            request.refundProcessedAt <= saleLedger.createdAt
+        )
+            return;
 
-            // Phân bổ khoản đảo theo đúng order/shop; pending tổng của shop có thể thuộc các order khác.
-            const allocation = (await manager.query(
-                `SELECT
+        const wallet = await manager.getRepository(SellerWallet).findOne({
+            where: { shopId: request.shopId },
+            lock: { mode: 'pessimistic_write' },
+        });
+        if (!wallet)
+            throw new Error('Không tìm thấy ví shop để điều chỉnh hoàn tiền.');
+
+        // Phân bổ khoản đảo theo đúng order/shop; pending tổng của shop có thể thuộc các order khác.
+        const allocation = (await manager.query(
+            `SELECT
                     COALESCE(SUM(amount) FILTER (WHERE kind = 'SALE_PENDING'), 0)::text AS sale_amount,
                     COALESCE(SUM(amount) FILTER (WHERE kind = 'RELEASE_AVAILABLE'), 0)::text AS released_amount,
                     COALESCE(SUM(amount) FILTER (WHERE kind = 'REFUND_PENDING_REVERSAL'), 0)::text AS pending_reversed,
                     COALESCE(SUM(amount) FILTER (WHERE kind = 'REFUND_AVAILABLE_REVERSAL'), 0)::text AS available_reversed
                  FROM seller_wallet_ledger
                  WHERE order_id = $1 AND shop_id = $2`,
-                [request.orderId, request.shopId],
-            )) as Array<{
-                sale_amount: string;
-                released_amount: string;
-                pending_reversed: string;
-                available_reversed: string;
-            }>;
-            const orderLedger = allocation[0];
-            const refundablePending =
-                toCents(orderLedger?.sale_amount ?? '0') -
-                toCents(orderLedger?.released_amount ?? '0') +
-                toCents(orderLedger?.pending_reversed ?? '0');
-            const refundableAvailable =
-                toCents(orderLedger?.released_amount ?? '0') +
-                toCents(orderLedger?.available_reversed ?? '0');
-            const pendingKey = `refund:${request.id}:pending`;
-            const availableKey = `refund:${request.id}:available`;
-            const alreadyApplied = await ledgerRepository.exist({
-                where: [{ sourceKey: pendingKey }, { sourceKey: availableKey }],
-            });
-            if (alreadyApplied) return;
-            if (amount > refundablePending + refundableAvailable) {
-                throw new ConflictException(
-                    'Khoản hoàn vượt phần tiền hàng shop còn được ghi nhận.',
-                );
-            }
-            const pendingBalance = toCents(wallet.pendingBalance);
-            const pendingDebit =
-                refundablePending > 0n
-                    ? refundablePending < amount
-                        ? refundablePending
-                        : amount
-                    : 0n;
-            const availableDebit = amount - pendingDebit;
-
-            // Không bù sai lệch ledger bằng tiền của order khác; transaction rollback để có thể điều tra.
-            if (pendingBalance < pendingDebit) {
-                throw new ConflictException(
-                    'Số dư chờ không khớp ledger của khoản cần hoàn.',
-                );
-            }
-
-            wallet.pendingBalance = fromCents(pendingBalance - pendingDebit);
-            // Cho phép available âm: hoàn khách là nghĩa vụ đã phát sinh, còn thiếu hụt seller được bù bằng doanh thu sau này.
-            wallet.availableBalance = fromCents(
-                toCents(wallet.availableBalance) - availableDebit,
-            );
-            await manager.getRepository(SellerWallet).save(wallet);
-            if (pendingDebit > 0n) {
-                await ledgerRepository.save(
-                    ledgerRepository.create({
-                        shopId: request.shopId,
-                        orderId: request.orderId,
-                        returnRequestId: request.id,
-                        kind: 'REFUND_PENDING_REVERSAL',
-                        amount: fromCents(-pendingDebit),
-                        sourceKey: pendingKey,
-                        availableAt: null,
-                    }),
-                );
-            }
-            if (availableDebit > 0n) {
-                await ledgerRepository.save(
-                    ledgerRepository.create({
-                        shopId: request.shopId,
-                        orderId: request.orderId,
-                        returnRequestId: request.id,
-                        kind: 'REFUND_AVAILABLE_REVERSAL',
-                        amount: fromCents(-availableDebit),
-                        sourceKey: availableKey,
-                        availableAt: null,
-                    }),
-                );
-            }
+            [request.orderId, request.shopId],
+        )) as Array<{
+            sale_amount: string;
+            released_amount: string;
+            pending_reversed: string;
+            available_reversed: string;
+        }>;
+        const orderLedger = allocation[0];
+        const refundablePending =
+            toCents(orderLedger?.sale_amount ?? '0') -
+            toCents(orderLedger?.released_amount ?? '0') +
+            toCents(orderLedger?.pending_reversed ?? '0');
+        const refundableAvailable =
+            toCents(orderLedger?.released_amount ?? '0') +
+            toCents(orderLedger?.available_reversed ?? '0');
+        const pendingKey = `refund:${request.id}:pending`;
+        const availableKey = `refund:${request.id}:available`;
+        const alreadyApplied = await ledgerRepository.exist({
+            where: [{ sourceKey: pendingKey }, { sourceKey: availableKey }],
         });
+        if (alreadyApplied) return;
+        if (amount > refundablePending + refundableAvailable) {
+            throw new ConflictException(
+                'Khoản hoàn vượt phần tiền hàng shop còn được ghi nhận.',
+            );
+        }
+        const pendingBalance = toCents(wallet.pendingBalance);
+        const pendingDebit =
+            refundablePending > 0n
+                ? refundablePending < amount
+                    ? refundablePending
+                    : amount
+                : 0n;
+        const availableDebit = amount - pendingDebit;
+
+        // Không bù sai lệch ledger bằng tiền của order khác; transaction rollback để có thể điều tra.
+        if (pendingBalance < pendingDebit) {
+            throw new ConflictException(
+                'Số dư chờ không khớp ledger của khoản cần hoàn.',
+            );
+        }
+
+        wallet.pendingBalance = fromCents(pendingBalance - pendingDebit);
+        // Cho phép available âm: hoàn khách là nghĩa vụ đã phát sinh, còn thiếu hụt seller được bù bằng doanh thu sau này.
+        wallet.availableBalance = fromCents(
+            toCents(wallet.availableBalance) - availableDebit,
+        );
+        await manager.getRepository(SellerWallet).save(wallet);
+        if (pendingDebit > 0n) {
+            await ledgerRepository.save(
+                ledgerRepository.create({
+                    shopId: request.shopId,
+                    orderId: request.orderId,
+                    returnRequestId: request.id,
+                    kind: 'REFUND_PENDING_REVERSAL',
+                    amount: fromCents(-pendingDebit),
+                    sourceKey: pendingKey,
+                    availableAt: null,
+                }),
+            );
+        }
+        if (availableDebit > 0n) {
+            await ledgerRepository.save(
+                ledgerRepository.create({
+                    shopId: request.shopId,
+                    orderId: request.orderId,
+                    returnRequestId: request.id,
+                    kind: 'REFUND_AVAILABLE_REVERSAL',
+                    amount: fromCents(-availableDebit),
+                    sourceKey: availableKey,
+                    availableAt: null,
+                }),
+            );
+        }
     }
 
-    // Ghi nhận COD hoàn thủ công theo số tiền backend đã tính và giữ proof/reference để admin kiểm toán.
+    // COD và Pay2S dùng chung invariant hoàn thủ công nhưng khác payment method/ledger kind để audit rõ nguồn tiền.
     async recordCodRefund(input: {
         returnRequestId: string;
         adminId: string;
@@ -971,9 +1235,133 @@ export class SellerWalletRepository
         amount: string;
         proof: Record<string, unknown>;
     }): Promise<void> {
+        await this.recordManualRefund(
+            input,
+            PaymentMethod.COD,
+            'COD_MANUAL',
+            'COD_REFUND',
+            'cod-refund',
+        );
+    }
+
+    // Admin xác nhận Pay2S đã chuyển khoản ngoài hệ thống; không gọi API provider và chỉ reverse ví một lần.
+    async recordPay2sRefund(input: {
+        returnRequestId: string;
+        adminId: string;
+        reference: string;
+        amount: string;
+        proof: Record<string, unknown>;
+    }): Promise<void> {
+        await this.recordManualRefund(
+            input,
+            PaymentMethod.PAY2S,
+            'PAY2S_MANUAL',
+            'PAY2S_REFUND_MANUAL',
+            'pay2s-refund',
+        );
+    }
+
+    // Hoàn thủ công khoản Pay2S đến muộn không có return request; chỉ platform ledger bị trừ vì seller chưa từng nhận SALE_PENDING.
+    async recordPay2sLateRefund(input: {
+        orderId: string;
+        adminId: string;
+        reference: string;
+        amount: string;
+        proof: Record<string, unknown>;
+    }): Promise<void> {
         const reference = input.reference.trim();
         if (!reference)
-            throw new BadRequestException('Cần mã giao dịch hoàn tiền COD.');
+            throw new BadRequestException('Cần mã giao dịch hoàn tiền.');
+        await this.dataSource.transaction(async (manager) => {
+            const attempt = await manager
+                .getRepository(PaymentAttempt)
+                .findOne({
+                    where: [
+                        {
+                            orderId: input.orderId,
+                            status: 'REFUND_PENDING',
+                        },
+                        { orderId: input.orderId, status: 'REFUNDED' },
+                    ],
+                    order: { confirmedAt: 'DESC' },
+                    lock: { mode: 'pessimistic_write' },
+                });
+            if (!attempt || !attempt.providerTransactionId)
+                throw new ConflictException(
+                    'Không tìm thấy khoản Pay2S đến muộn cần hoàn.',
+                );
+            if (attempt.status === 'REFUNDED') {
+                if (attempt.refundTransactionReference !== reference)
+                    throw new ConflictException(
+                        'Khoản Pay2S này đã được hoàn bằng mã giao dịch khác.',
+                    );
+                return;
+            }
+            if (toCents(input.amount) !== toCents(attempt.amount))
+                throw new ConflictException(
+                    'Số tiền phải khớp số tiền Pay2S đã thu.',
+                );
+
+            const orderRepository = manager.getRepository(Order);
+            const order = await orderRepository.findOne({
+                where: { id: input.orderId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            if (
+                !order ||
+                order.paymentMethod !== PaymentMethod.PAY2S ||
+                order.paymentStatus !== PaymentStatus.REFUND_PENDING
+            )
+                throw new ConflictException(
+                    'Order không ở trạng thái chờ hoàn Pay2S đến muộn.',
+                );
+
+            const sourceKey = `pay2s-late-refund:${attempt.id}:platform`;
+            const platformLedger = manager.getRepository(PlatformFinanceLedger);
+            const existingLedger = await platformLedger.findOne({
+                where: { sourceKey },
+            });
+            if (!existingLedger) {
+                await platformLedger.save({
+                    kind: 'PAY2S_REFUND_MANUAL',
+                    amount: fromCents(-toCents(attempt.amount)),
+                    sourceKey,
+                    shopId: null,
+                    orderId: order.id,
+                    returnRequestId: null,
+                    reference,
+                    settlementBatchId: null,
+                    createdBy: input.adminId,
+                });
+            }
+            attempt.status = 'REFUNDED';
+            attempt.refundTransactionReference = reference;
+            attempt.refundProof = input.proof;
+            attempt.refundProcessedBy = input.adminId;
+            attempt.refundProcessedAt = new Date();
+            await manager.getRepository(PaymentAttempt).save(attempt);
+            order.paymentStatus = PaymentStatus.REFUNDED;
+            await orderRepository.save(order);
+        });
+    }
+
+    // Chốt manual refund và reverse seller trong cùng transaction; lỗi ở bất kỳ bước nào đều rollback để retry còn an toàn.
+    private async recordManualRefund(
+        input: {
+            returnRequestId: string;
+            adminId: string;
+            reference: string;
+            amount: string;
+            proof: Record<string, unknown>;
+        },
+        paymentMethod: PaymentMethod,
+        refundMethod: 'COD_MANUAL' | 'PAY2S_MANUAL',
+        ledgerKind: 'COD_REFUND' | 'PAY2S_REFUND_MANUAL',
+        sourcePrefix: 'cod-refund' | 'pay2s-refund',
+    ): Promise<void> {
+        const reference = input.reference.trim();
+        if (!reference)
+            throw new BadRequestException('Cần mã giao dịch hoàn tiền.');
         await this.dataSource.transaction(async (manager) => {
             const requestRepository = manager.getRepository(OrderReturnRequest);
             const request = await requestRepository.findOne({
@@ -984,39 +1372,42 @@ export class SellerWalletRepository
                 throw new BadRequestException(
                     'Không tìm thấy yêu cầu hoàn hàng.',
                 );
+            // Retry cùng reference sau khi order đã chuyển REFUNDED phải được ACK idempotent,
+            // không bị chặn bởi điều kiện order.paymentStatus === PAID bên dưới.
+            if (request.status === 'REFUNDED') {
+                if (
+                    request.refundMethod !== refundMethod ||
+                    request.refundTransactionReference !== reference
+                )
+                    throw new ConflictException(
+                        'Yêu cầu này đã được hoàn bằng mã giao dịch khác hoặc khác phương thức.',
+                    );
+                return;
+            }
             const order = await manager.getRepository(Order).findOne({
                 where: { id: request.orderId },
                 lock: { mode: 'pessimistic_write' },
             });
             if (
                 !order ||
-                order.paymentMethod !== PaymentMethod.COD ||
+                order.paymentMethod !== paymentMethod ||
                 order.paymentStatus !== PaymentStatus.PAID
-            ) {
+            )
                 throw new ConflictException(
-                    'Chỉ ghi nhận hoàn thủ công cho đơn COD đã thu tiền.',
+                    'Chỉ ghi nhận hoàn thủ công cho đơn đã thanh toán.',
                 );
-            }
-            if (request.status === 'REFUNDED') {
-                if (request.refundTransactionReference !== reference)
-                    throw new ConflictException(
-                        'Yêu cầu này đã được hoàn bằng mã giao dịch khác.',
-                    );
-                return;
-            }
             if (
                 request.status !== 'REFUND_PENDING' &&
                 request.status !== 'REFUND_FAILED'
-            ) {
+            )
                 throw new ConflictException(
                     'Yêu cầu hoàn chưa được seller kiểm tra đạt.',
                 );
-            }
-            if (toCents(input.amount) !== toCents(request.refundAmount)) {
+            if (toCents(input.amount) !== toCents(request.refundAmount))
                 throw new ConflictException(
                     'Số tiền phải khớp số hoàn do Order Service tính.',
                 );
-            }
+
             const previousRefunds = await requestRepository
                 .createQueryBuilder('return_request')
                 .select(
@@ -1037,22 +1428,22 @@ export class SellerWalletRepository
                 toCents(previousRefunds?.amount ?? '0') +
                     toCents(request.refundAmount) >
                 toCents(order.totalAmount)
-            ) {
+            )
                 throw new ConflictException(
                     'Tổng các khoản hoàn vượt số tiền đã thanh toán.',
                 );
-            }
+
             request.status = OrderReturnStatus.REFUNDED;
-            request.refundMethod = 'COD_MANUAL';
+            request.refundMethod = refundMethod;
             request.refundTransactionReference = reference;
             request.refundProof = input.proof;
             request.refundProcessedBy = input.adminId;
             request.refundProcessedAt = new Date();
             await requestRepository.save(request);
             await manager.getRepository(PlatformFinanceLedger).save({
-                kind: 'COD_REFUND',
+                kind: ledgerKind,
                 amount: fromCents(-toCents(input.amount)),
-                sourceKey: `cod-refund:${request.id}:platform`,
+                sourceKey: `${sourcePrefix}:${request.id}:platform`,
                 shopId: request.shopId,
                 orderId: request.orderId,
                 returnRequestId: request.id,
@@ -1068,13 +1459,13 @@ export class SellerWalletRepository
                 order.paymentStatus = PaymentStatus.REFUNDED;
                 await manager.getRepository(Order).save(order);
             }
+            await this.reverseRefundInTransaction(manager, request.id);
         });
-        await this.reverseRefund(input.returnRequestId);
     }
 
-    // Tính phần hàng theo snapshot/shop, trừ các return đã hoàn trước khi COD
-    // remittance tạo sale ledger lần đầu.
-    // Khi sale ledger đã tồn tại, mọi lần lặp đều dừng tại source key nên refund sau đó chỉ đi qua reverseRefund.
+    // Tính phần hàng theo snapshot/shop và trừ các return đã hoàn trước lần ghi sale đầu tiên.
+    // COD đã được khách trả sẽ vào pending trước remittance; remittance chỉ tạo ledger nền tảng và cho phép release.
+    // Khi sale ledger đã tồn tại, mọi lần lặp dừng tại source key nên refund sau đó chỉ đi qua reverseRefund.
     // Sandbox được hạch toán như giao dịch thành công trong ví nội bộ; shipping fee và phí gateway vẫn không thuộc tiền seller.
     private async creditOrderPendingInTransaction(
         manager: EntityManager,
@@ -1086,49 +1477,76 @@ export class SellerWalletRepository
             where: { id: orderId },
             lock: { mode: 'pessimistic_write' },
         });
-        // Chỉ callback payment đã xác nhận mới được ghi sổ; cờ Sandbox chỉ lưu nguồn thanh toán, không làm mất doanh thu seller.
+        // Chỉ paymentStatus PAID mới được ghi sale; với COD, trạng thái này xác nhận khách đã trả và số dư còn ở pending đến remittance.
         if (!order || order.paymentStatus !== PaymentStatus.PAID) return;
-        // COD chưa remittance chưa tạo quyền nhận tiền; admin sẽ gọi lại sau khi xác nhận khoản thu.
-        if (order.paymentMethod === PaymentMethod.COD && !order.codRemittedAt)
-            return;
-
-        const platformLedger = manager.getRepository(PlatformFinanceLedger);
-        const platformSourceKey =
-            order.paymentMethod === PaymentMethod.COD
-                ? `cod-remittance:${order.id}`
-                : `order-payment:${order.id}`;
+        const codRemittanceConfirmed = Boolean(order.codRemittedAt);
+        // Sale COD phản ánh tiền khách đã trả nên được ghi nhận ngay; platform ledger chỉ được ghi khi tiền thu hộ đã về.
         if (
-            !(await platformLedger.exist({
-                where: { sourceKey: platformSourceKey },
-            }))
+            order.paymentMethod !== PaymentMethod.COD ||
+            codRemittanceConfirmed
         ) {
-            const paymentAttempt =
-                order.paymentMethod === PaymentMethod.VNPAY
-                    ? await manager.getRepository(PaymentAttempt).findOne({
-                          where: { orderId: order.id, status: 'PAID' },
-                          order: { createdAt: 'DESC' },
-                      })
-                    : null;
-            await platformLedger.save({
-                kind:
-                    order.paymentMethod === PaymentMethod.COD
-                        ? 'COD_REMITTANCE'
-                        : 'ORDER_PAYMENT',
-                amount: order.totalAmount,
-                sourceKey: platformSourceKey,
-                shopId: null,
-                orderId: order.id,
-                returnRequestId: null,
-                reference:
-                    paymentAttempt?.providerTransactionId ??
-                    order.codRemittanceReference ??
-                    order.orderNumber,
-                settlementBatchId: null,
-                createdBy:
-                    order.paymentMethod === PaymentMethod.COD
-                        ? order.codRemittanceConfirmedBy
-                        : null,
-            });
+            const platformLedger = manager.getRepository(PlatformFinanceLedger);
+            const platformSourceKey =
+                order.paymentMethod === PaymentMethod.COD
+                    ? `cod-remittance:${order.id}`
+                    : `order-payment:${order.id}`;
+            if (
+                !(await platformLedger.exist({
+                    where: { sourceKey: platformSourceKey },
+                }))
+            ) {
+                const paymentAttempt =
+                    order.paymentMethod === PaymentMethod.PAY2S
+                        ? await manager.getRepository(PaymentAttempt).findOne({
+                              where: { orderId: order.id, status: 'PAID' },
+                              order: { createdAt: 'DESC' },
+                          })
+                        : null;
+                await platformLedger.save({
+                    kind:
+                        order.paymentMethod === PaymentMethod.COD
+                            ? 'COD_REMITTANCE'
+                            : 'ORDER_PAYMENT',
+                    amount: order.totalAmount,
+                    sourceKey: platformSourceKey,
+                    shopId: null,
+                    orderId: order.id,
+                    returnRequestId: null,
+                    reference:
+                        paymentAttempt?.providerTransactionId ??
+                        order.codRemittanceReference ??
+                        order.orderNumber,
+                    settlementBatchId: null,
+                    createdBy:
+                        order.paymentMethod === PaymentMethod.COD
+                            ? order.codRemittanceConfirmedBy
+                            : null,
+                });
+            }
+            // Phân bổ phí ship đã thu vào sổ quỹ riêng; loại này là bút toán nội bộ nên không cộng lại vào tiền mặt nền tảng.
+            const shippingFee = toCents(order.shippingFee);
+            const shippingFundSourceKey = `shipping-fund:allocation:${order.id}`;
+            if (
+                shippingFee > 0n &&
+                !(await platformLedger.exist({
+                    where: { sourceKey: shippingFundSourceKey },
+                }))
+            ) {
+                await platformLedger.save({
+                    kind: 'SHIPPING_FUND_ALLOCATION',
+                    amount: fromCents(shippingFee),
+                    sourceKey: shippingFundSourceKey,
+                    shopId: null,
+                    orderId: order.id,
+                    returnRequestId: null,
+                    reference: order.orderNumber,
+                    settlementBatchId: null,
+                    createdBy:
+                        order.paymentMethod === PaymentMethod.COD
+                            ? order.codRemittanceConfirmedBy
+                            : null,
+                });
+            }
         }
 
         // Item là snapshot bất biến sau checkout nên đọc riêng trong cùng
@@ -1214,7 +1632,7 @@ export class SellerWalletRepository
         }
     }
 
-    // Chuyển pending sang available ngay khi hoàn tất; job và thao tác trực tiếp dùng chung khóa ledger idempotent.
+    // Chuyển pending sang available khi đơn hoàn tất và COD đã remittance; job lặp an toàn nhờ source key của ledger.
     private async releaseEligibleBalances(
         transactionManager?: EntityManager,
         onlyOrderId?: string,
@@ -1382,8 +1800,8 @@ export class SellerWalletRepository
         };
     }
 
-    // Bù các đơn đã thanh toán nhưng chưa có bút toán, để callback cũ bị lỗi không làm mất doanh thu trong ví.
-    // Khóa nguồn sale khiến việc mở ví lặp lại an toàn; COD chỉ được bù sau khi đã xác nhận đối soát.
+    // Bù các đơn đã thanh toán nhưng chưa có bút toán, để callback hoặc lần release bị lỗi không làm mất doanh thu trong ví.
+    // COD được bù vào pending sau khi khách trả tiền; điều kiện remittance chỉ áp dụng ở bước chuyển sang available.
     private async reconcileMissingPaidOrderCredits(
         shopId?: string,
         transactionManager?: EntityManager,
@@ -1394,7 +1812,6 @@ export class SellerWalletRepository
                 `SELECT DISTINCT order_row.id
                  FROM orders order_row
                  WHERE order_row.payment_status = $3
-                   AND (order_row.payment_method <> $4 OR order_row.cod_remitted_at IS NOT NULL)
                    AND EXISTS (
                        SELECT 1
                        FROM order_items missing_item
@@ -1410,12 +1827,7 @@ export class SellerWalletRepository
                    AND ($2::uuid IS NULL OR order_row.id = $2)
                  ORDER BY order_row.id
                  LIMIT 100`,
-                [
-                    shopId ?? null,
-                    onlyOrderId ?? null,
-                    PaymentStatus.PAID,
-                    PaymentMethod.COD,
-                ],
+                [shopId ?? null, onlyOrderId ?? null, PaymentStatus.PAID],
             )) as Array<{ id: string }>;
 
             // Dùng cùng hàm ghi ledger của callback để giữ nguyên phép tính theo shop, hoàn tiền và idempotency.

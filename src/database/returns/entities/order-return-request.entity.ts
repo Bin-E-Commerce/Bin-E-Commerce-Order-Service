@@ -172,7 +172,7 @@ export class OrderReturnRequest {
         length: 40,
         nullable: true,
     })
-    refundMethod!: 'VNPAY' | 'COD_MANUAL' | null;
+    refundMethod!: 'PAY2S_MANUAL' | 'COD_MANUAL' | null;
 
     @Column({
         name: 'refund_request_id',
