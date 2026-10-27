@@ -3,7 +3,7 @@
 import {
     fromCents,
     toCents,
-} from '@/modules/order/application/utils/order-money.util';
+} from '@/modules/order/application/utils/money/order-money.util';
 
 describe('order-money.util', () => {
     // Chuyển tiền decimal sang cents bằng BigInt mà không bị sai số floating point.

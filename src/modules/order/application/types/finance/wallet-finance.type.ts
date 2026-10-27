@@ -22,8 +22,19 @@ export interface WalletWithdrawalRecord {
 }
 
 export interface AdminWalletWithdrawalRecord extends WalletWithdrawalRecord {
+    bankCode: string;
     accountNumber: string;
     sellerUserId: string;
+    transferMemo: string;
+}
+
+// Dữ liệu tối thiểu để admin xác nhận COD đã thu, không trả thông tin cá nhân của khách.
+export interface AdminCodRemittanceRecord {
+    orderId: string;
+    orderNumber: string;
+    amount: string;
+    completedAt: string;
+    createdAt: string;
 }
 
 export interface PlatformFinanceLedgerRecord {
@@ -43,6 +54,7 @@ export interface AdminFinanceSnapshot {
     platformBalance: string;
     sellerPayableBalance: string;
     reservedWithdrawalBalance: string;
+    shippingFundBalance: string;
     customerReturnShippingReceivable: string;
     pendingWithdrawals: number;
     sandboxDepositTotal: string;
