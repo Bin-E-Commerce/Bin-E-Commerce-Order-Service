@@ -19,11 +19,13 @@ export class PlatformFinanceLedger {
         | 'ORDER_PAYMENT'
         | 'WALLET_DEPOSIT'
         | 'COD_REMITTANCE'
-        | 'VNPAY_REFUND'
+        | 'PAY2S_REFUND_MANUAL'
         | 'COD_REFUND'
         | 'SELLER_PAYOUT'
         | 'RETURN_SHIPPING_FEE'
-        | 'CUSTOMER_RETURN_SHIPPING_RECEIVABLE';
+        | 'CUSTOMER_RETURN_SHIPPING_RECEIVABLE'
+        | 'SHIPPING_FUND_ALLOCATION'
+        | 'SHIPPING_FUND_REFUND';
 
     @Column({ type: 'numeric', precision: 14, scale: 2 })
     amount!: string;

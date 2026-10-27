@@ -12,7 +12,7 @@ import { WalletWithdrawalRequest } from '@/database/payment/entities/wallet-with
 import { PlatformFinanceLedger } from '@/database/payment/entities/platform-finance-ledger.entity';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
-import { SellerWalletRepository } from '@/modules/order/infrastructure/repositories/seller-wallet.repository';
+import { SellerWalletRepository } from '@/modules/order/infrastructure/repositories/finance/seller-wallet.repository';
 
 describe('SellerWalletRepository completed-order release', () => {
     // COD chỉ vào available sau khi admin xác nhận đã đối soát; trước đó không được chạy truy vấn release.
@@ -219,8 +219,8 @@ describe('SellerWalletRepository withdrawals', () => {
         expect(withdrawalRepository.save).not.toHaveBeenCalled();
     });
 
-    // Mark PAID một lần mới giảm reserved; retry cùng mã tham chiếu chỉ ACK, không ghi trừ/ledger hai lần.
-    it('finalizes an external payout exactly once', async () => {
+    // Chỉ callback Pay2S đã đối soát mới giảm reserved; retry cùng bank reference không ghi ledger lần hai.
+    it('finalizes a Pay2S payout exactly once', async () => {
         const wallet = {
             shopId: 'shop-1',
             availableBalance: '10000.00',
@@ -256,19 +256,21 @@ describe('SellerWalletRepository withdrawals', () => {
             createDataSource(manager),
         );
 
-        await repository.transitionWithdrawal({
+        const firstResult = await repository.reconcileWithdrawalTransfer({
             withdrawalId: 'withdrawal-1',
-            adminId: 'admin-1',
-            status: 'PAID',
+            amount: '10000.00',
+            providerTransactionId: 'SEPAY-EVENT-1',
             reference: 'BANK-TRANSFER-1',
         });
-        await repository.transitionWithdrawal({
+        const retryResult = await repository.reconcileWithdrawalTransfer({
             withdrawalId: 'withdrawal-1',
-            adminId: 'admin-1',
-            status: 'PAID',
+            amount: '10000.00',
+            providerTransactionId: 'SEPAY-EVENT-1',
             reference: 'BANK-TRANSFER-1',
         });
 
+        expect(firstResult).toBe('PAID');
+        expect(retryResult).toBe('DUPLICATE');
         expect(wallet.reservedBalance).toBe('0.00');
         expect(withdrawal.status).toBe('PAID');
         expect(walletLedgerRepository.save).toHaveBeenCalledTimes(1);
@@ -284,7 +286,7 @@ describe('SellerWalletRepository withdrawals', () => {
                 kind: 'SELLER_PAYOUT',
                 amount: '-10000.00',
                 reference: 'BANK-TRANSFER-1',
-                createdBy: 'admin-1',
+                createdBy: 'SEPAY_WEBHOOK',
             }),
         );
     });
