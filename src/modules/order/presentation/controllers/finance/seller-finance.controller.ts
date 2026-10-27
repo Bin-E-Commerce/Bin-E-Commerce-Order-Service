@@ -15,12 +15,12 @@ import { SellerShopClient } from '@/modules/order/application/clients/seller-sho
 import { Inject } from '@nestjs/common';
 import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
-import type { SellerOrderUserContext } from '@/modules/order/application/types/seller-order-user-context.type';
-import { PaymentService } from '@/modules/order/application/services/payment/payment.service';
+import type { SellerOrderUserContext } from '@/modules/order/application/types/order/seller-order-user-context.type';
+import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
 import {
     CreateWalletDepositDto,
     CreateWalletWithdrawalDto,
-} from '@/modules/order/presentation/dto/wallet-finance.dto';
+} from '@/modules/order/presentation/dto/finance/wallet-finance.dto';
 
 // Seller có thể nạp Sandbox và tạo yêu cầu payout; số dư chỉ đổi qua payment callback hoặc giao dịch backend.
 @Controller({ path: 'seller/finance', version: '1' })
@@ -54,7 +54,7 @@ export class SellerFinanceController {
         return this.sellerWalletRepository.getSnapshot(shopId, page, pageSize);
     }
 
-    // Tạo URL nạp VNPay Sandbox; callback IPN riêng mới ghi có nên response trình duyệt không thể tự cộng tiền.
+    // Tạo URL nạp Pay2S Sandbox; callback IPN riêng mới ghi có nên response trình duyệt không thể tự cộng tiền.
     @Post('wallet/deposits')
     async createWalletDeposit(
         @Headers() headers: Record<string, unknown>,
