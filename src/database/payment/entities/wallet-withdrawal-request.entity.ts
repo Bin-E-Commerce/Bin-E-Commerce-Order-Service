@@ -11,6 +11,14 @@ import {
 @Entity('wallet_withdrawal_requests')
 @Index('idx_wallet_withdrawals_shop_created', ['shopId', 'createdAt'])
 @Index('idx_wallet_withdrawals_status_created', ['status', 'createdAt'])
+@Index('uq_wallet_withdrawals_pay2s_transaction_id', ['pay2sTransactionId'], {
+    unique: true,
+    where: '"pay2s_transaction_id" IS NOT NULL',
+})
+@Index('uq_wallet_withdrawals_transfer_memo_code', ['transferMemoCode'], {
+    unique: true,
+    where: '"transfer_memo_code" IS NOT NULL',
+})
 export class WalletWithdrawalRequest {
     @PrimaryGeneratedColumn('uuid')
     id!: string;
@@ -62,6 +70,53 @@ export class WalletWithdrawalRequest {
         nullable: true,
     })
     transferReference!: string | null;
+
+    @Column({
+        name: 'pay2s_transaction_id',
+        type: 'varchar',
+        length: 120,
+        nullable: true,
+    })
+    pay2sTransactionId!: string | null;
+
+    @Column({
+        name: 'pay2s_transaction_number',
+        type: 'varchar',
+        length: 120,
+        nullable: true,
+    })
+    pay2sTransactionNumber!: string | null;
+
+    @Column({
+        name: 'pay2s_transfer_amount',
+        type: 'numeric',
+        precision: 14,
+        scale: 2,
+        nullable: true,
+    })
+    pay2sTransferAmount!: string | null;
+
+    @Column({
+        name: 'pay2s_transfer_detected_at',
+        type: 'timestamptz',
+        nullable: true,
+    })
+    pay2sTransferDetectedAt!: Date | null;
+
+    @Column({
+        name: 'recipient_confirmed_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    recipientConfirmedBy!: string | null;
+
+    @Column({
+        name: 'recipient_confirmed_at',
+        type: 'timestamptz',
+        nullable: true,
+    })
+    recipientConfirmedAt!: Date | null;
 
     @Column({
         name: 'admin_note',
