@@ -271,56 +271,6 @@ export class AdminFinanceController {
         return { confirmed: true };
     }
 
-    // Admin xác nhận Pay2S đã hoàn bằng chuyển khoản ngoài hệ thống; proof/amount được kiểm tra trong repository.
-    @Post('refunds/:returnId/confirmation')
-    async confirmPay2sRefund(
-        @Headers('x-user-id') adminId: string,
-        @Headers('x-user-permissions') permissionsHeader: string,
-        @Param('returnId', new ParseUUIDPipe()) returnId: string,
-        @Body() dto: ConfirmCodRefundDto,
-    ): Promise<{ accepted: true }> {
-        const permissions = (permissionsHeader ?? '')
-            .split(',')
-            .map((item) => item.trim());
-        if (!permissions.includes('admin.finance.reconcile'))
-            throw new ForbiddenException(
-                'Bạn không có quyền đối soát tài chính.',
-            );
-        await this.paymentService.recordPay2sRefund({
-            returnRequestId: returnId,
-            adminId,
-            reference: dto.reference,
-            amount: dto.amount,
-            proof: dto.proof,
-        });
-        return { accepted: true };
-    }
-
-    // Admin hoàn khoản Pay2S đến muộn theo order; case này không có return request và không làm giảm ví seller.
-    @Post('late-refunds/:orderId/confirmation')
-    async confirmPay2sLateRefund(
-        @Headers('x-user-id') adminId: string,
-        @Headers('x-user-permissions') permissionsHeader: string,
-        @Param('orderId', new ParseUUIDPipe()) orderId: string,
-        @Body() dto: ConfirmCodRefundDto,
-    ): Promise<{ accepted: true }> {
-        const permissions = (permissionsHeader ?? '')
-            .split(',')
-            .map((item) => item.trim());
-        if (!permissions.includes('admin.finance.reconcile'))
-            throw new ForbiddenException(
-                'Bạn không có quyền đối soát tài chính.',
-            );
-        await this.paymentService.recordPay2sLateRefund({
-            orderId,
-            adminId,
-            reference: dto.reference,
-            amount: dto.amount,
-            proof: dto.proof,
-        });
-        return { accepted: true };
-    }
-
     // Kiểm tra permission server-side độc lập Gateway để không dựa riêng vào ẩn/hiện nút UI.
     private assertPermission(
         permissionsHeader: string,

@@ -179,32 +179,6 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         await this.sellerWalletRepository.recordCodRefund(input);
     }
 
-    // Hoàn Pay2S cũng do admin chuyển khoản thủ công; không tạo request hoàn tự động ở provider.
-    async recordPay2sRefund(input: {
-        returnRequestId: string;
-        adminId: string;
-        reference: string;
-        amount: string;
-        proof: Record<string, unknown>;
-    }): Promise<void> {
-        if (!input.adminId.trim())
-            throw new BadRequestException('Thiếu danh tính admin.');
-        await this.sellerWalletRepository.recordPay2sRefund(input);
-    }
-
-    // Ghi nhận refund cho IPN đến sau khi order đã hủy; case này không đi qua return request và không reverse seller wallet.
-    async recordPay2sLateRefund(input: {
-        orderId: string;
-        adminId: string;
-        reference: string;
-        amount: string;
-        proof: Record<string, unknown>;
-    }): Promise<void> {
-        if (!input.adminId.trim())
-            throw new BadRequestException('Thiếu danh tính admin.');
-        await this.sellerWalletRepository.recordPay2sLateRefund(input);
-    }
-
     // Tạo top-up Pay2S độc lập với PaymentAttempt của order; IPN hợp lệ mới ghi có ví seller.
     async createWalletDeposit(input: {
         shopId: string;
@@ -346,7 +320,7 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
                         orderId: order.id,
                         fromStatus: previousStatus,
                         toStatus: OrderStatus.CANCELLED,
-                        reason: 'Hủy vì thanh toán Pay2S đến muộn; chờ hoàn thủ công.',
+                        reason: 'Pay2S đến muộn; order đã hủy, cần hoàn tiền ngoài hệ thống.',
                     });
                 }
                 await attemptRepository.save(lockedAttempt);
@@ -384,7 +358,7 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
             if (cancelledOrder)
                 await this.releaseOrderReservation(cancelledOrder);
             this.logger.warn(
-                `Pay2S payment late cần admin hoàn thủ công. attemptId=${attempt.id}`,
+                `Pay2S đến muộn; cần hoàn tiền ngoài hệ thống. id=${attempt.id}`,
             );
         }
         return { success: true };
