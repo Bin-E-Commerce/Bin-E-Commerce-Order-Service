@@ -7,6 +7,11 @@ export interface WalletDepositRecord {
     confirmedAt: string | null;
 }
 
+// Bổ sung mã shop để dashboard admin xác định nguồn nạp mà không trả dữ liệu cá nhân.
+export interface AdminWalletDepositRecord extends WalletDepositRecord {
+    shopId: string;
+}
+
 export interface WalletWithdrawalRecord {
     id: string;
     shopId: string;
@@ -63,10 +68,10 @@ export interface AdminFinanceSnapshot {
     shippingFundBalance: string;
     customerReturnShippingReceivable: string;
     pendingWithdrawals: number;
-    sandboxDepositTotal: string;
+    depositTotal: string;
     ledger: PlatformFinanceLedgerRecord[];
     withdrawals: WalletWithdrawalRecord[];
-    deposits: WalletDepositRecord[];
+    deposits: AdminWalletDepositRecord[];
     totalLedger: number;
     page: number;
     pageSize: number;
