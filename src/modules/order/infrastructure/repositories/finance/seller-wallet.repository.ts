@@ -409,6 +409,19 @@ export class SellerWalletRepository
                 settlementBatchId: null,
                 createdBy: null,
             });
+            // Outbox cùng transaction với số dư/ledger để không báo khoản nạp chưa được ghi có.
+            await this.enqueueWalletFinanceEvent(
+                manager,
+                WalletFinanceEvents.DEPOSIT_PAID,
+                {
+                    transactionId: deposit.id,
+                    shopId: deposit.shopId,
+                    sellerUserId: deposit.sellerUserId,
+                    amount: deposit.amount,
+                    status: 'PAID',
+                    note: null,
+                },
+            );
             return 'PAID';
         });
     }
@@ -418,20 +431,30 @@ export class SellerWalletRepository
         depositId: string,
         providerResponse: Record<string, unknown>,
     ): Promise<void> {
-        await this.dataSource
-            .getRepository(WalletDeposit)
-            .createQueryBuilder()
-            .update(WalletDeposit)
-            .set({
-                status: 'FAILED',
-                providerResponse: () => 'CAST(:providerResponse AS jsonb)',
-            })
-            .setParameter('providerResponse', JSON.stringify(providerResponse))
-            .where('id = :depositId AND status = :pending', {
-                depositId,
-                pending: 'PENDING',
-            })
-            .execute();
+        await this.dataSource.transaction(async (manager) => {
+            const repository = manager.getRepository(WalletDeposit);
+            const deposit = await repository.findOne({
+                where: { id: depositId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            // Callback cũ không được đổi trạng thái đã chốt hoặc báo giao dịch không còn pending.
+            if (!deposit || deposit.status !== 'PENDING') return;
+            deposit.status = 'FAILED';
+            deposit.providerResponse = providerResponse;
+            await repository.save(deposit);
+            await this.enqueueWalletFinanceEvent(
+                manager,
+                WalletFinanceEvents.DEPOSIT_FAILED,
+                {
+                    transactionId: deposit.id,
+                    shopId: deposit.shopId,
+                    sellerUserId: deposit.sellerUserId,
+                    amount: deposit.amount,
+                    status: 'FAILED',
+                    note: null,
+                },
+            );
+        });
     }
 
     // Kiểm tra số tiền và snapshot tài khoản rồi khóa ví trong một transaction trước khi giữ chỗ.
@@ -511,6 +534,19 @@ export class SellerWalletRepository
                 sourceKey: `withdrawal:${withdrawal.id}:reserve`,
                 availableAt: null,
             });
+            // Yêu cầu và khoản giữ chỗ đã cùng transaction; outbox chỉ tồn tại nếu cả hai cùng commit.
+            await this.enqueueWalletFinanceEvent(
+                manager,
+                WalletFinanceEvents.WITHDRAWAL_REQUESTED,
+                {
+                    transactionId: withdrawal.id,
+                    shopId: withdrawal.shopId,
+                    sellerUserId: withdrawal.sellerUserId,
+                    amount: withdrawal.amount,
+                    status: 'REQUESTED',
+                    note: null,
+                },
+            );
             return this.toWithdrawalRecord(withdrawal);
         });
     }
