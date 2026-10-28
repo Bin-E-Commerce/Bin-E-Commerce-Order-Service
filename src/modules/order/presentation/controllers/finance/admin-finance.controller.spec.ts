@@ -1,10 +1,10 @@
-// Kiểm tra cổng xử lý payout chỉ mở đối soát khi cấu hình SePay sẵn sàng và admin hiểu thao tác thủ công.
+// Kiểm tra payout chỉ chuyển sang xử lý khi cấu hình Pay2S sẵn sàng và admin xác nhận thao tác thủ công.
 import {
     BadRequestException,
     ServiceUnavailableException,
 } from '@nestjs/common';
 import type { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
-import type { SepayPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/sepay-payout-reconciliation.service';
+import type { Pay2sPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/pay2s-payout-reconciliation.service';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
 import { AdminFinanceController } from '@/modules/order/presentation/controllers/finance/admin-finance.controller';
 
@@ -22,7 +22,7 @@ describe('AdminFinanceController payout', () => {
             {} as PaymentService,
             {
                 getReadiness: mockReadiness,
-            } as unknown as SepayPayoutReconciliationService,
+            } as unknown as Pay2sPayoutReconciliationService,
             {
                 transitionWithdrawal: mockTransition,
             } as unknown as SellerWalletRepositoryPort,
@@ -34,7 +34,7 @@ describe('AdminFinanceController payout', () => {
         // Arrange
         mockReadiness.mockReturnValue({
             ready: false,
-            missing: ['WEBHOOK_API_KEY'],
+            missing: ['WEBHOOK_TOKEN'],
         });
 
         // Act and assert

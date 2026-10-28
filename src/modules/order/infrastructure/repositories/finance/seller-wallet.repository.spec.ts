@@ -219,8 +219,8 @@ describe('SellerWalletRepository withdrawals', () => {
         expect(withdrawalRepository.save).not.toHaveBeenCalled();
     });
 
-    // Chỉ callback Pay2S đã đối soát mới giảm reserved; retry cùng bank reference không ghi ledger lần hai.
-    it('finalizes a Pay2S payout exactly once', async () => {
+    // Webhook chỉ stage giao dịch; admin xác nhận người nhận mới tất toán và retry không ghi ledger lần hai.
+    it('stages and confirms a Pay2S payout exactly once', async () => {
         const wallet = {
             shopId: 'shop-1',
             availableBalance: '10000.00',
@@ -232,6 +232,12 @@ describe('SellerWalletRepository withdrawals', () => {
             amount: '10000.00',
             status: 'PROCESSING',
             transferReference: null,
+            pay2sTransactionId: null,
+            pay2sTransactionNumber: null,
+            pay2sTransferAmount: null,
+            pay2sTransferDetectedAt: null,
+            recipientConfirmedBy: null,
+            recipientConfirmedAt: null,
             adminNote: null,
         };
         const walletRepository = {
@@ -239,7 +245,14 @@ describe('SellerWalletRepository withdrawals', () => {
             save: jest.fn().mockImplementation(async (value) => value),
         };
         const withdrawalRepository = {
-            findOne: jest.fn().mockResolvedValue(withdrawal),
+            findOne: jest
+                .fn()
+                .mockImplementation(
+                    async (options: {
+                        where: { pay2sTransactionId?: string };
+                    }) =>
+                        options.where.pay2sTransactionId ? null : withdrawal,
+                ),
             save: jest.fn().mockImplementation(async (value) => value),
         };
         const walletLedgerRepository = { save: jest.fn() };
@@ -256,21 +269,26 @@ describe('SellerWalletRepository withdrawals', () => {
             createDataSource(manager),
         );
 
-        const firstResult = await repository.reconcileWithdrawalTransfer({
+        const firstResult = await repository.stagePay2sWithdrawalTransfer({
             withdrawalId: 'withdrawal-1',
             amount: '10000.00',
-            providerTransactionId: 'SEPAY-EVENT-1',
-            reference: 'BANK-TRANSFER-1',
+            providerTransactionId: 'PAY2S-EVENT-1',
+            transactionNumber: 'BANK-TRANSFER-1',
         });
-        const retryResult = await repository.reconcileWithdrawalTransfer({
+        const retryResult = await repository.stagePay2sWithdrawalTransfer({
             withdrawalId: 'withdrawal-1',
             amount: '10000.00',
-            providerTransactionId: 'SEPAY-EVENT-1',
-            reference: 'BANK-TRANSFER-1',
+            providerTransactionId: 'PAY2S-EVENT-1',
+            transactionNumber: 'BANK-TRANSFER-1',
+        });
+        const confirmResult = await repository.confirmPay2sWithdrawalTransfer({
+            withdrawalId: 'withdrawal-1',
+            adminId: 'admin-1',
         });
 
-        expect(firstResult).toBe('PAID');
+        expect(firstResult).toBe('STAGED');
         expect(retryResult).toBe('DUPLICATE');
+        expect(confirmResult).toBe('PAID');
         expect(wallet.reservedBalance).toBe('0.00');
         expect(withdrawal.status).toBe('PAID');
         expect(walletLedgerRepository.save).toHaveBeenCalledTimes(1);
@@ -286,7 +304,7 @@ describe('SellerWalletRepository withdrawals', () => {
                 kind: 'SELLER_PAYOUT',
                 amount: '-10000.00',
                 reference: 'BANK-TRANSFER-1',
-                createdBy: 'SEPAY_WEBHOOK',
+                createdBy: 'admin-1',
             }),
         );
     });

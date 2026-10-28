@@ -9,9 +9,10 @@ import type {
     WalletWithdrawalRecord,
 } from '@/modules/order/application/types/finance/wallet-finance.type';
 import type {
-    WithdrawalPayoutFailureResult,
-    WithdrawalTransferReconciliationResult,
-} from '@/modules/order/application/types/payments/sepay-payout.type';
+    WithdrawalConfirmationResult,
+    WithdrawalTransferLookup,
+    WithdrawalTransferStagingResult,
+} from '@/modules/order/application/types/payments/pay2s-payout.type';
 
 export const SELLER_WALLET_REPOSITORY = Symbol('SELLER_WALLET_REPOSITORY');
 
@@ -127,24 +128,18 @@ export interface SellerWalletRepositoryPort {
         status: 'PROCESSING' | 'REJECTED';
         note?: string;
     }): Promise<void>;
-    prepareWithdrawalPayout(input: {
+    stagePay2sWithdrawalTransfer(
+        input: WithdrawalTransferLookup & {
+            amount: string;
+            providerTransactionId: string;
+            transactionNumber: string | null;
+        },
+    ): Promise<WithdrawalTransferStagingResult>;
+    confirmPay2sWithdrawalTransfer(input: {
         withdrawalId: string;
         adminId: string;
-        transferReference: string;
         note?: string;
-    }): Promise<void>;
-    reconcileWithdrawalTransfer(input: {
-        withdrawalId: string;
-        amount: string;
-        providerTransactionId: string;
-        reference: string;
-        processedBy?: string;
-    }): Promise<WithdrawalTransferReconciliationResult>;
-    failWithdrawalPayout(input: {
-        withdrawalId: string;
-        providerReference: string;
-        note: string;
-    }): Promise<WithdrawalPayoutFailureResult>;
+    }): Promise<WithdrawalConfirmationResult>;
     getPlatformLedger(
         page: number,
         pageSize: number,

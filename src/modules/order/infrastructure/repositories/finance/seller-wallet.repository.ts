@@ -17,6 +17,7 @@ import { WalletDeposit } from '@/database/payment/entities/wallet-deposit.entity
 import { WalletWithdrawalRequest } from '@/database/payment/entities/wallet-withdrawal-request.entity';
 import { PlatformFinanceLedger } from '@/database/payment/entities/platform-finance-ledger.entity';
 import { FinanceSettlementBatch } from '@/database/payment/entities/finance-settlement-batch.entity';
+import { WalletFinanceNotificationOutboxEntity } from '@/database/integration/entities/wallet-finance-notification-outbox.entity';
 import { PaymentAttempt } from '@/database/payment/entities/payment-attempt.entity';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
@@ -31,16 +32,27 @@ import type { SellerWalletSnapshot } from '@/modules/order/application/types/fin
 import type {
     AdminFinanceSnapshot,
     AdminCodRemittanceRecord,
+    AdminWalletDepositRecord,
     AdminWalletWithdrawalRecord,
     PlatformFinanceLedgerRecord,
     WalletDepositRecord,
     WalletWithdrawalRecord,
 } from '@/modules/order/application/types/finance/wallet-finance.type';
 import type {
-    WithdrawalPayoutFailureResult,
-    WithdrawalTransferReconciliationResult,
-} from '@/modules/order/application/types/payments/sepay-payout.type';
-import { createWithdrawalTransferMemo } from '@/modules/order/application/utils/payments/withdrawal-transfer-memo.util';
+    WithdrawalConfirmationResult,
+    WithdrawalTransferLookup,
+    WithdrawalTransferStagingResult,
+} from '@/modules/order/application/types/payments/pay2s-payout.type';
+import {
+    WalletFinanceEvents,
+    type WalletFinanceChangedPayload,
+    type WalletFinanceEventName,
+} from '@common/kafka/events';
+import { buildWalletFinanceEvent } from '@/modules/order/application/utils/finance/build-wallet-finance-event.util';
+import {
+    createWithdrawalTransferMemo,
+    createWithdrawalTransferMemoCode,
+} from '@/modules/order/application/utils/payments/withdrawal-transfer-memo.util';
 
 // Chống ghi trùng theo nguồn order/shop; ví chỉ nhận tiền hàng, không nhận phí giao hoặc phí gateway.
 @Injectable()
@@ -422,7 +434,9 @@ export class SellerWalletRepository
             .execute();
     }
 
-    // Khóa số dư seller trước khi giữ chỗ, nên hai request đồng thời không thể dành vượt phần còn rút được.
+    // Kiểm tra số tiền và snapshot tài khoản rồi khóa ví trong một transaction trước khi giữ chỗ.
+    // Mã memo ngắn được tạo cùng bản ghi payout; partial unique index là ranh giới cuối chống trùng mã.
+    // Nếu lưu payout hoặc ledger lỗi, transaction rollback cả reserve để seller không mất số dư khả dụng.
     async requestWithdrawal(input: {
         shopId: string;
         sellerUserId: string;
@@ -481,6 +495,7 @@ export class SellerWalletRepository
                     accountNumberMasked: this.maskAccountNumber(
                         input.accountNumber,
                     ),
+                    transferMemoCode: createWithdrawalTransferMemoCode(),
                     status: 'REQUESTED',
                     transferReference: null,
                     adminNote: null,
@@ -650,7 +665,8 @@ export class SellerWalletRepository
         };
     }
 
-    // Đọc tài khoản đầy đủ chỉ tại route admin tài chính; mọi danh sách thông thường dùng số đã che.
+    // Chỉ route admin tài chính được đọc số tài khoản đầy đủ; danh sách thông thường vẫn trả số đã che.
+    // Payout mới trả memo code đã lưu, còn bản ghi cũ tiếp tục nhận memo UUID để không đổi hướng dẫn đang dùng.
     async getAdminWithdrawal(
         withdrawalId: string,
     ): Promise<AdminWalletWithdrawalRecord> {
@@ -667,12 +683,23 @@ export class SellerWalletRepository
             bankCode: row.bankCode,
             accountNumber: row.accountNumber,
             sellerUserId: row.sellerUserId,
-            transferMemo: createWithdrawalTransferMemo(row.id),
+            transferMemo: createWithdrawalTransferMemo(
+                row.id,
+                row.transferMemoCode,
+            ),
+            pay2sTransactionId: row.pay2sTransactionId,
+            pay2sTransactionNumber: row.pay2sTransactionNumber,
+            pay2sTransferAmount: row.pay2sTransferAmount,
+            pay2sTransferDetectedAt:
+                row.pay2sTransferDetectedAt?.toISOString() ?? null,
+            recipientConfirmedBy: row.recipientConfirmedBy,
+            recipientConfirmedAt:
+                row.recipientConfirmedAt?.toISOString() ?? null,
         };
     }
 
     // Admin chỉ mở bước chuyển khoản khi request còn mới hoặc từ chối trước khi tiền được gửi đi.
-    // Sau PROCESSING, chỉ webhook OUT đã xác thực mới được chốt PAID để tránh giải phóng tiền khi callback ngân hàng đến trễ.
+    // PROCESSING giữ reserve; Pay2S chỉ stage event OUT, còn admin phải xác minh tài khoản nhận trước khi chốt PAID.
     async transitionWithdrawal(input: {
         withdrawalId: string;
         adminId: string;
@@ -698,6 +725,8 @@ export class SellerWalletRepository
                         'Yêu cầu không còn ở trạng thái chờ xử lý.',
                     );
                 request.status = 'PROCESSING';
+                request.processedBy = input.adminId;
+                request.processedAt = new Date();
             } else {
                 if (request.status === input.status) return;
                 if (request.status !== 'REQUESTED')
@@ -741,59 +770,111 @@ export class SellerWalletRepository
             }
             request.adminNote = input.note?.trim() || request.adminNote;
             await repository.save(request);
+            // Chỉ tạo notification khi transition thật sự xảy ra; các nhánh idempotent đã return phía trên.
+            await this.enqueueWalletFinanceEvent(
+                manager,
+                input.status === 'PROCESSING'
+                    ? WalletFinanceEvents.WITHDRAWAL_PROCESSING
+                    : WalletFinanceEvents.WITHDRAWAL_REJECTED,
+                {
+                    transactionId: request.id,
+                    shopId: request.shopId,
+                    sellerUserId: request.sellerUserId,
+                    amount: request.amount,
+                    status: input.status,
+                    note:
+                        input.status === 'REJECTED'
+                            ? request.adminNote
+                            : null,
+                },
+            );
         });
     }
 
-    // Khóa yêu cầu cho payout payOS trước khi gọi provider; marker giúp phân biệt lệnh tự động với luồng SePay/app ngân hàng cũ.
-    // Retry chỉ được tiếp tục khi cùng reference đã được lưu, còn PROCESSING cũ bị từ chối để không tạo khoản chi trùng.
-    async prepareWithdrawalPayout(input: {
+    // Tra cứu payout bằng UUID trong webhook cũ hoặc memo code ngắn trong QR mới, rồi khóa bản ghi trước khi stage.
+    // Chỉ event OUT đúng số tiền và request PROCESSING mới được lưu; webhook không chứng minh được người nhận.
+    // Unique index trên ID Pay2S ngăn một giao dịch tiền ra bị gán cho nhiều seller.
+    async stagePay2sWithdrawalTransfer(
+        input: WithdrawalTransferLookup & {
+            amount: string;
+            providerTransactionId: string;
+            transactionNumber: string | null;
+        },
+    ): Promise<WithdrawalTransferStagingResult> {
+        try {
+            return await this.dataSource.transaction(async (manager) => {
+                const requestRepository = manager.getRepository(
+                    WalletWithdrawalRequest,
+                );
+                // Tra cứu theo UUID cho webhook cũ hoặc theo mã memo duy nhất cho giao dịch QR mới.
+                const withdrawalId =
+                    'withdrawalId' in input ? input.withdrawalId : undefined;
+                const transferMemoCode =
+                    'transferMemoCode' in input
+                        ? input.transferMemoCode
+                        : undefined;
+                const lookup = withdrawalId
+                    ? { id: withdrawalId }
+                    : transferMemoCode
+                      ? { transferMemoCode }
+                      : null;
+                if (!lookup) return 'NOT_FOUND';
+                const request = await requestRepository.findOne({
+                    where: lookup,
+                    lock: { mode: 'pessimistic_write' },
+                });
+                if (!request) return 'NOT_FOUND';
+                if (toCents(request.amount) !== toCents(input.amount))
+                    return 'AMOUNT_MISMATCH';
+                if (request.status === 'PAID')
+                    return request.transferReference ===
+                        input.providerTransactionId
+                        ? 'DUPLICATE'
+                        : 'ALREADY_PAID';
+                if (request.status !== 'PROCESSING') return 'NOT_PROCESSING';
+                // Luồng cũ không ghi processedAt; không thể biết seller đã nhận tiền chưa nên không gắn event mới.
+                if (!request.processedAt) return 'LEGACY_PROCESSING';
+                if (request.pay2sTransactionId)
+                    return request.pay2sTransactionId ===
+                        input.providerTransactionId
+                        ? 'DUPLICATE'
+                        : 'ALREADY_HAS_EVENT';
+                // Mã tham chiếu sẵn có thuộc luồng xử lý cũ; không ghép thêm một khoản chi Pay2S để tránh trả trùng.
+                if (request.transferReference) return 'ALREADY_HAS_EVENT';
+
+                const existingEvent = await requestRepository.findOne({
+                    where: {
+                        pay2sTransactionId: input.providerTransactionId,
+                    },
+                    lock: { mode: 'pessimistic_write' },
+                });
+                if (existingEvent) return 'EVENT_ALREADY_USED';
+
+                request.pay2sTransactionId = input.providerTransactionId;
+                request.pay2sTransactionNumber = input.transactionNumber;
+                request.pay2sTransferAmount = input.amount;
+                request.pay2sTransferDetectedAt = new Date();
+                await requestRepository.save(request);
+                return 'STAGED';
+            });
+        } catch (error) {
+            // Hai callback đồng thời có thể vượt qua lần đọc trước khi unique index phân xử; ACK event đã gắn ở request khác.
+            const driverError = (error as { driverError?: { code?: string } })
+                .driverError;
+            if (driverError?.code === '23505') return 'EVENT_ALREADY_USED';
+            throw error;
+        }
+    }
+
+    // Tất toán một lần sau khi admin xác minh trên ngân hàng rằng giao dịch candidate tới đúng tài khoản seller.
+    // Candidate, trạng thái request, khoản reserve và hai ledger cùng được khóa/ghi trong một transaction.
+    async confirmPay2sWithdrawalTransfer(input: {
         withdrawalId: string;
         adminId: string;
-        transferReference: string;
         note?: string;
-    }): Promise<void> {
-        if (!input.adminId.trim() || !input.transferReference.trim())
-            throw new BadRequestException(
-                'Thiếu danh tính admin hoặc mã tham chiếu payout.',
-            );
-        await this.dataSource.transaction(async (manager) => {
-            const repository = manager.getRepository(WalletWithdrawalRequest);
-            const request = await repository.findOne({
-                where: { id: input.withdrawalId },
-                lock: { mode: 'pessimistic_write' },
-            });
-            if (!request)
-                throw new BadRequestException(
-                    'Không tìm thấy yêu cầu rút tiền.',
-                );
-            if (
-                request.status === 'PROCESSING' &&
-                request.transferReference === input.transferReference
-            )
-                return;
-            if (request.status !== 'REQUESTED')
-                throw new ConflictException(
-                    'Yêu cầu không còn ở trạng thái chờ hoặc đã thuộc luồng payout khác.',
-                );
-
-            request.status = 'PROCESSING';
-            request.transferReference = input.transferReference;
-            request.processedBy = input.adminId;
-            request.processedAt = new Date();
-            request.adminNote = input.note?.trim() || request.adminNote;
-            await repository.save(request);
-        });
-    }
-
-    // Chốt payout sau khi provider đã xác nhận thành công; khóa request và ví để amount, trạng thái và ledger đổi cùng transaction.
-    // Webhook SePay và truy vấn payOS dùng chung đường ghi sổ; mã giao dịch lặp được ACK, mã khác sau PAID bị chặn.
-    async reconcileWithdrawalTransfer(input: {
-        withdrawalId: string;
-        amount: string;
-        providerTransactionId: string;
-        reference: string;
-        processedBy?: string;
-    }): Promise<WithdrawalTransferReconciliationResult> {
+    }): Promise<WithdrawalConfirmationResult> {
+        if (!input.adminId.trim())
+            throw new BadRequestException('Thiếu danh tính admin.');
         return this.dataSource.transaction(async (manager) => {
             const requestRepository = manager.getRepository(
                 WalletWithdrawalRequest,
@@ -845,79 +926,33 @@ export class SellerWalletRepository
                 shopId: request.shopId,
                 orderId: null,
                 returnRequestId: null,
-                reference: input.reference,
+                reference:
+                    request.pay2sTransactionNumber ??
+                    request.pay2sTransactionId,
                 settlementBatchId: null,
-                createdBy: input.processedBy ?? 'SEPAY_WEBHOOK',
+                createdBy: input.adminId,
             });
             await walletRepository.save(wallet);
             request.status = 'PAID';
-            // Lưu ID event SePay để lần gửi lại nhận biết chính xác; mã tham chiếu ngân hàng nằm trong platform ledger.
-            request.transferReference = input.providerTransactionId;
-            request.processedBy = input.processedBy ?? 'SEPAY_WEBHOOK';
-            request.processedAt = new Date();
+            request.transferReference = request.pay2sTransactionId;
+            request.recipientConfirmedBy = input.adminId;
+            request.recipientConfirmedAt = new Date();
+            request.adminNote = input.note?.trim() || request.adminNote;
             await requestRepository.save(request);
+            // PAID chỉ được thông báo sau khi sổ chi đã ghi và admin xác nhận đúng tài khoản nhận.
+            await this.enqueueWalletFinanceEvent(
+                manager,
+                WalletFinanceEvents.WITHDRAWAL_PAID,
+                {
+                    transactionId: request.id,
+                    shopId: request.shopId,
+                    sellerUserId: request.sellerUserId,
+                    amount: request.amount,
+                    status: 'PAID',
+                    note: null,
+                },
+            );
             return 'PAID';
-        });
-    }
-
-    // Chỉ trả reserve khi provider xác nhận payout thất bại cuối cùng; khóa ví và ghi ledger hoàn lại trong cùng transaction.
-    // Webhook hoặc lần đồng bộ lặp chỉ nhận DUPLICATE, còn PAID/luồng khác tuyệt đối không được hoàn tiền lần nữa.
-    async failWithdrawalPayout(input: {
-        withdrawalId: string;
-        providerReference: string;
-        note: string;
-    }): Promise<WithdrawalPayoutFailureResult> {
-        return this.dataSource.transaction(async (manager) => {
-            const requestRepository = manager.getRepository(
-                WalletWithdrawalRequest,
-            );
-            const request = await requestRepository.findOne({
-                where: { id: input.withdrawalId },
-                lock: { mode: 'pessimistic_write' },
-            });
-            if (!request) return 'NOT_FOUND';
-            if (request.status === 'FAILED')
-                return request.transferReference === input.providerReference
-                    ? 'DUPLICATE'
-                    : 'NOT_PROCESSING';
-            if (request.status !== 'PROCESSING') return 'NOT_PROCESSING';
-
-            const walletRepository = manager.getRepository(SellerWallet);
-            const wallet = await walletRepository.findOne({
-                where: { shopId: request.shopId },
-                lock: { mode: 'pessimistic_write' },
-            });
-            if (
-                !wallet ||
-                toCents(wallet.reservedBalance) < toCents(request.amount)
-            )
-                throw new ConflictException(
-                    'Số tiền giữ chỗ không khớp yêu cầu rút.',
-                );
-
-            wallet.reservedBalance = fromCents(
-                toCents(wallet.reservedBalance) - toCents(request.amount),
-            );
-            wallet.availableBalance = fromCents(
-                toCents(wallet.availableBalance) + toCents(request.amount),
-            );
-            await manager.getRepository(SellerWalletLedger).save({
-                shopId: request.shopId,
-                orderId: null,
-                returnRequestId: null,
-                kind: 'WITHDRAWAL_RELEASED',
-                amount: request.amount,
-                sourceKey: `withdrawal:${request.id}:release`,
-                availableAt: null,
-            });
-            await walletRepository.save(wallet);
-            request.status = 'FAILED';
-            request.transferReference = input.providerReference;
-            request.adminNote = input.note.trim().slice(0, 500);
-            request.processedBy = 'PAYOS_API';
-            request.processedAt = new Date();
-            await requestRepository.save(request);
-            return 'FAILED';
         });
     }
 
@@ -1840,6 +1875,27 @@ export class SellerWalletRepository
             return;
         }
         await this.dataSource.transaction(reconcile);
+    }
+
+    // Lưu event với khóa ổn định cùng transaction ví để dispatcher chỉ đọc dữ liệu đã commit.
+    private async enqueueWalletFinanceEvent(
+        manager: EntityManager,
+        eventName: WalletFinanceEventName,
+        data: WalletFinanceChangedPayload,
+    ): Promise<void> {
+        const event = buildWalletFinanceEvent(
+            eventName,
+            data.transactionId,
+            data,
+        );
+        await manager
+            .getRepository(WalletFinanceNotificationOutboxEntity)
+            .insert({
+                eventId: event.eventId,
+                topic: event.eventName,
+                aggregateId: event.aggregateId,
+                payload: event,
+            });
     }
 
     // Chỉ trả bản ghi top-up cần thiết cho UI; provider response và merchant reference không bị lộ.
