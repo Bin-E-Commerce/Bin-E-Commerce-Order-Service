@@ -620,17 +620,21 @@ export class SellerWalletRepository
             customerReturnShippingReceivable:
                 totals.customer_return_shipping_receivable,
             pendingWithdrawals: Number(totals.pending_withdrawals),
-            sandboxDepositTotal: totals.deposits,
+            depositTotal: totals.deposits,
             ledger: ledgerRows.map((row) => this.toPlatformLedgerRecord(row)),
             withdrawals: withdrawals.map((row) => this.toWithdrawalRecord(row)),
-            deposits: deposits.map((row) => this.toDepositRecord(row)),
+            // Dashboard cần mã shop để ghi rõ nguồn nạp; không cần gửi thông tin hồ sơ seller.
+            deposits: deposits.map((row): AdminWalletDepositRecord => ({
+                ...this.toDepositRecord(row),
+                shopId: row.shopId,
+            })),
             totalLedger,
             page,
             pageSize,
         };
     }
 
-    // Lọc trạng thái bằng danh sách cho phép để query không nhận biểu thức tự do từ admin UI.
+    // Lọc trạng thái theo allow-list và xếp yêu cầu mới nhất trước để trang đầu luôn phản ánh lịch sử gần đây.
     async listAdminWithdrawals(
         page: number,
         pageSize: number,
@@ -651,7 +655,7 @@ export class SellerWalletRepository
             .getRepository(WalletWithdrawalRequest)
             .findAndCount({
                 where,
-                order: { createdAt: 'ASC' },
+                order: { createdAt: 'DESC' },
                 skip: (page - 1) * pageSize,
                 take: pageSize,
             });
@@ -1303,7 +1307,7 @@ export class SellerWalletRepository
         }
     }
 
-    // COD và Pay2S dùng chung invariant hoàn thủ công nhưng khác payment method/ledger kind để audit rõ nguồn tiền.
+    // COD manual refund ghi sổ platform và đảo ví seller trong cùng transaction.
     async recordCodRefund(input: {
         returnRequestId: string;
         adminId: string;
