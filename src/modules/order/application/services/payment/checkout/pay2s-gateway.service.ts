@@ -163,7 +163,7 @@ export class Pay2sGatewayService implements OnModuleInit {
         };
     }
 
-    // Hủy link pending best-effort; Pay2S không hoàn tiền bằng endpoint này nên late payment vẫn đi vào manual refund.
+    // Hủy link pending best-effort; endpoint này không thực hiện hoàn tiền Pay2S.
     async cancelPayment(
         input: Pay2sCancelPaymentInput,
     ): Promise<Pay2sCancelPaymentResult> {

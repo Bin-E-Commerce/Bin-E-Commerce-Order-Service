@@ -32,20 +32,6 @@ export interface SellerWalletRepositoryPort {
         amount: string;
         proof: Record<string, unknown>;
     }): Promise<void>;
-    recordPay2sRefund(input: {
-        returnRequestId: string;
-        adminId: string;
-        reference: string;
-        amount: string;
-        proof: Record<string, unknown>;
-    }): Promise<void>;
-    recordPay2sLateRefund(input: {
-        orderId: string;
-        adminId: string;
-        reference: string;
-        amount: string;
-        proof: Record<string, unknown>;
-    }): Promise<void>;
     getSnapshot(
         shopId: string,
         page: number,
