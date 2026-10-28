@@ -30,6 +30,10 @@ export class AdminWalletWithdrawalActionDto {
     manualTransferAcknowledged?: boolean;
 
     @IsOptional()
+    @IsBoolean()
+    recipientConfirmed?: boolean;
+
+    @IsOptional()
     @IsString()
     @MaxLength(120)
     reference?: string;

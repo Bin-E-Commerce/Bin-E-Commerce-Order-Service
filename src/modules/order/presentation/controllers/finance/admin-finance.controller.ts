@@ -2,6 +2,7 @@
 import {
     Body,
     BadRequestException,
+    ConflictException,
     Controller,
     ForbiddenException,
     Get,
@@ -137,6 +138,38 @@ export class AdminFinanceController {
         return { updated: true };
     }
 
+    // Chỉ ghi nhận PAID khi đã có event OUT khớp amount và admin xác nhận người nhận đúng tài khoản seller.
+    @Post('withdrawals/:withdrawalId/transfer-confirmation')
+    async confirmWithdrawalTransfer(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('withdrawalId', new ParseUUIDPipe()) withdrawalId: string,
+        @Body() dto: AdminWalletWithdrawalActionDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.payout');
+        if (dto.recipientConfirmed !== true)
+            throw new BadRequestException(
+                'Cần xác nhận đã đối chiếu đúng tài khoản nhận của seller.',
+            );
+        const result =
+            await this.walletRepository.confirmPay2sWithdrawalTransfer({
+                withdrawalId,
+                adminId,
+                note: dto.note,
+            });
+        if (result === 'TRANSFER_NOT_DETECTED')
+            throw new ConflictException(
+                'Pay2S chưa nhận diện giao dịch tiền ra khớp yêu cầu này.',
+            );
+        if (result === 'NOT_PROCESSING')
+            throw new ConflictException(
+                'Yêu cầu rút không còn ở trạng thái có thể xác nhận.',
+            );
+        if (result === 'NOT_FOUND')
+            throw new BadRequestException('Không tìm thấy yêu cầu rút tiền.');
+        return { status: result };
+    }
+
     // Chỉ từ chối khi chưa bắt đầu chuyển khoản; sau đó phải chờ webhook để tránh nhả tiền trong lúc bank callback trễ.
     @Post('withdrawals/:withdrawalId/reject')
     async rejectWithdrawal(
@@ -146,11 +179,16 @@ export class AdminFinanceController {
         @Body() dto: AdminWalletWithdrawalActionDto,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.payout');
+        // Từ chối phải có lý do rõ ràng; chuẩn hóa trước khi ghi để không lưu chuỗi chỉ gồm khoảng trắng.
+        if (!dto.note?.trim())
+            throw new BadRequestException(
+                'Cần nhập lý do từ chối yêu cầu rút tiền.',
+            );
         await this.walletRepository.transitionWithdrawal({
             withdrawalId,
             adminId,
             status: 'REJECTED',
-            note: dto.note,
+            note: dto.note.trim(),
         });
         return { updated: true };
     }
