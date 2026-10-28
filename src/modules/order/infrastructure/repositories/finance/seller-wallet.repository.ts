@@ -884,14 +884,19 @@ export class SellerWalletRepository
                 lock: { mode: 'pessimistic_write' },
             });
             if (!request) return 'NOT_FOUND';
-            if (toCents(request.amount) !== toCents(input.amount))
-                return 'AMOUNT_MISMATCH';
             if (request.status === 'PAID')
-                // SePay khuyến nghị khử trùng lặp theo ID event; reference ngân hàng có thể không duy nhất giữa nhiều giao dịch.
-                return request.transferReference === input.providerTransactionId
+                return request.pay2sTransactionId &&
+                    request.transferReference === request.pay2sTransactionId &&
+                    request.recipientConfirmedBy
                     ? 'DUPLICATE'
-                    : 'ALREADY_PAID';
+                    : 'NOT_PROCESSING';
             if (request.status !== 'PROCESSING') return 'NOT_PROCESSING';
+            if (
+                !request.pay2sTransactionId ||
+                !request.pay2sTransferAmount ||
+                toCents(request.amount) !== toCents(request.pay2sTransferAmount)
+            )
+                return 'TRANSFER_NOT_DETECTED';
 
             const walletRepository = manager.getRepository(SellerWallet);
             const wallet = await walletRepository.findOne({
@@ -906,7 +911,7 @@ export class SellerWalletRepository
                     'Số tiền giữ chỗ không khớp yêu cầu rút.',
                 );
 
-            // Khoản reserve đã trừ available lúc seller gửi yêu cầu; webhook chỉ xóa reserved và ghi chi thực ở platform ledger.
+            // Seller ledger chỉ đóng khoản reserve; ledger platform ghi số tiền thực chi cùng transaction ID Pay2S.
             wallet.reservedBalance = fromCents(
                 toCents(wallet.reservedBalance) - toCents(request.amount),
             );
