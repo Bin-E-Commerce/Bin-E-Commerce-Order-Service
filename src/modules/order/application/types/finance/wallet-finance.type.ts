@@ -26,6 +26,12 @@ export interface AdminWalletWithdrawalRecord extends WalletWithdrawalRecord {
     accountNumber: string;
     sellerUserId: string;
     transferMemo: string;
+    pay2sTransactionId: string | null;
+    pay2sTransactionNumber: string | null;
+    pay2sTransferAmount: string | null;
+    pay2sTransferDetectedAt: string | null;
+    recipientConfirmedBy: string | null;
+    recipientConfirmedAt: string | null;
 }
 
 // Dữ liệu tối thiểu để admin xác nhận COD đã thu, không trả thông tin cá nhân của khách.
