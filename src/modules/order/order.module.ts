@@ -26,16 +26,15 @@ import { OrderDeliveryConfirmationService } from '@/modules/order/application/se
 import { OrderDeliveryAutomationService } from '@/modules/order/application/services/delivery/order-delivery-automation.service';
 import { ShipmentStatusConsumer } from '@/kafka/shipment-status.consumer';
 import { OrderPurchaseEventOutboxEntity } from '@/database/integration/entities/order-purchase-event-outbox.entity';
+import { WalletFinanceNotificationOutboxEntity } from '@/database/integration/entities/wallet-finance-notification-outbox.entity';
 import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
 import { PaymentAttempt } from '@/database/payment/entities/payment-attempt.entity';
 import { SellerWallet } from '@/database/payment/entities/seller-wallet.entity';
 import { SellerWalletLedger } from '@/database/payment/entities/seller-wallet-ledger.entity';
 import { Pay2sIpnController } from '@/modules/order/presentation/controllers/webhooks/pay2s-ipn.controller';
-import { SepayPayoutWebhookController } from '@/modules/order/presentation/controllers/webhooks/sepay-payout-webhook.controller';
+import { Pay2sPayoutWebhookController } from '@/modules/order/presentation/controllers/webhooks/pay2s-payout-webhook.controller';
 import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
-import { SepayPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/sepay-payout-reconciliation.service';
-import { PayosPayoutService } from '@/modules/order/application/services/payment/payouts/payos-payout.service';
-import { AdminSellerPayoutService } from '@/modules/order/application/services/payment/payouts/admin-seller-payout.service';
+import { Pay2sPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/pay2s-payout-reconciliation.service';
 import { Pay2sGatewayService } from '@/modules/order/application/services/payment/checkout/pay2s-gateway.service';
 import { SellerWalletRepository } from '@/modules/order/infrastructure/repositories/finance/seller-wallet.repository';
 import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
@@ -45,6 +44,7 @@ import { WalletDeposit } from '@/database/payment/entities/wallet-deposit.entity
 import { WalletWithdrawalRequest } from '@/database/payment/entities/wallet-withdrawal-request.entity';
 import { PlatformFinanceLedger } from '@/database/payment/entities/platform-finance-ledger.entity';
 import { FinanceSettlementBatch } from '@/database/payment/entities/finance-settlement-batch.entity';
+import { WalletFinanceEventOutboxDispatcher } from '@/modules/order/infrastructure/events/wallet-finance-event-outbox-dispatcher.service';
 
 // Module chỉ expose controller Order; cross-service call được giữ trong client adapter tương ứng.
 @Module({
@@ -56,6 +56,7 @@ import { FinanceSettlementBatch } from '@/database/payment/entities/finance-sett
             OrderReturnRequest,
             OrderDeliveryIssue,
             OrderPurchaseEventOutboxEntity,
+            WalletFinanceNotificationOutboxEntity,
             PaymentAttempt,
             SellerWallet,
             SellerWalletLedger,
@@ -71,7 +72,7 @@ import { FinanceSettlementBatch } from '@/database/payment/entities/finance-sett
         InternalOrderController,
         InternalRecommendationController,
         Pay2sIpnController,
-        SepayPayoutWebhookController,
+        Pay2sPayoutWebhookController,
         SellerFinanceController,
         AdminFinanceController,
     ],
@@ -91,10 +92,9 @@ import { FinanceSettlementBatch } from '@/database/payment/entities/finance-sett
         OrderDeliveryAutomationService,
         SellerDashboardOrderService,
         ShipmentStatusConsumer,
+        WalletFinanceEventOutboxDispatcher,
         PaymentService,
-        SepayPayoutReconciliationService,
-        PayosPayoutService,
-        AdminSellerPayoutService,
+        Pay2sPayoutReconciliationService,
         Pay2sGatewayService,
         SellerWalletRepository,
         {

@@ -13,8 +13,7 @@ import {
     ServiceUnavailableException,
 } from '@nestjs/common';
 import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
-import { SepayPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/sepay-payout-reconciliation.service';
-import { AdminSellerPayoutService } from '@/modules/order/application/services/payment/payouts/admin-seller-payout.service';
+import { Pay2sPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/pay2s-payout-reconciliation.service';
 import { ConfirmCodRemittanceDto } from '@/modules/order/presentation/dto/finance/confirm-cod-remittance.dto';
 import { ConfirmCodRefundDto } from '@/modules/order/presentation/dto/finance/confirm-cod-refund.dto';
 import { Inject } from '@nestjs/common';
@@ -25,26 +24,23 @@ import {
     CreateFinanceSettlementBatchDto,
 } from '@/modules/order/presentation/dto/finance/wallet-finance.dto';
 
-// Route quản lý dòng tiền; payout payOS chỉ được khởi tạo bởi admin có permission tài chính tương ứng.
+// Route quản lý dòng tiền; payout chỉ được ghi nhận sau webhook Pay2S và xác nhận người nhận của admin.
 @Controller({ path: 'admin/finance', version: '1' })
 export class AdminFinanceController {
-    @Inject(AdminSellerPayoutService)
-    private readonly sellerPayout: AdminSellerPayoutService;
-
     constructor(
         private readonly paymentService: PaymentService,
-        private readonly payoutReconciliation: SepayPayoutReconciliationService,
+        private readonly payoutReconciliation: Pay2sPayoutReconciliationService,
         @Inject(SELLER_WALLET_REPOSITORY)
         private readonly walletRepository: SellerWalletRepositoryPort,
     ) {}
 
-    // Chỉ quyền payout được biết Kênh Chi payOS đã truy cập được hay chưa; response chỉ có trạng thái và số dư.
+    // Trả trạng thái cấu hình webhook Pay2S mà không làm lộ token hoặc tài khoản nguồn.
     @Get('payout-readiness')
     async getPayoutReadiness(
         @Headers('x-user-permissions') permissionsHeader: string,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.payout');
-        return this.sellerPayout.getReadiness();
+        return this.payoutReconciliation.getReadiness();
     }
 
     // Admin overview tổng hợp số dư mô phỏng và trang ledger; không chứa thông tin ngân hàng thô.
@@ -115,33 +111,7 @@ export class AdminFinanceController {
         return this.walletRepository.getAdminWithdrawal(withdrawalId);
     }
 
-    // Gửi hoặc retry an toàn payout payOS; mã tham chiếu và idempotency key do backend cố định theo yêu cầu.
-    @Post('withdrawals/:withdrawalId/payout')
-    async payoutWithdrawal(
-        @Headers('x-user-id') adminId: string,
-        @Headers('x-user-permissions') permissionsHeader: string,
-        @Param('withdrawalId', new ParseUUIDPipe()) withdrawalId: string,
-        @Body() dto: AdminWalletWithdrawalActionDto,
-    ) {
-        this.assertPermission(permissionsHeader, 'admin.finance.payout');
-        return this.sellerPayout.processWithdrawal({
-            withdrawalId,
-            adminId,
-            note: dto.note,
-        });
-    }
-
-    // Đọc lại lệnh payOS đang PROCESSING; route chỉ đồng bộ trạng thái, không tạo thêm lệnh chuyển tiền.
-    @Post('withdrawals/:withdrawalId/payout/sync')
-    async syncWithdrawalPayout(
-        @Headers('x-user-permissions') permissionsHeader: string,
-        @Param('withdrawalId', new ParseUUIDPipe()) withdrawalId: string,
-    ) {
-        this.assertPermission(permissionsHeader, 'admin.finance.payout');
-        return this.sellerPayout.syncWithdrawal(withdrawalId);
-    }
-
-    // Giữ endpoint cũ cho yêu cầu PROCESSING đã khởi tạo theo SePay/app ngân hàng; giao diện mới không dùng route này.
+    // Chỉ mở bước chuyển thủ công khi Pay2S đã sẵn sàng nhận webhook và admin xác nhận đã kiểm tra thông tin nhận.
     @Post('withdrawals/:withdrawalId/processing')
     async markWithdrawalProcessing(
         @Headers('x-user-id') adminId: string,
@@ -152,7 +122,7 @@ export class AdminFinanceController {
         this.assertPermission(permissionsHeader, 'admin.finance.payout');
         if (!this.payoutReconciliation.getReadiness().ready)
             throw new ServiceUnavailableException(
-                'Webhook tiền ra SePay chưa được cấu hình đầy đủ.',
+                'Webhook tiền ra Pay2S chưa được cấu hình đầy đủ.',
             );
         if (dto.manualTransferAcknowledged !== true)
             throw new BadRequestException(
