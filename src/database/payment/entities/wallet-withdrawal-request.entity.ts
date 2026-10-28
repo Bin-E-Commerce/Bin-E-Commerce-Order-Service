@@ -44,6 +44,14 @@ export class WalletWithdrawalRequest {
     @Column({ name: 'account_number_masked', type: 'varchar', length: 40 })
     accountNumberMasked!: string;
 
+    @Column({
+        name: 'transfer_memo_code',
+        type: 'varchar',
+        length: 23,
+        nullable: true,
+    })
+    transferMemoCode!: string | null;
+
     @Column({ type: 'varchar', length: 24, default: 'REQUESTED' })
     status!: 'REQUESTED' | 'PROCESSING' | 'PAID' | 'REJECTED' | 'FAILED';
 
