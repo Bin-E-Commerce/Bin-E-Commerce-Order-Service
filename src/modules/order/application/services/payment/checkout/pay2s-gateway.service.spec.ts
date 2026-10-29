@@ -89,12 +89,13 @@ describe('Pay2sGatewayService', () => {
         const target = createTarget();
         const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
             ok: true,
-            json: async () => ({
-                resultCode: 0,
-                payUrl: 'https://pay2s.test/link',
-                orderInfo: 'P2S-ORDER-INFO',
-                requestId: 'REQ-1',
-            }),
+            text: async () =>
+                JSON.stringify({
+                    resultCode: 0,
+                    payUrl: 'https://pay2s.test/link',
+                    orderInfo: 'P2S-ORDER-INFO',
+                    requestId: 'REQ-1',
+                }),
         } as Response);
 
         const result = await target.createPayment({
@@ -164,7 +165,8 @@ describe('Pay2sGatewayService', () => {
         const target = createTarget();
         const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
             ok: true,
-            json: async () => ({ resultCode: 0, status: 'CANCELLED' }),
+            text: async () =>
+                JSON.stringify({ resultCode: 0, status: 'CANCELLED' }),
         } as Response);
 
         await expect(
