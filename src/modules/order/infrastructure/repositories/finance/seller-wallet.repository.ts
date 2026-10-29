@@ -635,7 +635,7 @@ export class SellerWalletRepository
         };
     }
 
-    // Tổng hợp nạp đã xác nhận và mọi yêu cầu rút theo ngày Việt Nam, không tải transaction rows lên Node.
+    // Nhóm/định dạng theo cùng ngày giờ Việt Nam, chỉ lấy nạp đã xác nhận và không tải transaction rows lên Node.
     async getAdminWalletActivity(
         from: string,
         to: string,
@@ -644,7 +644,7 @@ export class SellerWalletRepository
             `
                 SELECT
                     'deposit' AS metric,
-                    TO_CHAR(COALESCE(deposit.confirmed_at, deposit.created_at) AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD') AS day,
+                    TO_CHAR((COALESCE(deposit.confirmed_at, deposit.created_at) AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS day,
                     COUNT(*)::int AS count
                 FROM wallet_deposits deposit
                 WHERE deposit.status = 'PAID'
@@ -656,7 +656,7 @@ export class SellerWalletRepository
 
                 SELECT
                     'withdrawalRequest' AS metric,
-                    TO_CHAR(request.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD') AS day,
+                    TO_CHAR((request.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'YYYY-MM-DD') AS day,
                     COUNT(*)::int AS count
                 FROM wallet_withdrawal_requests request
                 WHERE request.created_at >= ($1::date::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh')
@@ -873,9 +873,7 @@ export class SellerWalletRepository
                     amount: request.amount,
                     status: input.status,
                     note:
-                        input.status === 'REJECTED'
-                            ? request.adminNote
-                            : null,
+                        input.status === 'REJECTED' ? request.adminNote : null,
                 },
             );
         });
