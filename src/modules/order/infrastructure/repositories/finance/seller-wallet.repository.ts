@@ -31,6 +31,7 @@ import type { SellerWalletRepositoryPort } from '@/modules/order/application/con
 import type { SellerWalletSnapshot } from '@/modules/order/application/types/finance/seller-wallet.type';
 import type {
     AdminFinanceSnapshot,
+    AdminWalletActivityData,
     AdminCodRemittanceRecord,
     AdminWalletDepositRecord,
     AdminWalletWithdrawalRecord,
@@ -631,6 +632,55 @@ export class SellerWalletRepository
             totalLedger,
             page,
             pageSize,
+        };
+    }
+
+    // Tổng hợp nạp đã xác nhận và mọi yêu cầu rút theo ngày Việt Nam, không tải transaction rows lên Node.
+    async getAdminWalletActivity(
+        from: string,
+        to: string,
+    ): Promise<AdminWalletActivityData> {
+        const rows = (await this.dataSource.query(
+            `
+                SELECT
+                    'deposit' AS metric,
+                    TO_CHAR(COALESCE(deposit.confirmed_at, deposit.created_at) AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD') AS day,
+                    COUNT(*)::int AS count
+                FROM wallet_deposits deposit
+                WHERE deposit.status = 'PAID'
+                  AND COALESCE(deposit.confirmed_at, deposit.created_at) >= ($1::date::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh')
+                  AND COALESCE(deposit.confirmed_at, deposit.created_at) < ($2::date::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh')
+                GROUP BY (COALESCE(deposit.confirmed_at, deposit.created_at) AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+
+                UNION ALL
+
+                SELECT
+                    'withdrawalRequest' AS metric,
+                    TO_CHAR(request.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD') AS day,
+                    COUNT(*)::int AS count
+                FROM wallet_withdrawal_requests request
+                WHERE request.created_at >= ($1::date::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh')
+                  AND request.created_at < ($2::date::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh')
+                GROUP BY (request.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+
+                ORDER BY metric ASC, day ASC
+            `,
+            [from, to],
+        )) as Array<{
+            metric: 'deposit' | 'withdrawalRequest';
+            day: string;
+            count: number;
+        }>;
+
+        return {
+            from,
+            to,
+            deposits: rows
+                .filter((row) => row.metric === 'deposit')
+                .map(({ day, count }) => ({ day, count })),
+            withdrawalRequests: rows
+                .filter((row) => row.metric === 'withdrawalRequest')
+                .map(({ day, count }) => ({ day, count })),
         };
     }
 

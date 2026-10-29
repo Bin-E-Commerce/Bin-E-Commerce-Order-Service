@@ -76,3 +76,16 @@ export interface AdminFinanceSnapshot {
     page: number;
     pageSize: number;
 }
+
+// Các chuỗi đếm cho biểu đồ vận hành; không trả số dư hoặc thông tin tài khoản seller.
+export interface AdminWalletActivityDailyCount {
+    day: string;
+    count: number;
+}
+
+export interface AdminWalletActivityData {
+    from: string;
+    to: string;
+    deposits: AdminWalletActivityDailyCount[];
+    withdrawalRequests: AdminWalletActivityDailyCount[];
+}

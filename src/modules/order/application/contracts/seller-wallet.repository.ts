@@ -2,6 +2,7 @@
 import type { SellerWalletSnapshot } from '@/modules/order/application/types/finance/seller-wallet.type';
 import type {
     AdminFinanceSnapshot,
+    AdminWalletActivityData,
     AdminCodRemittanceRecord,
     AdminWalletWithdrawalRecord,
     PlatformFinanceLedgerRecord,
@@ -96,6 +97,7 @@ export interface SellerWalletRepositoryPort {
         page: number,
         pageSize: number,
     ): Promise<AdminFinanceSnapshot>;
+    getAdminWalletActivity(from: string, to: string): Promise<AdminWalletActivityData>;
     listAdminWithdrawals(
         page: number,
         pageSize: number,
