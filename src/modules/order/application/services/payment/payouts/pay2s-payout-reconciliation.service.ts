@@ -30,8 +30,8 @@ export class Pay2sPayoutReconciliationService {
     ) {}
 
     // Báo cấu hình tối thiểu cho admin mà không trả token hoặc tài khoản nguồn.
-    // Chấp nhận số tài khoản ngân hàng và mã liên kết Pay2S dạng chữ-số để khớp hợp đồng webhook.
-    // Thiếu token hoặc định danh nguồn hợp lệ thì khóa payout để không tạo giao dịch không thể đối soát.
+    // Tài khoản nguồn là số tài khoản ngân hàng, còn mã giao dịch Pay2S được chuẩn hóa riêng trong payload.
+    // Thiếu token hoặc tài khoản nguồn hợp lệ thì khóa payout để không tạo giao dịch không thể đối soát.
     getReadiness(): {
         ready: boolean;
         missing: Array<'WEBHOOK_TOKEN' | 'SOURCE_ACCOUNT_NUMBER'>;
@@ -44,8 +44,8 @@ export class Pay2sPayoutReconciliationService {
             .trim();
         const normalizedSourceAccount =
             this.normalizeAccountNumber(sourceAccount);
-        // Sau khi chuẩn hóa, chỉ chấp nhận định danh chữ-số dài 6–64 ký tự để loại cấu hình rỗng hoặc ký tự lạ.
-        if (!/^[A-Z0-9]{6,64}$/.test(normalizedSourceAccount))
+        // Bỏ khoảng trắng/gạch nối trước đó nhưng không cho chữ cái lọt vào cấu hình số tài khoản ngân hàng.
+        if (!/^\d{6,64}$/.test(normalizedSourceAccount))
             missing.push('SOURCE_ACCOUNT_NUMBER');
         return { ready: missing.length === 0, missing };
     }

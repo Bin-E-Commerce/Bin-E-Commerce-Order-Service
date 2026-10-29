@@ -10,13 +10,14 @@ import { SellerWallet } from '@/database/payment/entities/seller-wallet.entity';
 import { SellerWalletLedger } from '@/database/payment/entities/seller-wallet-ledger.entity';
 import { WalletWithdrawalRequest } from '@/database/payment/entities/wallet-withdrawal-request.entity';
 import { PlatformFinanceLedger } from '@/database/payment/entities/platform-finance-ledger.entity';
+import { WalletFinanceNotificationOutboxEntity } from '@/database/integration/entities/wallet-finance-notification-outbox.entity';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
 import { SellerWalletRepository } from '@/modules/order/infrastructure/repositories/finance/seller-wallet.repository';
 
 describe('SellerWalletRepository completed-order release', () => {
-    // COD chỉ vào available sau khi admin xác nhận đã đối soát; trước đó không được chạy truy vấn release.
-    it('keeps COD proceeds pending until remittance is confirmed', async () => {
+    // COD vẫn được reconcile vào pending; điều kiện remittance chỉ chặn truy vấn chuyển tiền sang available.
+    it('does not release COD proceeds before remittance is confirmed', async () => {
         const orderRepository = {
             findOne: jest.fn().mockResolvedValue({
                 id: 'order-1',
@@ -26,9 +27,10 @@ describe('SellerWalletRepository completed-order release', () => {
                 codRemittedAt: null,
             }),
         };
+        const queryMock = jest.fn().mockResolvedValue([]);
         const manager = {
             getRepository: jest.fn().mockReturnValue(orderRepository),
-            query: jest.fn().mockResolvedValue([]),
+            query: queryMock,
         } as unknown as EntityManager;
         const repository = new SellerWalletRepository(
             createDataSource(manager),
@@ -36,10 +38,22 @@ describe('SellerWalletRepository completed-order release', () => {
 
         await repository.releaseCompletedOrder('order-1');
 
-        expect(manager.query).not.toHaveBeenCalled();
+        expect(queryMock).toHaveBeenCalledTimes(2);
+        expect(queryMock.mock.calls[0]![0]).toContain(
+            'SELECT DISTINCT order_row.id',
+        );
+        expect(queryMock.mock.calls[0]![1]).toEqual([
+            null,
+            'order-1',
+            PaymentStatus.PAID,
+        ]);
+        expect(queryMock.mock.calls[1]![0]).toEqual(
+            expect.stringContaining('order_row.cod_remitted_at IS NOT NULL'),
+        );
+        expect(queryMock.mock.calls[1]![1]).toEqual(['order-1']);
     });
 
-    // Sau xác nhận COD, reconcile và release chỉ nhắm order này, đồng thời cả hai query giữ predicate đối soát.
+    // Sau xác nhận COD, query reconcile ghi pending còn query release áp dụng predicate remittance cho đúng order.
     it('releases COD proceeds only after the admin marks them remitted', async () => {
         const orderRepository = {
             findOne: jest.fn().mockResolvedValue({
@@ -64,14 +78,13 @@ describe('SellerWalletRepository completed-order release', () => {
         await repository.releaseCompletedOrder('order-1');
 
         expect(queryMock).toHaveBeenCalledTimes(2);
-        expect(queryMock.mock.calls[0]![0]).toEqual(
-            expect.stringContaining('order_row.cod_remitted_at IS NOT NULL'),
+        expect(queryMock.mock.calls[0]![0]).toContain(
+            'SELECT DISTINCT order_row.id',
         );
         expect(queryMock.mock.calls[0]![1]).toEqual([
             null,
             'order-1',
             PaymentStatus.PAID,
-            PaymentMethod.COD,
         ]);
         expect(queryMock.mock.calls[1]![0]).toEqual(
             expect.stringContaining('order_row.cod_remitted_at IS NOT NULL'),
@@ -144,11 +157,16 @@ describe('SellerWalletRepository withdrawals', () => {
             })),
         };
         const ledgerRepository = { save: jest.fn() };
+        const outboxInsert = jest.fn();
         const manager = createManager(
             new Map<Function, Record<string, jest.Mock>>([
                 [SellerWallet, walletRepository],
                 [WalletWithdrawalRequest, withdrawalRepository],
                 [SellerWalletLedger, ledgerRepository],
+                [
+                    WalletFinanceNotificationOutboxEntity,
+                    { insert: outboxInsert },
+                ],
             ]),
         );
         const repository = new SellerWalletRepository(
@@ -180,6 +198,20 @@ describe('SellerWalletRepository withdrawals', () => {
                 kind: 'WITHDRAWAL_RESERVED',
                 amount: '-10000.00',
                 sourceKey: 'withdrawal:withdrawal-1:reserve',
+            }),
+        );
+        expect(outboxInsert).toHaveBeenCalledWith(
+            expect.objectContaining({
+                eventId: 'wallet.withdrawal.requested:withdrawal-1',
+                topic: 'wallet.withdrawal.requested',
+                aggregateId: 'withdrawal-1',
+                payload: expect.objectContaining({
+                    eventName: 'wallet.withdrawal.requested',
+                    data: expect.objectContaining({
+                        transactionId: 'withdrawal-1',
+                        status: 'REQUESTED',
+                    }),
+                }),
             }),
         );
     });
@@ -231,6 +263,7 @@ describe('SellerWalletRepository withdrawals', () => {
             shopId: 'shop-1',
             amount: '10000.00',
             status: 'PROCESSING',
+            processedAt: new Date('2026-10-18T00:00:00.000Z'),
             transferReference: null,
             pay2sTransactionId: null,
             pay2sTransactionNumber: null,
@@ -257,12 +290,17 @@ describe('SellerWalletRepository withdrawals', () => {
         };
         const walletLedgerRepository = { save: jest.fn() };
         const platformLedgerRepository = { save: jest.fn() };
+        const outboxInsert = jest.fn();
         const manager = createManager(
             new Map<Function, Record<string, jest.Mock>>([
                 [SellerWallet, walletRepository],
                 [WalletWithdrawalRequest, withdrawalRepository],
                 [SellerWalletLedger, walletLedgerRepository],
                 [PlatformFinanceLedger, platformLedgerRepository],
+                [
+                    WalletFinanceNotificationOutboxEntity,
+                    { insert: outboxInsert },
+                ],
             ]),
         );
         const repository = new SellerWalletRepository(
@@ -305,6 +343,18 @@ describe('SellerWalletRepository withdrawals', () => {
                 amount: '-10000.00',
                 reference: 'BANK-TRANSFER-1',
                 createdBy: 'admin-1',
+            }),
+        );
+        expect(outboxInsert).toHaveBeenCalledTimes(1);
+        expect(outboxInsert).toHaveBeenCalledWith(
+            expect.objectContaining({
+                eventId: 'wallet.withdrawal.paid:withdrawal-1',
+                topic: 'wallet.withdrawal.paid',
+                aggregateId: 'withdrawal-1',
+                payload: expect.objectContaining({
+                    eventName: 'wallet.withdrawal.paid',
+                    data: expect.objectContaining({ status: 'PAID' }),
+                }),
             }),
         );
     });
@@ -479,6 +529,8 @@ describe('SellerWalletRepository settlement batches', () => {
                 adminId: 'admin-1',
                 ledgerIds: ['ledger-1'],
             }),
-        ).rejects.toThrow('chưa trả không thể ghép');
+        ).rejects.toThrow(
+            'Khoản chưa thu hoặc bút toán phân bổ quỹ ship không thể ghép vào đợt đối soát tiền mặt.',
+        );
     });
 });
