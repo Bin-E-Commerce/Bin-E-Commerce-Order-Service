@@ -24,6 +24,7 @@ import {
     AdminWalletWithdrawalActionDto,
     CreateFinanceSettlementBatchDto,
 } from '@/modules/order/presentation/dto/finance/wallet-finance.dto';
+import { AdminFinanceActivityQueryDto } from '@/modules/order/presentation/dto/finance/admin-finance-activity-query.dto';
 
 // Route quản lý dòng tiền; payout chỉ được ghi nhận sau webhook Pay2S và xác nhận người nhận của admin.
 @Controller({ path: 'admin/finance', version: '1' })
@@ -55,6 +56,31 @@ export class AdminFinanceController {
         return this.walletRepository.getAdminFinance(
             this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
             this.toBoundedInteger(pageSizeValue, 20, 1, 100),
+        );
+    }
+
+    // Trả số hồ sơ tài chính theo ngày sau khi xác thực permission đọc finance và giới hạn khoảng báo cáo.
+    @Get('activity')
+    async getActivity(
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Query() query: AdminFinanceActivityQueryDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.read');
+
+        const fromDay = Date.parse(`${query.from}T00:00:00.000Z`);
+        const toDay = Date.parse(`${query.to}T00:00:00.000Z`);
+        const dayCount = (toDay - fromDay) / 86_400_000;
+
+        // DTO đã giới hạn định dạng ngày; kiểm tra khoảng trước khi truy cập DB để chặn query lịch sử không giới hạn.
+        if (!Number.isInteger(dayCount) || dayCount < 1 || dayCount > 31) {
+            throw new BadRequestException(
+                'Khoảng thống kê phải từ 1 đến 31 ngày.',
+            );
+        }
+
+        return this.walletRepository.getAdminWalletActivity(
+            query.from,
+            query.to,
         );
     }
 
