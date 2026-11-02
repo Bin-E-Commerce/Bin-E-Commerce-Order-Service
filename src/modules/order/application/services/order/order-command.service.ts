@@ -637,6 +637,9 @@ export class OrderCommandService {
         return this.responseMapper.toSellerResponse(order);
     }
 
+    // Hủy đơn đã xác nhận, bù tồn kho và chuyển tiền Pay2S đã thu sang hàng chờ hoàn.
+    // Kiểm tra trạng thái trước tác động kho; repository khóa lại order khi commit để chặn race với vận chuyển/IPN.
+    // Sau commit, đảo ledger seller theo source key; nếu bước này lỗi, lần retry ở order CANCELLED sẽ tiếp tục bù.
     async cancelOwnedOrder(
         ownerId: string,
         orderId: string,
@@ -650,8 +653,23 @@ export class OrderCommandService {
             orderId,
         );
         if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
-        if (order.status === OrderStatus.CANCELLED)
-            return this.responseMapper.toResponse(order);
+        if (order.status === OrderStatus.CANCELLED) {
+            // Hủy trước đây có thể đã lưu trạng thái nhưng dừng trước bước đảo ví; retry sẽ tự bù phần ledger còn thiếu.
+            const cancellation = await this.orderRepository.cancelOwnedOrder(
+                ownerId,
+                orderId,
+                order.cancelReason,
+            );
+            if (cancellation.refundPending)
+                await this.paymentService.reverseCancelledOrder(orderId);
+            const refreshedOrder = await this.orderRepository.findOwnedById(
+                ownerId,
+                orderId,
+            );
+            if (!refreshedOrder)
+                throw new NotFoundException('Không tìm thấy đơn hàng.');
+            return this.responseMapper.toResponse(refreshedOrder);
+        }
         if (order.status !== OrderStatus.CONFIRMED) {
             throw new OrderCancellationConflictError(order.status);
         }
@@ -667,40 +685,13 @@ export class OrderCommandService {
             })),
         );
 
-        const didCancel = await this.dataSource.transaction(async (manager) => {
-            const lockedOrder = await manager
-                .getRepository(Order)
-                .createQueryBuilder('order')
-                .where('order.id = :orderId', { orderId })
-                .andWhere('order.owner_id = :ownerId', { ownerId })
-                .setLock('pessimistic_write')
-                .getOne();
-            if (!lockedOrder)
-                throw new NotFoundException('Không tìm thấy đơn hàng.');
-            if (lockedOrder.status === OrderStatus.CANCELLED) return false;
-            if (lockedOrder.status !== OrderStatus.CONFIRMED) {
-                throw new OrderCancellationConflictError(lockedOrder.status);
-            }
-            if (
-                lockedOrder.fulfillmentStatus !== OrderFulfillmentStatus.TO_SHIP
-            ) {
-                throw new OrderCancellationConflictError(lockedOrder.status);
-            }
-            lockedOrder.status = OrderStatus.CANCELLED;
-            lockedOrder.fulfillmentStatus = OrderFulfillmentStatus.CANCELLED;
-            lockedOrder.cancelReason = dto.reason?.trim() || null;
-            lockedOrder.cancelledAt = new Date();
-            await manager.getRepository(Order).save(lockedOrder);
-            await manager.getRepository(OrderStatusHistory).save(
-                manager.getRepository(OrderStatusHistory).create({
-                    orderId,
-                    fromStatus: OrderStatus.CONFIRMED,
-                    toStatus: OrderStatus.CANCELLED,
-                    reason: lockedOrder.cancelReason ?? 'Khách hàng hủy đơn.',
-                }),
-            );
-            return true;
-        });
+        const cancellation = await this.orderRepository.cancelOwnedOrder(
+            ownerId,
+            orderId,
+            dto.reason?.trim() || null,
+        );
+        if (cancellation.refundPending)
+            await this.paymentService.reverseCancelledOrder(orderId);
 
         const cancelledOrder = await this.orderRepository.findOwnedById(
             ownerId,
@@ -708,7 +699,7 @@ export class OrderCommandService {
         );
         if (!cancelledOrder)
             throw new NotFoundException('Không tìm thấy đơn hàng.');
-        if (didCancel) {
+        if (cancellation.didCancel) {
             if (ownerEmail?.trim()) {
                 await this.orderEvents.publishCancelled(
                     cancelledOrder,

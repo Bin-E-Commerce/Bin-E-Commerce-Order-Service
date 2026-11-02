@@ -179,6 +179,11 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         await this.sellerWalletRepository.recordCodRefund(input);
     }
 
+    // Đảo phần sale pending của order Pay2S vừa hủy; source key giúp request hủy lặp không trừ ví hai lần.
+    async reverseCancelledOrder(orderId: string): Promise<void> {
+        await this.sellerWalletRepository.reverseCancelledOrder(orderId);
+    }
+
     // Tạo top-up Pay2S độc lập với PaymentAttempt của order; IPN hợp lệ mới ghi có ví seller.
     async createWalletDeposit(input: {
         shopId: string;
