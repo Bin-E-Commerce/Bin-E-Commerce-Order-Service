@@ -70,6 +70,7 @@ export class PaymentAttempt {
         | 'FAILED'
         | 'EXPIRED'
         | 'REFUND_PENDING'
+        | 'REFUND_FAILED'
         | 'REFUNDED';
 
     @Column({ type: 'varchar', length: 20, default: 'LIVE' })
@@ -120,6 +121,22 @@ export class PaymentAttempt {
         nullable: true,
     })
     refundProcessedAt!: Date | null;
+
+    @Column({
+        name: 'refund_failure_note',
+        type: 'varchar',
+        length: 500,
+        nullable: true,
+    })
+    refundFailureNote!: string | null;
+
+    @Column({
+        name: 'refund_failure_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    refundFailureBy!: string | null;
 
     @Column({
         name: 'provider_response',

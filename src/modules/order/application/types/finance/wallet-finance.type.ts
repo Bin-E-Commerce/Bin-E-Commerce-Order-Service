@@ -48,6 +48,41 @@ export interface AdminCodRemittanceRecord {
     createdAt: string;
 }
 
+// Một dòng hàng đợi hoàn có nguồn phân biệt để admin không nhầm tiền hoàn đơn, return và khiếu nại giao hàng.
+export interface AdminRefundRecord {
+    sourceType: 'PAYMENT_ATTEMPT' | 'ORDER_RETURN' | 'DELIVERY_ISSUE';
+    id: string;
+    orderId: string;
+    orderNumber: string;
+    paymentMethod: 'COD' | 'PAY2S';
+    status: 'REFUND_PENDING' | 'REFUND_FAILED';
+    amount: string;
+    reason: string;
+    providerTransactionId: string | null;
+    refundFailureNote: string | null;
+    createdAt: string;
+}
+
+// Dữ liệu cần cho admin phân xử khiếu nại chưa được chuyển sang yêu cầu trả hàng.
+export interface AdminDeliveryIssueRecord {
+    id: string;
+    orderId: string;
+    orderNumber: string;
+    paymentStatus:
+        | 'COD_PENDING_COLLECTION'
+        | 'PENDING'
+        | 'FAILED'
+        | 'PAID'
+        | 'REFUND_PENDING'
+        | 'REFUNDED';
+    reason: string;
+    itemIds: string[];
+    note: string | null;
+    evidence: Array<{ assetId: string; url: string; type: 'image' | 'video' }>;
+    returnRequestId: string | null;
+    createdAt: string;
+}
+
 export interface PlatformFinanceLedgerRecord {
     id: string;
     kind: string;

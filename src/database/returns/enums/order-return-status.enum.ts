@@ -23,4 +23,5 @@ export const ACTIVE_ORDER_RETURN_STATUSES: readonly OrderReturnStatus[] = [
     OrderReturnStatus.SHIPMENT_FAILED,
     OrderReturnStatus.RECEIVED,
     OrderReturnStatus.REFUND_PENDING,
+    OrderReturnStatus.REFUND_FAILED,
 ];

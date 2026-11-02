@@ -4,6 +4,8 @@ import type {
     AdminFinanceSnapshot,
     AdminWalletActivityData,
     AdminCodRemittanceRecord,
+    AdminDeliveryIssueRecord,
+    AdminRefundRecord,
     AdminWalletWithdrawalRecord,
     PlatformFinanceLedgerRecord,
     WalletDepositRecord,
@@ -26,6 +28,7 @@ export interface SellerWalletRepositoryPort {
         reference: string,
     ): Promise<void>;
     reverseRefund(returnRequestId: string): Promise<void>;
+    reverseCancelledOrder(orderId: string): Promise<void>;
     recordCodRefund(input: {
         returnRequestId: string;
         adminId: string;
@@ -97,7 +100,10 @@ export interface SellerWalletRepositoryPort {
         page: number,
         pageSize: number,
     ): Promise<AdminFinanceSnapshot>;
-    getAdminWalletActivity(from: string, to: string): Promise<AdminWalletActivityData>;
+    getAdminWalletActivity(
+        from: string,
+        to: string,
+    ): Promise<AdminWalletActivityData>;
     listAdminWithdrawals(
         page: number,
         pageSize: number,
@@ -107,6 +113,53 @@ export interface SellerWalletRepositoryPort {
         page: number,
         pageSize: number,
     ): Promise<{ items: AdminCodRemittanceRecord[]; total: number }>;
+    listAdminRefunds(
+        page: number,
+        pageSize: number,
+    ): Promise<{ items: AdminRefundRecord[]; total: number }>;
+    listAdminDeliveryIssues(): Promise<AdminDeliveryIssueRecord[]>;
+    resolveAdminDeliveryIssue(input: {
+        issueId: string;
+        adminId: string;
+        decision: 'REFUND' | 'REJECT';
+        note: string;
+    }): Promise<void>;
+    recordPaymentAttemptRefund(input: {
+        paymentAttemptId: string;
+        adminId: string;
+        reference: string;
+        amount: string;
+        proof: Record<string, unknown>;
+    }): Promise<void>;
+    markPaymentAttemptRefundFailed(
+        paymentAttemptId: string,
+        adminId: string,
+        note: string,
+    ): Promise<void>;
+    recordReturnRefund(input: {
+        returnRequestId: string;
+        adminId: string;
+        reference: string;
+        amount: string;
+        proof: Record<string, unknown>;
+    }): Promise<void>;
+    markReturnRefundFailed(
+        returnRequestId: string,
+        adminId: string,
+        note: string,
+    ): Promise<void>;
+    recordDeliveryIssueRefund(input: {
+        issueId: string;
+        adminId: string;
+        reference: string;
+        amount: string;
+        proof: Record<string, unknown>;
+    }): Promise<void>;
+    markDeliveryIssueRefundFailed(
+        issueId: string,
+        adminId: string,
+        note: string,
+    ): Promise<void>;
     getAdminWithdrawal(
         withdrawalId: string,
     ): Promise<AdminWalletWithdrawalRecord>;

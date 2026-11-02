@@ -52,6 +52,14 @@ export class DeliveryConfirmationDto {
 
     @ValidateIf(
         (value: DeliveryConfirmationDto) =>
+            value.decision === DeliveryConfirmationDecision.ISSUE &&
+            value.reason !== OrderDeliveryIssueReason.NOT_RECEIVED,
+    )
+    @IsUUID('4')
+    returnRequestId?: string;
+
+    @ValidateIf(
+        (value: DeliveryConfirmationDto) =>
             value.decision === DeliveryConfirmationDecision.ISSUE,
     )
     @IsOptional()
