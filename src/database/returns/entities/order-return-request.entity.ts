@@ -19,7 +19,7 @@ import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.
 })
 @Index('uq_order_return_active_order_shop', ['orderId', 'shopId'], {
     unique: true,
-    where: `"status" IN ('REQUESTED', 'AWAITING_SHIPMENT', 'IN_TRANSIT', 'SHIPMENT_FAILED', 'RECEIVED', 'REFUND_PENDING')`,
+    where: `"status" IN ('REQUESTED', 'AWAITING_SHIPMENT', 'IN_TRANSIT', 'SHIPMENT_FAILED', 'RECEIVED', 'REFUND_PENDING', 'REFUND_FAILED')`,
 })
 export class OrderReturnRequest {
     @PrimaryGeneratedColumn('uuid')
@@ -58,6 +58,14 @@ export class OrderReturnRequest {
         nullable: true,
     })
     reviewNote!: string | null;
+
+    @Column({
+        name: 'shipment_failure_note',
+        type: 'varchar',
+        length: 500,
+        nullable: true,
+    })
+    shipmentFailureNote!: string | null;
 
     @Column({ name: 'evidence', type: 'jsonb', default: () => "'[]'::jsonb" })
     evidence!: Array<{ assetId: string; url: string; type: 'image' | 'video' }>;
@@ -207,6 +215,22 @@ export class OrderReturnRequest {
         nullable: true,
     })
     refundProcessedAt!: Date | null;
+
+    @Column({
+        name: 'refund_failure_note',
+        type: 'varchar',
+        length: 500,
+        nullable: true,
+    })
+    refundFailureNote!: string | null;
+
+    @Column({
+        name: 'refund_failure_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    refundFailureBy!: string | null;
 
     @Column({
         name: 'requested_at',

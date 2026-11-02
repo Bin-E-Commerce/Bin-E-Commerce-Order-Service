@@ -55,12 +55,87 @@ export class OrderDeliveryIssue {
     resolvedAt!: Date | null;
 
     @Column({
+        name: 'resolved_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    resolvedBy!: string | null;
+
+    @Column({
         name: 'resolution_note',
         type: 'varchar',
         length: 500,
         nullable: true,
     })
     resolutionNote!: string | null;
+
+    @Column({
+        name: 'refund_status',
+        type: 'varchar',
+        length: 20,
+        nullable: true,
+    })
+    refundStatus!: 'REFUND_PENDING' | 'REFUND_FAILED' | 'REFUNDED' | null;
+
+    @Column({
+        name: 'refund_amount',
+        type: 'numeric',
+        precision: 14,
+        scale: 2,
+        nullable: true,
+    })
+    refundAmount!: string | null;
+
+    @Column({
+        name: 'refund_method',
+        type: 'varchar',
+        length: 40,
+        nullable: true,
+    })
+    refundMethod!: 'PAY2S_MANUAL' | 'COD_MANUAL' | null;
+
+    @Column({
+        name: 'refund_transaction_reference',
+        type: 'varchar',
+        length: 180,
+        nullable: true,
+    })
+    refundTransactionReference!: string | null;
+
+    @Column({ name: 'refund_proof', type: 'jsonb', nullable: true })
+    refundProof!: Record<string, unknown> | null;
+
+    @Column({
+        name: 'refund_processed_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    refundProcessedBy!: string | null;
+
+    @Column({
+        name: 'refund_processed_at',
+        type: 'timestamptz',
+        nullable: true,
+    })
+    refundProcessedAt!: Date | null;
+
+    @Column({
+        name: 'refund_failure_note',
+        type: 'varchar',
+        length: 500,
+        nullable: true,
+    })
+    refundFailureNote!: string | null;
+
+    @Column({
+        name: 'refund_failure_by',
+        type: 'varchar',
+        length: 255,
+        nullable: true,
+    })
+    refundFailureBy!: string | null;
 
     @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
     createdAt!: Date;

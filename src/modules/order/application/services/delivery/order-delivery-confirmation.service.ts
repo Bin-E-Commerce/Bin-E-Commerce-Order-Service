@@ -11,9 +11,12 @@ import { DataSource } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderDeliveryIssue } from '@/database/delivery/entities/order-delivery-issue.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
+import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
+import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
 import { OrderDeliveryConfirmationMethod } from '@/database/delivery/enums/order-delivery-confirmation-method.enum';
 import { OrderDeliveryConfirmationStatus } from '@/database/delivery/enums/order-delivery-confirmation-status.enum';
 import { OrderDeliveryIssueStatus } from '@/database/delivery/enums/order-delivery-issue-status.enum';
+import { OrderDeliveryIssueReason } from '@/database/delivery/enums/order-delivery-issue-reason.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
 import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
@@ -230,6 +233,55 @@ export class OrderDeliveryConfirmationService {
                 );
             }
 
+            let linkedReturn: OrderReturnRequest | null = null;
+            if (dto.reason === OrderDeliveryIssueReason.NOT_RECEIVED) {
+                if (dto.returnRequestId)
+                    throw new BadRequestException(
+                        'Khiếu nại chưa nhận hàng không được gắn với yêu cầu trả sản phẩm.',
+                    );
+            } else {
+                if (!dto.returnRequestId)
+                    throw new BadRequestException(
+                        'Cần chọn yêu cầu hoàn hàng để liên kết khiếu nại này.',
+                    );
+                linkedReturn = await manager
+                    .getRepository(OrderReturnRequest)
+                    .findOne({
+                        where: {
+                            id: dto.returnRequestId,
+                            orderId,
+                            ownerId,
+                        },
+                    });
+                if (!linkedReturn)
+                    throw new BadRequestException(
+                        'Yêu cầu hoàn hàng không thuộc đơn hàng này.',
+                    );
+                const returnItemIds = new Set(linkedReturn.itemIds);
+                if (
+                    itemIds.length === 0 ||
+                    itemIds.some((itemId) => !returnItemIds.has(itemId))
+                )
+                    throw new BadRequestException(
+                        'Sản phẩm khiếu nại phải nằm trong yêu cầu hoàn hàng đã tạo.',
+                    );
+                const expectedReturnReason: Partial<
+                    Record<OrderDeliveryIssueReason, OrderReturnReason>
+                > = {
+                    DAMAGED: OrderReturnReason.DAMAGED,
+                    WRONG_ITEM: OrderReturnReason.WRONG_ITEM,
+                    MISSING_ITEM: OrderReturnReason.MISSING_ITEM,
+                    OTHER: OrderReturnReason.OTHER,
+                };
+                if (
+                    expectedReturnReason[dto.reason] &&
+                    linkedReturn.reason !== expectedReturnReason[dto.reason]
+                )
+                    throw new BadRequestException(
+                        'Lý do khiếu nại không khớp yêu cầu hoàn hàng.',
+                    );
+            }
+
             const issueRepository = manager.getRepository(OrderDeliveryIssue);
             const existingIssue = await issueRepository.findOne({
                 where: { orderId, status: OrderDeliveryIssueStatus.OPEN },
@@ -245,12 +297,22 @@ export class OrderDeliveryConfirmationService {
                         itemIds,
                         evidence: dto.evidence ?? [],
                         note: dto.note?.trim() || null,
-                        status: OrderDeliveryIssueStatus.OPEN,
-                        returnRequestId: null,
-                        resolvedAt: null,
-                        resolutionNote: null,
+                        status: linkedReturn
+                            ? OrderDeliveryIssueStatus.RESOLVED
+                            : OrderDeliveryIssueStatus.OPEN,
+                        returnRequestId: linkedReturn?.id ?? null,
+                        resolvedAt: linkedReturn ? new Date() : null,
+                        resolutionNote: linkedReturn
+                            ? `Đã chuyển sang yêu cầu hoàn hàng ${linkedReturn.id}.`
+                            : null,
                     }),
                 );
+            } else if (linkedReturn) {
+                existingIssue.returnRequestId = linkedReturn.id;
+                existingIssue.status = OrderDeliveryIssueStatus.RESOLVED;
+                existingIssue.resolvedAt = new Date();
+                existingIssue.resolutionNote = `Đã chuyển sang yêu cầu hoàn hàng ${linkedReturn.id}.`;
+                await issueRepository.save(existingIssue);
             }
 
             // Qua chốt DELIVERED ở trên nên mọi request ISSUE chưa idempotent đều cần rời tab Chờ xác nhận.

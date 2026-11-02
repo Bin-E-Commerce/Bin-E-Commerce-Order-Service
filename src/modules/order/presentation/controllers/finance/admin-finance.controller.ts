@@ -17,6 +17,9 @@ import { PaymentService } from '@/modules/order/application/services/payment/che
 import { Pay2sPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/pay2s-payout-reconciliation.service';
 import { ConfirmCodRemittanceDto } from '@/modules/order/presentation/dto/finance/confirm-cod-remittance.dto';
 import { ConfirmCodRefundDto } from '@/modules/order/presentation/dto/finance/confirm-cod-refund.dto';
+import { ConfirmManualRefundDto } from '@/modules/order/presentation/dto/finance/confirm-manual-refund.dto';
+import { MarkRefundFailedDto } from '@/modules/order/presentation/dto/finance/mark-refund-failed.dto';
+import { ResolveDeliveryIssueDto } from '@/modules/order/presentation/dto/finance/resolve-delivery-issue.dto';
 import { Inject } from '@nestjs/common';
 import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
@@ -126,6 +129,155 @@ export class AdminFinanceController {
             this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
             this.toBoundedInteger(pageSizeValue, 20, 1, 100),
         );
+    }
+
+    // Hàng đợi gồm hoàn thanh toán trễ, return đã kiểm hàng và khiếu nại đã duyệt hoàn.
+    @Get('refunds')
+    async getRefunds(
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Query('page') pageValue?: string,
+        @Query('pageSize') pageSizeValue?: string,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.read');
+        return this.walletRepository.listAdminRefunds(
+            this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
+            this.toBoundedInteger(pageSizeValue, 20, 1, 100),
+        );
+    }
+
+    // Trả các khiếu nại chưa nhận hàng để admin phân xử trước khi đơn quay lại xác nhận hoặc vào hàng đợi hoàn.
+    @Get('delivery-issues')
+    async getDeliveryIssues(
+        @Headers('x-user-permissions') permissionsHeader: string,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.read');
+        return this.walletRepository.listAdminDeliveryIssues();
+    }
+
+    // Chỉ hồ sơ đã kiểm tra được phép đưa vào refund queue; từ chối thì mở lại cửa sổ khách xác nhận giao hàng.
+    @Post('delivery-issues/:issueId/resolution')
+    async resolveDeliveryIssue(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('issueId', new ParseUUIDPipe()) issueId: string,
+        @Body() dto: ResolveDeliveryIssueDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
+        await this.walletRepository.resolveAdminDeliveryIssue({
+            issueId,
+            adminId,
+            decision: dto.decision,
+            note: dto.note,
+        });
+        return { resolved: true };
+    }
+
+    // Xác nhận admin đã chuyển khoản cho payment attempt Pay2S được hàng đợi đánh dấu cần hoàn.
+    @Post('refunds/payment-attempts/:attemptId/confirmation')
+    async confirmPaymentAttemptRefund(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('attemptId', new ParseUUIDPipe()) attemptId: string,
+        @Body() dto: ConfirmManualRefundDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
+        await this.walletRepository.recordPaymentAttemptRefund({
+            paymentAttemptId: attemptId,
+            adminId,
+            reference: dto.reference,
+            amount: dto.amount,
+            proof: dto.proof,
+        });
+        return { confirmed: true };
+    }
+
+    // Lưu lỗi chuyển tiền attempt để nó vẫn xuất hiện trong refund queue và có thể thử lại.
+    @Post('refunds/payment-attempts/:attemptId/failure')
+    async failPaymentAttemptRefund(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('attemptId', new ParseUUIDPipe()) attemptId: string,
+        @Body() dto: MarkRefundFailedDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
+        await this.walletRepository.markPaymentAttemptRefundFailed(
+            attemptId,
+            adminId,
+            dto.note,
+        );
+        return { failed: true };
+    }
+
+    // Xác nhận hoàn theo snapshot tiền của return; wallet và payment status được cập nhật cùng transaction.
+    @Post('refunds/returns/:returnId/confirmation')
+    async confirmReturnRefund(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Body() dto: ConfirmManualRefundDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
+        await this.walletRepository.recordReturnRefund({
+            returnRequestId: returnId,
+            adminId,
+            reference: dto.reference,
+            amount: dto.amount,
+            proof: dto.proof,
+        });
+        return { confirmed: true };
+    }
+
+    // Lưu lỗi chuyển khoản return mà không xóa kết quả inspection hoặc số tiền đã duyệt.
+    @Post('refunds/returns/:returnId/failure')
+    async failReturnRefund(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Body() dto: MarkRefundFailedDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
+        await this.walletRepository.markReturnRefundFailed(
+            returnId,
+            adminId,
+            dto.note,
+        );
+        return { failed: true };
+    }
+
+    // Xác nhận hoàn đã chuyển cho issue chưa nhận hàng được admin duyệt.
+    @Post('refunds/delivery-issues/:issueId/confirmation')
+    async confirmDeliveryIssueRefund(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('issueId', new ParseUUIDPipe()) issueId: string,
+        @Body() dto: ConfirmManualRefundDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
+        await this.walletRepository.recordDeliveryIssueRefund({
+            issueId,
+            adminId,
+            reference: dto.reference,
+            amount: dto.amount,
+            proof: dto.proof,
+        });
+        return { confirmed: true };
+    }
+
+    // Lưu lỗi hoàn issue để admin có thể xử lý lại sau khi sửa thông tin ngân hàng hoặc giao dịch.
+    @Post('refunds/delivery-issues/:issueId/failure')
+    async failDeliveryIssueRefund(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('issueId', new ParseUUIDPipe()) issueId: string,
+        @Body() dto: MarkRefundFailedDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
+        await this.walletRepository.markDeliveryIssueRefundFailed(
+            issueId,
+            adminId,
+            dto.note,
+        );
+        return { failed: true };
     }
 
     // Trả tài khoản seller và memo đối soát chỉ khi admin có quyền payout; số tài khoản không xuất hiện ở danh sách.
