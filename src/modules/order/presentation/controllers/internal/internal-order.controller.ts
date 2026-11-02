@@ -16,6 +16,7 @@ import { ConfigService } from '@nestjs/config';
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { OrderReturnService } from '@/modules/order/application/services/returns/order-return.service';
 import { UpdateReturnShippingCostDto } from '@/modules/order/presentation/dto/orders/order-return.dto';
+import { ReturnShipmentFailedDto } from '@/modules/order/presentation/dto/orders/return-shipment-failed.dto';
 import { CancelOrderDto } from '@/modules/order/presentation/dto/orders/cancel-order.dto';
 import { InternalSellerDashboardQueryDto } from '@/modules/order/presentation/dto/internal/internal-seller-dashboard-query.dto';
 import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
@@ -82,6 +83,27 @@ export class InternalOrderController {
     ) {
         this.assertInternalToken(token);
         return this.orderReturnService.markInTransit(returnId);
+    }
+
+    // Shipping Service báo callback FAILED/CANCELLED để return request hiện lỗi và seller có thể tạo lại nhãn.
+    @Post('returns/:returnId/shipment-failed')
+    markReturnShipmentFailed(
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Headers('x-internal-service-token') token: string,
+        @Body() dto: ReturnShipmentFailedDto,
+    ) {
+        this.assertInternalToken(token);
+        return this.orderReturnService.markShipmentFailed(returnId, dto.note);
+    }
+
+    // Shipping Service báo đã lưu vận đơn retry để state request trở lại chờ bàn giao cho carrier.
+    @Post('returns/:returnId/shipment-retry-started')
+    markReturnShipmentRetryStarted(
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Headers('x-internal-service-token') token: string,
+    ) {
+        this.assertInternalToken(token);
+        return this.orderReturnService.markShipmentRetryStarted(returnId);
     }
 
     // Trả snapshot chiều customer -> shop cho Shipping Service tạo reverse shipment.

@@ -21,6 +21,8 @@ import { OrderEventsService } from '@/modules/order/application/services/order/o
 import { ShippingClient } from '@/modules/order/application/clients/shipping.client';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnService } from '@/modules/order/application/services/returns/order-return.service';
+import { OrderReturnShipmentRepository } from '@/modules/order/infrastructure/repositories/returns/order-return-shipment.repository';
+import { ORDER_RETURN_SHIPMENT_REPOSITORY } from '@/modules/order/application/contracts/order-return-shipment.repository';
 import { OrderDeliveryIssue } from '@/database/delivery/entities/order-delivery-issue.entity';
 import { OrderDeliveryConfirmationService } from '@/modules/order/application/services/delivery/order-delivery-confirmation.service';
 import { OrderDeliveryAutomationService } from '@/modules/order/application/services/delivery/order-delivery-automation.service';
@@ -88,6 +90,11 @@ import { WalletFinanceEventOutboxDispatcher } from '@/modules/order/infrastructu
         OrderEventsService,
         ShippingClient,
         OrderReturnService,
+        OrderReturnShipmentRepository,
+        {
+            provide: ORDER_RETURN_SHIPMENT_REPOSITORY,
+            useExisting: OrderReturnShipmentRepository,
+        },
         OrderDeliveryConfirmationService,
         OrderDeliveryAutomationService,
         SellerDashboardOrderService,

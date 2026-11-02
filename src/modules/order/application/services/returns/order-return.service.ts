@@ -40,6 +40,9 @@ import { PaymentService } from '@/modules/order/application/services/payment/che
 import { Inject } from '@nestjs/common';
 import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
+import { ORDER_RETURN_SHIPMENT_REPOSITORY } from '@/modules/order/application/contracts/order-return-shipment.repository';
+import type { OrderReturnShipmentRepositoryPort } from '@/modules/order/application/contracts/order-return-shipment.repository';
+import type { ReturnShipmentSyncRecord } from '@/modules/order/application/types/returns/return-shipment-sync.type';
 
 const EVIDENCE_REQUIRED_REASONS = new Set<OrderReturnReason>([
     OrderReturnReason.DAMAGED,
@@ -62,6 +65,9 @@ export class OrderReturnService {
         @Optional()
         @Inject(SELLER_WALLET_REPOSITORY)
         private readonly sellerWalletRepository?: SellerWalletRepositoryPort,
+        @Optional()
+        @Inject(ORDER_RETURN_SHIPMENT_REPOSITORY)
+        private readonly returnShipmentRepository?: OrderReturnShipmentRepositoryPort,
     ) {}
 
     // Tạo một request cho đúng một shop; UI nhiều shop phải gọi lại endpoint theo từng nhóm item.
@@ -376,34 +382,51 @@ export class OrderReturnService {
         return saved;
     }
 
-    // Shipping Service gọi callback nội bộ khi kiện hoàn đã về shop để mở bước inspection.
-    // Shipping Service gọi callback idempotent sau khi reverse shipment đã được tạo để Seller queue ẩn nút tạo vận đơn.
+    // Callback carrier mở bước tracking khi đã nhận kiện hoặc nhận lại vận đơn retry.
+    // SHIPMENT_FAILED được phép quay về IN_TRANSIT; các state khác bị từ chối để event cũ không hồi sinh request đã đóng.
     async markInTransit(returnId: string) {
-        const request = await this.repository.findOne({
-            where: { id: returnId },
-        });
-        if (!request)
-            throw new NotFoundException('Không tìm thấy yêu cầu hoàn hàng.');
-        if (request.status === OrderReturnStatus.IN_TRANSIT) return request;
-        if (request.status !== OrderReturnStatus.AWAITING_SHIPMENT) {
-            throw new ConflictException(
-                'Yêu cầu không ở trạng thái chờ tạo vận đơn hoàn.',
+        if (!this.returnShipmentRepository)
+            throw new BadRequestException(
+                'Order return shipment repository chưa sẵn sàng.',
             );
-        }
+        const record =
+            await this.returnShipmentRepository.markShipmentInTransit(returnId);
+        if (record.changed)
+            await this.publishShipmentSync(record, 'return.in_transit');
+        return record;
+    }
 
-        request.status = OrderReturnStatus.IN_TRANSIT;
-        const saved = await this.repository.save(request);
-        const order = await this.orders.findOwnedById(
-            request.ownerId,
-            request.orderId,
+    // Đưa lỗi carrier vào state riêng để UI hiển thị lý do và nút thử tạo lại vận đơn.
+    async markShipmentFailed(returnId: string, note: string) {
+        if (!this.returnShipmentRepository)
+            throw new BadRequestException(
+                'Order return shipment repository chưa sẵn sàng.',
+            );
+        const record = await this.returnShipmentRepository.markShipmentFailed(
+            returnId,
+            note,
         );
-        await this.publish(
-            saved,
-            order?.orderNumber ?? '',
-            request.ownerId,
-            'return.in_transit',
-        );
-        return saved;
+        if (record.changed)
+            await this.publishShipmentSync(record, 'return.shipment_failed');
+        return record;
+    }
+
+    // Khôi phục request sang chờ gửi hàng sau khi retry carrier đã được lưu bền vững ở Shipping Service.
+    async markShipmentRetryStarted(returnId: string) {
+        if (!this.returnShipmentRepository)
+            throw new BadRequestException(
+                'Order return shipment repository chưa sẵn sàng.',
+            );
+        const record =
+            await this.returnShipmentRepository.markShipmentRetryStarted(
+                returnId,
+            );
+        if (record.changed)
+            await this.publishShipmentSync(
+                record,
+                'return.shipment_retry_started',
+            );
+        return record;
     }
 
     async markReceived(returnId: string) {
@@ -435,7 +458,7 @@ export class OrderReturnService {
         return saved;
     }
 
-    // Shipping Service chỉ nhận snapshot tối thiểu của request đã duyệt để tạo vận đơn chiều ngược.
+    // Shipping Service nhận snapshot cho request đã duyệt hoặc lỗi shipment cần retry; các state khác không thể tạo nhãn.
     async getShippingContext(returnId: string) {
         const request = await this.repository.findOne({
             where: { id: returnId },
@@ -446,6 +469,7 @@ export class OrderReturnService {
             ![
                 OrderReturnStatus.AWAITING_SHIPMENT,
                 OrderReturnStatus.IN_TRANSIT,
+                OrderReturnStatus.SHIPMENT_FAILED,
             ].includes(request.status)
         )
             throw new ConflictException(
@@ -1075,7 +1099,17 @@ export class OrderReturnService {
 
     // Phát snapshot sau commit; request mới ưu tiên mô tả Customer, các bước sau dùng ghi chú xử lý gần nhất.
     private async publish(
-        request: OrderReturnRequest,
+        request: Pick<
+            OrderReturnRequest,
+            | 'id'
+            | 'orderId'
+            | 'shopId'
+            | 'sellerUserId'
+            | 'status'
+            | 'refundAmount'
+            | 'reason'
+            | 'reviewNote'
+        >,
         orderNumber: string,
         customerUserId: string,
         eventName: ReturnEventName,
@@ -1096,6 +1130,24 @@ export class OrderReturnService {
             note: noteOverride ?? request.reviewNote,
         });
     }
+
+    // Chỉ phát event cho transition mới và lấy order number qua Order repository; shipment không nhận full order snapshot.
+    private async publishShipmentSync(
+        record: ReturnShipmentSyncRecord,
+        eventName: ReturnEventName,
+    ): Promise<void> {
+        const order = await this.orders.findOwnedById(
+            record.ownerId,
+            record.orderId,
+        );
+        await this.publish(
+            record,
+            order?.orderNumber ?? '',
+            record.ownerId,
+            eventName,
+            record.shipmentFailureNote,
+        );
+    }
 }
 
 type ReturnEventName =
@@ -1104,6 +1156,8 @@ type ReturnEventName =
     | 'return.rejected'
     | 'return.cancelled'
     | 'return.in_transit'
+    | 'return.shipment_failed'
+    | 'return.shipment_retry_started'
     | 'return.received'
     | 'return.inspection.passed'
     | 'return.inspection.failed';
