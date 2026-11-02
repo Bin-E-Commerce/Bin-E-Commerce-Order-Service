@@ -1,19 +1,35 @@
 // File này đóng gói persistence query của Order để application service không phụ thuộc TypeORM API.
 
-import { Injectable } from '@nestjs/common';
+import {
+    ConflictException,
+    Injectable,
+    NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { FindOptionsWhere, Not, Repository } from 'typeorm';
+import { DataSource, FindOptionsWhere, Not, Repository } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
+import { OrderStatusHistory } from '@/database/order/entities/order-status-history.entity';
+import { PaymentAttempt } from '@/database/payment/entities/payment-attempt.entity';
+import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
+import { PaymentMethod } from '@/database/order/enums/payment-method.enum';
 import type { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/orders/seller-order-list-query.dto';
 import type {
     CustomerOrderTabCounts,
     SellerOrderTabCounts,
 } from '@/modules/order/application/types/order/order-response.type';
+
+// Giữ đơn Sandbox trong Seller Center khi Pay2S đã thu tiền, đang hoàn, hoàn lỗi hoặc hoàn xong.
+const SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES = [
+    'PAID',
+    'REFUND_PENDING',
+    'REFUND_FAILED',
+    'REFUNDED',
+] as const;
 
 // Các trạng thái này cho biết item đã đi vào quy trình hoàn thực tế; item bị từ chối hoặc customer tự hủy vẫn là một lượt bán hợp lệ.
 const RETURN_STATUSES_EXCLUDED_FROM_SALES = [
@@ -23,6 +39,8 @@ const RETURN_STATUSES_EXCLUDED_FROM_SALES = [
     OrderReturnStatus.RECEIVED,
     OrderReturnStatus.INSPECTION_FAILED,
     OrderReturnStatus.REFUND_PENDING,
+    OrderReturnStatus.REFUND_FAILED,
+    OrderReturnStatus.REFUNDED,
 ];
 
 // Cung cấp các query theo ownership và idempotency, không cho caller truyền owner tùy ý vào service khác.
@@ -32,7 +50,94 @@ export class OrderRepository {
         @InjectRepository(Order) private readonly repository: Repository<Order>,
         @InjectRepository(OrderReturnRequest)
         private readonly returnRepository: Repository<OrderReturnRequest>,
+        private readonly dataSource?: DataSource,
     ) {}
+
+    // Hủy order và chuyển khoản Pay2S đã thu sang hàng chờ hoàn trong cùng transaction.
+    // Khóa order trước attempt để IPN, hủy và đối soát không thể cùng quyết định trạng thái tiền.
+    // Retry trên order đã hủy vẫn sửa được dữ liệu legacy PAID mà không ghi lịch sử hủy lần hai.
+    async cancelOwnedOrder(
+        ownerId: string,
+        orderId: string,
+        reason: string | null,
+    ): Promise<{ didCancel: boolean; refundPending: boolean }> {
+        if (!this.dataSource)
+            throw new ConflictException(
+                'Order database transaction is not available.',
+            );
+        return this.dataSource.transaction(async (manager) => {
+            const orderRepository = manager.getRepository(Order);
+            const order = await orderRepository
+                .createQueryBuilder('order')
+                .where('order.id = :orderId', { orderId })
+                .andWhere('order.owner_id = :ownerId', { ownerId })
+                .setLock('pessimistic_write')
+                .getOne();
+            if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
+
+            if (order.status === OrderStatus.CANCELLED) {
+                if (
+                    order.paymentMethod === PaymentMethod.PAY2S &&
+                    order.paymentStatus === PaymentStatus.PAID
+                ) {
+                    await this.markPaidAttemptRefundPending(manager, order.id);
+                    order.paymentStatus = PaymentStatus.REFUND_PENDING;
+                    await orderRepository.save(order);
+                }
+                return {
+                    didCancel: false,
+                    refundPending:
+                        order.paymentStatus === PaymentStatus.REFUND_PENDING,
+                };
+            }
+
+            if (
+                order.status !== OrderStatus.CONFIRMED ||
+                order.fulfillmentStatus !== OrderFulfillmentStatus.TO_SHIP
+            )
+                throw new ConflictException(
+                    'Đơn hàng không còn ở trạng thái có thể hủy.',
+                );
+
+            const refundPending =
+                order.paymentMethod === PaymentMethod.PAY2S &&
+                order.paymentStatus === PaymentStatus.PAID;
+            if (refundPending) {
+                await this.markPaidAttemptRefundPending(manager, order.id);
+                order.paymentStatus = PaymentStatus.REFUND_PENDING;
+            }
+            order.status = OrderStatus.CANCELLED;
+            order.fulfillmentStatus = OrderFulfillmentStatus.CANCELLED;
+            order.cancelReason = reason;
+            order.cancelledAt = new Date();
+            await orderRepository.save(order);
+            await manager.getRepository(OrderStatusHistory).save({
+                orderId,
+                fromStatus: OrderStatus.CONFIRMED,
+                toStatus: OrderStatus.CANCELLED,
+                reason: reason ?? 'Khách hàng hủy đơn.',
+            });
+            return { didCancel: true, refundPending };
+        });
+    }
+
+    // Chỉ đổi attempt đã thu tiền; PENDING/FAILED attempt không được biến thành nghĩa vụ hoàn giả.
+    private async markPaidAttemptRefundPending(
+        manager: import('typeorm').EntityManager,
+        orderId: string,
+    ): Promise<void> {
+        const attempt = await manager
+            .getRepository(PaymentAttempt)
+            .createQueryBuilder('attempt')
+            .where('attempt.order_id = :orderId', { orderId })
+            .andWhere('attempt.status = :status', { status: 'PAID' })
+            .orderBy('attempt.created_at', 'DESC')
+            .setLock('pessimistic_write')
+            .getOne();
+        if (!attempt) return;
+        attempt.status = 'REFUND_PENDING';
+        await manager.getRepository(PaymentAttempt).save(attempt);
+    }
 
     // Tìm order cũ để retry cùng key trả đúng kết quả và không reserve stock lần hai.
     findByIdempotency(
@@ -143,7 +248,7 @@ export class OrderRepository {
         };
     }
 
-    // Đếm order đã đủ điều kiện hiển thị trong Seller Center theo stage; Sandbox đã trả tiền được tính như đơn Pay2S bình thường.
+    // Đếm order đã đủ điều kiện hiển thị trong Seller Center theo stage; Sandbox từng thu tiền vẫn nằm trong lịch sử shop.
     async countSellerTabs(shopId: string): Promise<SellerOrderTabCounts> {
         const [row, actionableReturnRow] = await Promise.all([
             this.repository
@@ -178,14 +283,19 @@ export class OrderRepository {
           )`,
                     { shopId },
                 )
-                // Attempt PAID là bằng chứng bền vững: đơn đã hoàn tiền vẫn giữ lịch sử, còn checkout chưa trả tiền vẫn bị ẩn.
+                // Đơn đã hủy luôn giữ lịch sử kể cả khi callback tiền còn chờ; các sandbox khác cần bằng chứng đã thu/đang hoàn.
                 .andWhere(
                     `(
-                    order.is_sandbox = false OR EXISTS (
+                    order.is_sandbox = false OR order.status = 'CANCELLED' OR EXISTS (
                         SELECT 1 FROM payment_attempts paid_attempt
-                        WHERE paid_attempt.order_id = order.id AND paid_attempt.status = 'PAID'
+                        WHERE paid_attempt.order_id = "order"."id"
+                          AND paid_attempt.status IN (:...sellerVisiblePaymentStatuses)
                     )
                 )`,
+                    {
+                        sellerVisiblePaymentStatuses:
+                            SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES,
+                    },
                 )
                 // Seller chỉ nhận đơn đã thanh toán hoặc COD đã xác nhận; PENDING chưa thể xử lý giao hàng.
                 .andWhere('order.status <> :pendingOrderStatus', {
@@ -255,13 +365,19 @@ export class OrderRepository {
                 { shopId },
             )
             .where('order.id IN (:...orderIds)', { orderIds })
+            // Truy vấn hydration chạy riêng sau pagination nên phải giữ lại cùng rule Sandbox của lượt chọn ID.
             .andWhere(
                 `(
-                order.is_sandbox = false OR EXISTS (
+                order.is_sandbox = false OR order.status = 'CANCELLED' OR EXISTS (
                     SELECT 1 FROM payment_attempts paid_attempt
-                    WHERE paid_attempt.order_id = order.id AND paid_attempt.status = 'PAID'
+                    WHERE paid_attempt.order_id = "order"."id"
+                      AND paid_attempt.status IN (:...sellerVisiblePaymentStatuses)
                 )
             )`,
+                {
+                    sellerVisiblePaymentStatuses:
+                        SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES,
+                },
             )
             .andWhere('order.status <> :pendingOrderStatus', {
                 pendingOrderStatus: OrderStatus.PENDING,
@@ -278,37 +394,45 @@ export class OrderRepository {
 
     // Chỉ trả detail khi order có item của shop hiện tại; join có điều kiện ngăn dữ liệu shop khác lọt vào response.
     findSellerById(shopId: string, orderId: string): Promise<Order | null> {
-        return this.repository
-            .createQueryBuilder('order')
-            .leftJoinAndSelect(
-                'order.items',
-                'item',
-                'item.seller_shop_id = :shopId',
-                { shopId },
-            )
-            .leftJoinAndSelect('order.statusHistory', 'statusHistory')
-            .where('order.id = :orderId', { orderId })
-            .andWhere(
-                `(
-                order.is_sandbox = false OR EXISTS (
+        return (
+            this.repository
+                .createQueryBuilder('order')
+                .leftJoinAndSelect(
+                    'order.items',
+                    'item',
+                    'item.seller_shop_id = :shopId',
+                    { shopId },
+                )
+                .leftJoinAndSelect('order.statusHistory', 'statusHistory')
+                .where('order.id = :orderId', { orderId })
+                // Đơn Sandbox đã chuyển sang nhánh hoàn vẫn phải đọc được trong lịch sử sau khi hủy.
+                .andWhere(
+                    `(
+                order.is_sandbox = false OR order.status = 'CANCELLED' OR EXISTS (
                     SELECT 1 FROM payment_attempts paid_attempt
-                    WHERE paid_attempt.order_id = order.id AND paid_attempt.status = 'PAID'
+                    WHERE paid_attempt.order_id = "order"."id"
+                      AND paid_attempt.status IN (:...sellerVisiblePaymentStatuses)
                 )
             )`,
-            )
-            .andWhere('order.status <> :pendingOrderStatus', {
-                pendingOrderStatus: OrderStatus.PENDING,
-            })
-            .andWhere(
-                `EXISTS (
+                    {
+                        sellerVisiblePaymentStatuses:
+                            SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES,
+                    },
+                )
+                .andWhere('order.status <> :pendingOrderStatus', {
+                    pendingOrderStatus: OrderStatus.PENDING,
+                })
+                .andWhere(
+                    `EXISTS (
           SELECT 1
           FROM order_items seller_item
           WHERE seller_item.order_id = "order"."id"
             AND seller_item.seller_shop_id = :shopId
         )`,
-                { shopId },
-            )
-            .getOne();
+                    { shopId },
+                )
+                .getOne()
+        );
     }
 
     // Repository transaction được lấy từ DataSource ở command service để order và item commit cùng nhau.
@@ -397,7 +521,7 @@ export class OrderRepository {
             .andWhere(
                 `NOT EXISTS (
         SELECT 1 FROM order_delivery_issues issue
-        WHERE issue.order_id = order.id AND issue.status = 'OPEN'
+        WHERE issue.order_id = "order"."id" AND issue.status = 'OPEN'
       )`,
             )
             .orderBy('order.delivery_confirmation_deadline', 'ASC')
@@ -405,7 +529,7 @@ export class OrderRepository {
             .getMany();
     }
 
-    // Tập trung điều kiện shop/status/search để list và count dùng cùng một tập dữ liệu; đơn Sandbox đã PAID đi đủ các stage như LIVE.
+    // Tập trung điều kiện shop/status/search để list và count dùng cùng tập dữ liệu; đơn Sandbox từng thu tiền đi đủ các stage như LIVE.
     private createSellerFilterQuery(
         shopId: string,
         query: SellerOrderListQueryDto,
@@ -419,14 +543,19 @@ export class OrderRepository {
         )`,
             { shopId },
         );
-        // Dựa vào attempt gốc thay vì trạng thái hiện tại để đơn đã refund vẫn còn trong lịch sử Seller Center.
+        // Đơn đã hủy luôn hiện dù callback còn chờ; sandbox chưa hủy chỉ hiện khi Pay2S đã thu hoặc đang xử lý hoàn.
         filterQuery.andWhere(
             `(
-                order.is_sandbox = false OR EXISTS (
+                order.is_sandbox = false OR order.status = 'CANCELLED' OR EXISTS (
                     SELECT 1 FROM payment_attempts paid_attempt
-                    WHERE paid_attempt.order_id = order.id AND paid_attempt.status = 'PAID'
+                    WHERE paid_attempt.order_id = "order"."id"
+                      AND paid_attempt.status IN (:...sellerVisiblePaymentStatuses)
                 )
             )`,
+            {
+                sellerVisiblePaymentStatuses:
+                    SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES,
+            },
         );
         // Không đưa đơn đang chờ tiền vào danh sách thao tác của seller, kể cả môi trường LIVE.
         filterQuery.andWhere('order.status <> :pendingOrderStatus', {

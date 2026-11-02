@@ -23,6 +23,14 @@ import type {
     SellerDashboardTopProduct,
 } from '@/modules/order/application/types/order/seller-dashboard-order.type';
 
+// Giữ đơn Sandbox trong read model shop khi Pay2S đã thu tiền hoặc phát sinh một trạng thái hoàn.
+const SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES = [
+    'PAID',
+    'REFUND_PENDING',
+    'REFUND_FAILED',
+    'REFUNDED',
+] as const;
+
 // Chỉ loại item đã thực sự đi vào quy trình hoàn; request bị từ chối hoặc customer tự hủy vẫn là sale hợp lệ.
 const RETURN_STATUSES_EXCLUDED_FROM_SALES = [
     OrderReturnStatus.AWAITING_SHIPMENT,
@@ -323,14 +331,19 @@ export class SellerDashboardOrderService {
                 )`,
                 { shopId },
             )
-            // Chỉ đưa Sandbox có attempt đã xác nhận vào dashboard; attempt giữ trạng thái PAID kể cả khi tiền được hoàn sau đó.
+            // Đơn đã hủy giữ trong lịch sử dù callback còn chờ; sandbox khác cần có attempt đã thu hoặc đang/đã hoàn.
             .andWhere(
                 `(
-                ord.is_sandbox = false OR EXISTS (
+                ord.is_sandbox = false OR ord.status = 'CANCELLED' OR EXISTS (
                     SELECT 1 FROM payment_attempts paid_attempt
-                    WHERE paid_attempt.order_id = ord.id AND paid_attempt.status = 'PAID'
+                    WHERE paid_attempt.order_id = ord.id
+                      AND paid_attempt.status IN (:...sellerVisiblePaymentStatuses)
                 )
             )`,
+                {
+                    sellerVisiblePaymentStatuses:
+                        SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES,
+                },
             )
             .setParameters({
                 pendingConfirmation: OrderStatus.PENDING,
@@ -370,7 +383,7 @@ export class SellerDashboardOrderService {
             .getCount();
     }
 
-    // Trả trang snapshot theo bộ lọc nghiệp vụ; Sandbox chỉ vào read model sau khi payment PAID và được ưu tiên như đơn thường.
+    // Trả snapshot lịch sử; đơn Sandbox đã hủy vẫn hiện khi callback chờ, còn các đơn khác cần bằng chứng giao dịch đã thu.
     private async getLatestOrders(
         shopId: string,
         options: SellerDashboardOrderQuery = {},
@@ -381,14 +394,19 @@ export class SellerDashboardOrderService {
             .innerJoin('ord.items', 'item', 'item.seller_shop_id = :shopId', {
                 shopId,
             })
-            // Dùng bằng chứng attempt thay cho payment_status hiện tại để lịch sử đơn hoàn tiền vẫn tồn tại.
+            // Trạng thái hủy giữ bản ghi trong lịch sử; các trạng thái attempt giữ Sandbox đã thu khi quy trình hoàn đổi trạng thái.
             .where(
                 `(
-                ord.is_sandbox = false OR EXISTS (
+                ord.is_sandbox = false OR ord.status = 'CANCELLED' OR EXISTS (
                     SELECT 1 FROM payment_attempts paid_attempt
-                    WHERE paid_attempt.order_id = ord.id AND paid_attempt.status = 'PAID'
+                    WHERE paid_attempt.order_id = ord.id
+                      AND paid_attempt.status IN (:...sellerVisiblePaymentStatuses)
                 )
             )`,
+                {
+                    sellerVisiblePaymentStatuses:
+                        SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES,
+                },
             )
             .select('ord.id', 'id')
             .addSelect('ord.order_number', 'orderNumber')
