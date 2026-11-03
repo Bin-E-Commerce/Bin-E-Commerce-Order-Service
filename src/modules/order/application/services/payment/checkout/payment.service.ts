@@ -166,13 +166,11 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         );
     }
 
-    // Admin xác nhận COD hoàn ngoài hệ thống; proof/reference được lưu để audit và retry idempotent.
+    // Admin xác nhận khoản COD đã chuyển; danh tính và thời điểm xử lý được lưu bằng trường audit chuẩn.
     async recordCodRefund(input: {
         returnRequestId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void> {
         if (!input.adminId.trim())
             throw new BadRequestException('Thiếu danh tính admin.');

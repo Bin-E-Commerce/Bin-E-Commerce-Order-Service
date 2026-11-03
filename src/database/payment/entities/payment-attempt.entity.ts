@@ -139,6 +139,42 @@ export class PaymentAttempt {
     refundFailureBy!: string | null;
 
     @Column({
+        name: 'refund_bank_code',
+        type: 'varchar',
+        length: 50,
+        nullable: true,
+        select: false,
+    })
+    refundBankCode!: string | null;
+
+    @Column({
+        name: 'refund_bank_name',
+        type: 'varchar',
+        length: 100,
+        nullable: true,
+        select: false,
+    })
+    refundBankName!: string | null;
+
+    @Column({
+        name: 'refund_account_holder',
+        type: 'varchar',
+        length: 100,
+        nullable: true,
+        select: false,
+    })
+    refundAccountHolder!: string | null;
+
+    @Column({
+        name: 'refund_account_number',
+        type: 'varchar',
+        length: 30,
+        nullable: true,
+        select: false,
+    })
+    refundAccountNumber!: string | null;
+
+    @Column({
         name: 'provider_response',
         type: 'jsonb',
         nullable: true,

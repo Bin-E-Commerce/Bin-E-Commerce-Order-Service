@@ -1,5 +1,6 @@
 // Cổng nghiệp vụ ví seller; application service không truy vấn trực tiếp hoặc phụ thuộc TypeORM.
 import type { SellerWalletSnapshot } from '@/modules/order/application/types/finance/seller-wallet.type';
+import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
 import type {
     AdminFinanceSnapshot,
     AdminWalletActivityData,
@@ -32,9 +33,7 @@ export interface SellerWalletRepositoryPort {
     recordCodRefund(input: {
         returnRequestId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void>;
     getSnapshot(
         shopId: string,
@@ -117,6 +116,11 @@ export interface SellerWalletRepositoryPort {
         page: number,
         pageSize: number,
     ): Promise<{ items: AdminRefundRecord[]; total: number }>;
+    updatePaymentAttemptRefundRecipientAccount(input: {
+        paymentAttemptId: string;
+        adminId: string;
+        account: RefundBankAccountInput;
+    }): Promise<void>;
     listAdminDeliveryIssues(): Promise<AdminDeliveryIssueRecord[]>;
     resolveAdminDeliveryIssue(input: {
         issueId: string;
@@ -127,9 +131,7 @@ export interface SellerWalletRepositoryPort {
     recordPaymentAttemptRefund(input: {
         paymentAttemptId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void>;
     markPaymentAttemptRefundFailed(
         paymentAttemptId: string,
@@ -139,9 +141,7 @@ export interface SellerWalletRepositoryPort {
     recordReturnRefund(input: {
         returnRequestId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void>;
     markReturnRefundFailed(
         returnRequestId: string,
@@ -151,9 +151,7 @@ export interface SellerWalletRepositoryPort {
     recordDeliveryIssueRefund(input: {
         issueId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void>;
     markDeliveryIssueRefundFailed(
         issueId: string,
