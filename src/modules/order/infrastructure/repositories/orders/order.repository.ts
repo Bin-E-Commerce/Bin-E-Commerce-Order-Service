@@ -17,6 +17,7 @@ import { OrderStatusHistory } from '@/database/order/entities/order-status-histo
 import { PaymentAttempt } from '@/database/payment/entities/payment-attempt.entity';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
 import { PaymentMethod } from '@/database/order/enums/payment-method.enum';
+import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
 import type { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/orders/seller-order-list-query.dto';
 import type {
     CustomerOrderTabCounts,
@@ -60,6 +61,8 @@ export class OrderRepository {
         ownerId: string,
         orderId: string,
         reason: string | null,
+        refundBankAccount?: RefundBankAccountInput,
+        requireRefundBankAccount = false,
     ): Promise<{ didCancel: boolean; refundPending: boolean }> {
         if (!this.dataSource)
             throw new ConflictException(
@@ -80,7 +83,12 @@ export class OrderRepository {
                     order.paymentMethod === PaymentMethod.PAY2S &&
                     order.paymentStatus === PaymentStatus.PAID
                 ) {
-                    await this.markPaidAttemptRefundPending(manager, order.id);
+                    await this.markPaidAttemptRefundPending(
+                        manager,
+                        order.id,
+                        refundBankAccount,
+                        requireRefundBankAccount,
+                    );
                     order.paymentStatus = PaymentStatus.REFUND_PENDING;
                     await orderRepository.save(order);
                 }
@@ -103,7 +111,12 @@ export class OrderRepository {
                 order.paymentMethod === PaymentMethod.PAY2S &&
                 order.paymentStatus === PaymentStatus.PAID;
             if (refundPending) {
-                await this.markPaidAttemptRefundPending(manager, order.id);
+                await this.markPaidAttemptRefundPending(
+                    manager,
+                    order.id,
+                    refundBankAccount,
+                    requireRefundBankAccount,
+                );
                 order.paymentStatus = PaymentStatus.REFUND_PENDING;
             }
             order.status = OrderStatus.CANCELLED;
@@ -125,6 +138,8 @@ export class OrderRepository {
     private async markPaidAttemptRefundPending(
         manager: import('typeorm').EntityManager,
         orderId: string,
+        refundBankAccount?: RefundBankAccountInput,
+        requireRefundBankAccount = false,
     ): Promise<void> {
         const attempt = await manager
             .getRepository(PaymentAttempt)
@@ -134,7 +149,26 @@ export class OrderRepository {
             .orderBy('attempt.created_at', 'DESC')
             .setLock('pessimistic_write')
             .getOne();
-        if (!attempt) return;
+        // Chặn tạo trạng thái hoàn nếu dữ liệu thanh toán thiếu attempt để admin không mất dấu khoản tiền.
+        if (!attempt) {
+            if (requireRefundBankAccount)
+                throw new ConflictException(
+                    'Không tìm thấy giao dịch Pay2S để lưu thông tin nhận hoàn.',
+                );
+            return;
+        }
+        // Khóa attempt cùng transaction order để tài khoản nhận tiền luôn gắn với đúng giao dịch được đưa vào refund queue.
+        if (requireRefundBankAccount && !refundBankAccount) {
+            throw new ConflictException(
+                'Đơn đã thanh toán; vui lòng nhập tài khoản ngân hàng nhận hoàn rồi thử lại.',
+            );
+        }
+        if (refundBankAccount) {
+            attempt.refundBankCode = refundBankAccount.bankCode;
+            attempt.refundBankName = refundBankAccount.bankName;
+            attempt.refundAccountHolder = refundBankAccount.accountHolder;
+            attempt.refundAccountNumber = refundBankAccount.accountNumber;
+        }
         attempt.status = 'REFUND_PENDING';
         await manager.getRepository(PaymentAttempt).save(attempt);
     }

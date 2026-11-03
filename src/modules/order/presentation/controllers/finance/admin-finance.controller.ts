@@ -7,6 +7,7 @@ import {
     ForbiddenException,
     Get,
     Headers,
+    Patch,
     Param,
     ParseUUIDPipe,
     Post,
@@ -28,6 +29,7 @@ import {
     CreateFinanceSettlementBatchDto,
 } from '@/modules/order/presentation/dto/finance/wallet-finance.dto';
 import { AdminFinanceActivityQueryDto } from '@/modules/order/presentation/dto/finance/admin-finance-activity-query.dto';
+import { UpdateRefundRecipientAccountDto } from '@/modules/order/presentation/dto/finance/update-refund-recipient-account.dto';
 
 // Route quản lý dòng tiền; payout chỉ được ghi nhận sau webhook Pay2S và xác nhận người nhận của admin.
 @Controller({ path: 'admin/finance', version: '1' })
@@ -145,6 +147,23 @@ export class AdminFinanceController {
         );
     }
 
+    // Lưu tài khoản khách cho refund Pay2S cũ; quyền reconcile và trạng thái pending/failed được kiểm tra trước khi ghi.
+    @Patch('refunds/payment-attempts/:attemptId/recipient-account')
+    async updatePaymentAttemptRefundRecipientAccount(
+        @Headers('x-user-id') adminId: string,
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Param('attemptId', new ParseUUIDPipe()) attemptId: string,
+        @Body() dto: UpdateRefundRecipientAccountDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
+        await this.walletRepository.updatePaymentAttemptRefundRecipientAccount({
+            paymentAttemptId: attemptId,
+            adminId,
+            account: dto,
+        });
+        return { updated: true };
+    }
+
     // Trả các khiếu nại chưa nhận hàng để admin phân xử trước khi đơn quay lại xác nhận hoặc vào hàng đợi hoàn.
     @Get('delivery-issues')
     async getDeliveryIssues(
@@ -184,9 +203,7 @@ export class AdminFinanceController {
         await this.walletRepository.recordPaymentAttemptRefund({
             paymentAttemptId: attemptId,
             adminId,
-            reference: dto.reference,
             amount: dto.amount,
-            proof: dto.proof,
         });
         return { confirmed: true };
     }
@@ -220,9 +237,7 @@ export class AdminFinanceController {
         await this.walletRepository.recordReturnRefund({
             returnRequestId: returnId,
             adminId,
-            reference: dto.reference,
             amount: dto.amount,
-            proof: dto.proof,
         });
         return { confirmed: true };
     }
@@ -256,9 +271,7 @@ export class AdminFinanceController {
         await this.walletRepository.recordDeliveryIssueRefund({
             issueId,
             adminId,
-            reference: dto.reference,
             amount: dto.amount,
-            proof: dto.proof,
         });
         return { confirmed: true };
     }
@@ -442,9 +455,7 @@ export class AdminFinanceController {
         await this.paymentService.recordCodRefund({
             returnRequestId: returnId,
             adminId,
-            reference: dto.reference,
             amount: dto.amount,
-            proof: dto.proof,
         });
         return { confirmed: true };
     }

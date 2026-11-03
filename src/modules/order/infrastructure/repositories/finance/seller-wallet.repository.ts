@@ -33,6 +33,7 @@ import {
     toCents,
 } from '@/modules/order/application/utils/money/order-money.util';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
+import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
 import type { SellerWalletSnapshot } from '@/modules/order/application/types/finance/seller-wallet.type';
 import type {
     AdminFinanceSnapshot,
@@ -634,12 +635,10 @@ export class SellerWalletRepository
             ledger: ledgerRows.map((row) => this.toPlatformLedgerRecord(row)),
             withdrawals: withdrawals.map((row) => this.toWithdrawalRecord(row)),
             // Dashboard cần mã shop để ghi rõ nguồn nạp; không cần gửi thông tin hồ sơ seller.
-            deposits: deposits.map(
-                (row): AdminWalletDepositRecord => ({
-                    ...this.toDepositRecord(row),
-                    shopId: row.shopId,
-                }),
-            ),
+            deposits: deposits.map((row): AdminWalletDepositRecord => ({
+                ...this.toDepositRecord(row),
+                shopId: row.shopId,
+            })),
             totalLedger,
             page,
             pageSize,
@@ -776,8 +775,19 @@ export class SellerWalletRepository
                    order_row.id AS "orderId", order_row.order_number AS "orderNumber",
                    order_row.payment_method::text AS "paymentMethod",
                    attempt.status::text AS status, attempt.amount::text AS amount,
-                   COALESCE(order_row.cancel_reason, 'Thanh toán Pay2S đến sau khi đơn đã đóng') AS reason,
+                   COALESCE(
+                       order_row.cancel_reason,
+                       CASE
+                           WHEN attempt.refund_account_number IS NOT NULL
+                               THEN 'Khách hủy đơn Pay2S đã thanh toán'
+                           ELSE 'Thanh toán Pay2S đến sau khi đơn đã đóng'
+                       END
+                   ) AS reason,
                    attempt.provider_transaction_id AS "providerTransactionId",
+                   attempt.refund_bank_code AS "refundBankCode",
+                   attempt.refund_bank_name AS "refundBankName",
+                   attempt.refund_account_holder AS "refundAccountHolder",
+                   attempt.refund_account_number AS "refundAccountNumber",
                    attempt.refund_failure_note AS "refundFailureNote",
                    attempt.created_at AS "createdAt"
             FROM payment_attempts attempt
@@ -789,6 +799,10 @@ export class SellerWalletRepository
                    order_row.payment_method::text AS "paymentMethod",
                    request.status::text AS status, request.refund_amount::text AS amount,
                    request.reason::text AS reason, NULL::text AS "providerTransactionId",
+                   NULL::text AS "refundBankCode",
+                   NULL::text AS "refundBankName",
+                   NULL::text AS "refundAccountHolder",
+                   NULL::text AS "refundAccountNumber",
                    request.refund_failure_note AS "refundFailureNote",
                    request.created_at AS "createdAt"
             FROM order_return_requests request
@@ -800,6 +814,10 @@ export class SellerWalletRepository
                    order_row.payment_method::text AS "paymentMethod",
                    issue.refund_status AS status, issue.refund_amount::text AS amount,
                    issue.reason::text AS reason, NULL::text AS "providerTransactionId",
+                   NULL::text AS "refundBankCode",
+                   NULL::text AS "refundBankName",
+                   NULL::text AS "refundAccountHolder",
+                   NULL::text AS "refundAccountNumber",
                    issue.refund_failure_note AS "refundFailureNote",
                    issue.created_at AS "createdAt"
             FROM order_delivery_issues issue
@@ -818,6 +836,72 @@ export class SellerWalletRepository
             ) as Promise<AdminRefundRecord[]>,
         ]);
         return { items, total: Number(countRows[0]?.total ?? 0) };
+    }
+
+    // Ghi tài khoản nhận trong cùng giao dịch khóa payment attempt để không sửa hồ sơ đã được admin hoàn tất.
+    async updatePaymentAttemptRefundRecipientAccount(input: {
+        paymentAttemptId: string;
+        adminId: string;
+        account: RefundBankAccountInput;
+    }): Promise<void> {
+        // Chuẩn hóa bank code và loại khoảng trắng trước khi lưu để dữ liệu admin nhập tương thích luồng khách hủy đơn.
+        const account = {
+            bankCode: input.account.bankCode.trim().toLowerCase(),
+            bankName: input.account.bankName.trim(),
+            accountHolder: input.account.accountHolder.trim(),
+            accountNumber: input.account.accountNumber.trim(),
+        };
+        // DTO kiểm tra ở HTTP boundary; kiểm tra lặp tại persistence giữ invariant nếu port được gọi từ luồng khác.
+        if (
+            !input.adminId.trim() ||
+            !/^[a-z0-9-]{2,50}$/.test(account.bankCode) ||
+            account.bankName.length < 2 ||
+            account.bankName.length > 100 ||
+            account.accountHolder.length < 2 ||
+            account.accountHolder.length > 100 ||
+            !/^\d{6,30}$/.test(account.accountNumber)
+        ) {
+            throw new BadRequestException(
+                'Thông tin tài khoản nhận hoàn không hợp lệ.',
+            );
+        }
+
+        await this.dataSource.transaction(async (manager) => {
+            const attemptRepository = manager.getRepository(PaymentAttempt);
+            const attempt = await attemptRepository.findOne({
+                where: { id: input.paymentAttemptId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            if (!attempt)
+                throw new BadRequestException(
+                    'Không tìm thấy giao dịch Pay2S.',
+                );
+            if (
+                attempt.status !== 'REFUND_PENDING' &&
+                attempt.status !== 'REFUND_FAILED'
+            ) {
+                throw new ConflictException(
+                    'Chỉ được cập nhật tài khoản khi khoản hoàn đang chờ hoặc chuyển thất bại.',
+                );
+            }
+
+            // Khóa đơn cùng attempt để không gắn tài khoản nhận vào một giao dịch thuộc phương thức thanh toán khác.
+            const order = await manager.getRepository(Order).findOne({
+                where: { id: attempt.orderId },
+                lock: { mode: 'pessimistic_write' },
+            });
+            if (!order || order.paymentMethod !== PaymentMethod.PAY2S) {
+                throw new ConflictException(
+                    'Giao dịch hoàn không thuộc đơn Pay2S hợp lệ.',
+                );
+            }
+
+            attempt.refundBankCode = account.bankCode;
+            attempt.refundBankName = account.bankName;
+            attempt.refundAccountHolder = account.accountHolder;
+            attempt.refundAccountNumber = account.accountNumber;
+            await attemptRepository.save(attempt);
+        });
     }
 
     // Danh sách chỉ chứa khiếu nại chưa nhận hàng đang mở; khiếu nại đã gắn return được xử lý trong luồng return riêng.
@@ -943,19 +1027,14 @@ export class SellerWalletRepository
         });
     }
 
-    // Ghi nhận hoàn Pay2S cho payment attempt đã đánh dấu chờ; amount phải khớp snapshot trước mọi sổ tiền.
+    // Chốt hoàn Pay2S sau xác nhận của admin; amount phải khớp snapshot trước khi cập nhật trạng thái và ledger.
     async recordPaymentAttemptRefund(input: {
         paymentAttemptId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void> {
-        const reference = input.reference.trim();
         if (!input.adminId.trim())
             throw new BadRequestException('Thiếu danh tính admin.');
-        if (!reference)
-            throw new BadRequestException('Cần mã giao dịch hoàn tiền.');
         await this.dataSource.transaction(async (manager) => {
             const attemptRepository = manager.getRepository(PaymentAttempt);
             const attempt = await attemptRepository.findOne({
@@ -967,12 +1046,10 @@ export class SellerWalletRepository
                     'Không tìm thấy giao dịch Pay2S.',
                 );
             if (attempt.status === 'REFUNDED') {
-                if (
-                    attempt.refundTransactionReference !== reference ||
-                    toCents(input.amount) !== toCents(attempt.amount)
-                )
+                // Retry cùng khoản tiền trả ACK; reference lịch sử không còn là điều kiện của luồng mới.
+                if (toCents(input.amount) !== toCents(attempt.amount))
                     throw new ConflictException(
-                        'Giao dịch này đã được hoàn bằng mã tham chiếu khác.',
+                        'Số tiền xác nhận không khớp giao dịch Pay2S đã hoàn.',
                     );
                 return;
             }
@@ -997,12 +1074,24 @@ export class SellerWalletRepository
                 throw new ConflictException(
                     'Giao dịch hoàn không thuộc đơn Pay2S hợp lệ.',
                 );
+            // Chặn chốt hoàn Pay2S nếu chưa có đích nhận đã xác minh, kể cả khi gọi API ngoài giao diện.
+            if (
+                !attempt.refundBankCode?.trim() ||
+                !attempt.refundBankName?.trim() ||
+                !attempt.refundAccountHolder?.trim() ||
+                !attempt.refundAccountNumber?.trim()
+            )
+                throw new ConflictException(
+                    'Cần lưu tài khoản nhận đã xác minh trước khi hoàn Pay2S.',
+                );
 
             attempt.status = 'REFUNDED';
-            attempt.refundTransactionReference = reference;
-            attempt.refundProof = input.proof;
+            // Lưu định danh admin và thời điểm ở các cột audit chuẩn; không tạo bằng chứng giả.
+            attempt.refundTransactionReference = null;
+            attempt.refundProof = null;
             attempt.refundProcessedBy = input.adminId;
-            attempt.refundProcessedAt = new Date();
+            const processedAt = new Date();
+            attempt.refundProcessedAt = processedAt;
             attempt.refundFailureNote = null;
             attempt.refundFailureBy = null;
             await attemptRepository.save(attempt);
@@ -1017,7 +1106,7 @@ export class SellerWalletRepository
                     shopId: null,
                     orderId: order.id,
                     returnRequestId: null,
-                    reference,
+                    reference: null,
                     settlementBatchId: null,
                     createdBy: input.adminId,
                 });
@@ -1792,45 +1881,35 @@ export class SellerWalletRepository
         }
     }
 
-    // Giữ endpoint cũ cho admin finance; phần nghiệp vụ chỉ cho route cũ xác nhận COD.
+    // Giữ endpoint COD cũ nhưng chỉ nhận snapshot amount; thông tin đối soát không còn bắt buộc.
     async recordCodRefund(input: {
         returnRequestId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void> {
         await this.recordManualReturnRefund(input, false);
     }
 
-    // Cho phép xác nhận hoàn thủ công cả COD và Pay2S, nhưng phương thức phải khớp payment method của order.
+    // Cả queue hoàn và endpoint COD đều dùng cùng hợp đồng xác nhận gọn, method vẫn lấy từ order trong DB.
     async recordReturnRefund(input: {
         returnRequestId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void> {
         await this.recordManualReturnRefund(input, true);
     }
 
-    // Chỉ chốt REFUNDED khi có reference và số tiền server đã tính; mọi ledger và seller reversal commit cùng transaction.
+    // Chỉ chốt REFUNDED khi amount khớp số backend đã duyệt; admin và thời điểm được ghi trong trường audit.
     private async recordManualReturnRefund(
         input: {
             returnRequestId: string;
             adminId: string;
-            reference: string;
             amount: string;
-            proof: Record<string, unknown>;
         },
         allowPay2s: boolean,
     ): Promise<void> {
-        const reference = input.reference.trim();
         if (!input.adminId.trim())
             throw new BadRequestException('Thiếu danh tính admin.');
-        // Không ghi nhận bằng chứng thiếu mã ngân hàng vì không thể đối soát hoặc retry an toàn.
-        if (!reference)
-            throw new BadRequestException('Cần mã giao dịch hoàn tiền.');
         await this.dataSource.transaction(async (manager) => {
             const requestRepository = manager.getRepository(OrderReturnRequest);
             const request = await requestRepository.findOne({
@@ -1849,17 +1928,16 @@ export class SellerWalletRepository
                 order?.paymentMethod === PaymentMethod.COD
                     ? 'COD_MANUAL'
                     : 'PAY2S_MANUAL';
-            // Cùng reference/method đã hoàn thì ACK idempotent; mã khác không được ghi đè lịch sử.
+            // Retry xác nhận idempotent theo đơn, loại thanh toán và số tiền, không phụ thuộc mã bank bên ngoài.
             if (request.status === 'REFUNDED') {
                 if (
                     !order ||
                     request.refundMethod !== expectedMethod ||
                     (!allowPay2s && expectedMethod !== 'COD_MANUAL') ||
-                    request.refundTransactionReference !== reference ||
                     toCents(input.amount) !== toCents(request.refundAmount)
                 )
                     throw new ConflictException(
-                        'Yêu cầu này đã được hoàn bằng mã giao dịch khác.',
+                        'Khoản hoàn đã xử lý không khớp phương thức hoặc số tiền.',
                     );
                 return;
             }
@@ -1918,10 +1996,11 @@ export class SellerWalletRepository
                 order.paymentMethod === PaymentMethod.COD
                     ? 'COD_MANUAL'
                     : 'PAY2S_MANUAL';
-            request.refundTransactionReference = reference;
-            request.refundProof = input.proof;
+            request.refundTransactionReference = null;
+            request.refundProof = null;
             request.refundProcessedBy = input.adminId;
-            request.refundProcessedAt = new Date();
+            const processedAt = new Date();
+            request.refundProcessedAt = processedAt;
             request.refundFailureNote = null;
             request.refundFailureBy = null;
             await requestRepository.save(request);
@@ -1933,7 +2012,7 @@ export class SellerWalletRepository
                     shopId: request.shopId,
                     orderId: request.orderId,
                     returnRequestId: request.id,
-                    reference,
+                    reference: null,
                     settlementBatchId: null,
                     createdBy: input.adminId,
                 });
@@ -2005,19 +2084,14 @@ export class SellerWalletRepository
         });
     }
 
-    // Ghi nhận hoàn toàn đơn cho khiếu nại chưa nhận hàng; order và seller ledger được khóa trong cùng transaction.
+    // Chốt khoản hoàn khiếu nại đã duyệt; amount khớp snapshot và order/seller ledger cùng transaction.
     async recordDeliveryIssueRefund(input: {
         issueId: string;
         adminId: string;
-        reference: string;
         amount: string;
-        proof: Record<string, unknown>;
     }): Promise<void> {
-        const reference = input.reference.trim();
         if (!input.adminId.trim())
             throw new BadRequestException('Thiếu danh tính admin.');
-        if (!reference)
-            throw new BadRequestException('Cần mã giao dịch hoàn tiền.');
         await this.dataSource.transaction(async (manager) => {
             const issueRepository = manager.getRepository(OrderDeliveryIssue);
             const issue = await issueRepository.findOne({
@@ -2029,12 +2103,12 @@ export class SellerWalletRepository
                     'Không tìm thấy khiếu nại giao hàng.',
                 );
             if (issue.refundStatus === 'REFUNDED') {
+                // Request lặp lại cùng số tiền là idempotent dù khoản lịch sử có mã bank cũ hay không.
                 if (
-                    issue.refundTransactionReference !== reference ||
                     toCents(input.amount) !== toCents(issue.refundAmount ?? '0')
                 )
                     throw new ConflictException(
-                        'Khiếu nại đã được hoàn bằng mã giao dịch khác.',
+                        'Số tiền xác nhận không khớp khoản hoàn đã xử lý.',
                     );
                 return;
             }
@@ -2078,10 +2152,11 @@ export class SellerWalletRepository
                 );
 
             issue.refundStatus = 'REFUNDED';
-            issue.refundTransactionReference = reference;
-            issue.refundProof = input.proof;
+            issue.refundTransactionReference = null;
+            issue.refundProof = null;
             issue.refundProcessedBy = input.adminId;
-            issue.refundProcessedAt = new Date();
+            const processedAt = new Date();
+            issue.refundProcessedAt = processedAt;
             issue.refundFailureNote = null;
             issue.refundFailureBy = null;
             await issueRepository.save(issue);
@@ -2095,7 +2170,7 @@ export class SellerWalletRepository
                 shopId: null,
                 orderId: order.id,
                 returnRequestId: null,
-                reference,
+                reference: null,
                 settlementBatchId: null,
                 createdBy: input.adminId,
             });

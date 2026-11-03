@@ -59,6 +59,10 @@ export interface AdminRefundRecord {
     amount: string;
     reason: string;
     providerTransactionId: string | null;
+    refundBankCode: string | null;
+    refundBankName: string | null;
+    refundAccountHolder: string | null;
+    refundAccountNumber: string | null;
     refundFailureNote: string | null;
     createdAt: string;
 }

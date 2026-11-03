@@ -43,6 +43,7 @@ import type {
 import type { CheckoutQuoteItem } from '@/modules/order/application/types/order/external-contracts.type';
 import type { OrderListQueryDto } from '@/modules/order/presentation/dto/orders/order-list-query.dto';
 import type { CancelOrderDto } from '@/modules/order/presentation/dto/orders/cancel-order.dto';
+import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
 import type { SellerOrderListQueryDto } from '@/modules/order/presentation/dto/orders/seller-order-list-query.dto';
 import type { SellerOrderUserContext } from '@/modules/order/application/types/order/seller-order-user-context.type';
 import {
@@ -426,10 +427,13 @@ export class OrderCommandService {
             throw new NotFoundException(
                 'Không tìm thấy đơn hàng trong phạm vi shop.',
             );
-        return this.cancelOwnedOrder(order.ownerId, orderId, {
-            ...dto,
-            reason: normalizedReason,
-        });
+        return this.cancelOwnedOrder(
+            order.ownerId,
+            orderId,
+            { reason: normalizedReason },
+            undefined,
+            false,
+        );
     }
 
     // Xác nhận owner ở lớp repository để Shipping Service không thể tự cấp quyền tracking bằng dữ liệu client.
@@ -637,14 +641,15 @@ export class OrderCommandService {
         return this.responseMapper.toSellerResponse(order);
     }
 
-    // Hủy đơn đã xác nhận, bù tồn kho và chuyển tiền Pay2S đã thu sang hàng chờ hoàn.
-    // Kiểm tra trạng thái trước tác động kho; repository khóa lại order khi commit để chặn race với vận chuyển/IPN.
+    // Hủy đơn đã xác nhận, bù tồn kho và chuyển Pay2S đã thu sang hàng chờ hoàn cùng tài khoản nhận tiền.
+    // Kiểm tra trạng thái và tài khoản trước tác động kho; repository khóa order/attempt để chặn race với IPN.
     // Sau commit, đảo ledger seller theo source key; nếu bước này lỗi, lần retry ở order CANCELLED sẽ tiếp tục bù.
     async cancelOwnedOrder(
         ownerId: string,
         orderId: string,
         dto: CancelOrderDto,
         ownerEmail?: string,
+        requireRefundBankAccount = true,
     ): Promise<OrderResponse> {
         if (!ownerId?.trim())
             throw new BadRequestException('Thiếu user context.');
@@ -653,12 +658,34 @@ export class OrderCommandService {
             orderId,
         );
         if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
-        if (order.status === OrderStatus.CANCELLED) {
+        const isAlreadyCancelled = order.status === OrderStatus.CANCELLED;
+        if (
+            !isAlreadyCancelled &&
+            (order.status !== OrderStatus.CONFIRMED ||
+                order.fulfillmentStatus !== OrderFulfillmentStatus.TO_SHIP)
+        ) {
+            throw new OrderCancellationConflictError(order.status);
+        }
+        const refundBankAccount = this.normalizeRefundBankAccount(
+            dto.refundBankAccount,
+        );
+        const paidPay2sOrder =
+            order.paymentMethod === PaymentMethod.PAY2S &&
+            order.paymentStatus === PaymentStatus.PAID;
+        // Kiểm tra trước thao tác nhả tồn kho để thiếu tài khoản không làm đơn còn nguyên nhưng hàng bị giải phóng.
+        if (requireRefundBankAccount && paidPay2sOrder && !refundBankAccount) {
+            throw new BadRequestException(
+                'Đơn đã thanh toán; vui lòng nhập tài khoản ngân hàng nhận hoàn.',
+            );
+        }
+        if (isAlreadyCancelled) {
             // Hủy trước đây có thể đã lưu trạng thái nhưng dừng trước bước đảo ví; retry sẽ tự bù phần ledger còn thiếu.
             const cancellation = await this.orderRepository.cancelOwnedOrder(
                 ownerId,
                 orderId,
                 order.cancelReason,
+                refundBankAccount,
+                requireRefundBankAccount,
             );
             if (cancellation.refundPending)
                 await this.paymentService.reverseCancelledOrder(orderId);
@@ -670,13 +697,6 @@ export class OrderCommandService {
                 throw new NotFoundException('Không tìm thấy đơn hàng.');
             return this.responseMapper.toResponse(refreshedOrder);
         }
-        if (order.status !== OrderStatus.CONFIRMED) {
-            throw new OrderCancellationConflictError(order.status);
-        }
-        if (order.fulfillmentStatus !== OrderFulfillmentStatus.TO_SHIP) {
-            throw new OrderCancellationConflictError(order.status);
-        }
-
         await this.productClient.release(
             order.idempotencyKey,
             (order.items ?? []).map((item) => ({
@@ -689,6 +709,8 @@ export class OrderCommandService {
             ownerId,
             orderId,
             dto.reason?.trim() || null,
+            refundBankAccount,
+            requireRefundBankAccount,
         );
         if (cancellation.refundPending)
             await this.paymentService.reverseCancelledOrder(orderId);
@@ -710,6 +732,33 @@ export class OrderCommandService {
             }
         }
         return this.responseMapper.toResponse(cancelledOrder);
+    }
+
+    // Chuẩn hóa khoảng trắng trước khi lưu và bỏ qua tài khoản nếu khách không gửi đủ ba trường.
+    private normalizeRefundBankAccount(
+        value?: RefundBankAccountInput,
+    ): RefundBankAccountInput | undefined {
+        if (!value) return undefined;
+        const normalized = {
+            bankCode: value.bankCode.trim().toLowerCase(),
+            bankName: value.bankName.trim(),
+            accountHolder: value.accountHolder.trim(),
+            accountNumber: value.accountNumber.trim(),
+        };
+        // DTO vẫn là ranh giới định dạng; kiểm tra này bảo vệ service khi được gọi nội bộ hoặc từ test.
+        if (
+            !/^[a-z0-9-]{2,50}$/.test(normalized.bankCode) ||
+            normalized.bankName.length < 2 ||
+            normalized.bankName.length > 100 ||
+            normalized.accountHolder.length < 2 ||
+            normalized.accountHolder.length > 100 ||
+            !/^\d{6,30}$/.test(normalized.accountNumber)
+        ) {
+            throw new BadRequestException(
+                'Thông tin ngân hàng nhận hoàn chưa hợp lệ.',
+            );
+        }
+        return normalized;
     }
 
     // Lưu aggregate, item snapshot và audit history trong cùng một transaction database.
