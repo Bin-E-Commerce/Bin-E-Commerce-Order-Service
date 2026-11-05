@@ -56,6 +56,9 @@ import { OrderEventsService } from '@/modules/order/application/services/order/o
 import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
 
 const REVIEW_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+// Đồng bộ tập ký tự với CancelOrderDto để luồng gọi nội bộ không bỏ qua quy tắc tên nhận hoàn.
+const REFUND_ACCOUNT_HOLDER_PATTERN =
+    /^\p{L}[\p{L}\p{M}]*(?:[ .'-][\p{L}\p{M}]+)*$/u;
 
 // Điều phối transaction boundary và giữ mọi kiểm tra ownership ở server-side.
 @Injectable()
@@ -328,7 +331,15 @@ export class OrderCommandService {
             orderId,
         );
         if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
-        return this.responseMapper.toResponse(order);
+        // Chỉ chi tiết đơn của đúng owner mới được ghép snapshot tài khoản hoàn để sửa hoặc đối chiếu.
+        const refundBankAccount =
+            order.status === OrderStatus.CANCELLED
+                ? await this.orderRepository.findOwnedRefundBankAccount(
+                      ownerId,
+                      orderId,
+                  )
+                : null;
+        return this.responseMapper.toResponse(order, [], refundBankAccount);
     }
 
     // Trả context tối thiểu cho Shipping Service; sellerUserId chỉ là audit context, shop scope vẫn được query từ Order DB.
@@ -695,7 +706,16 @@ export class OrderCommandService {
             );
             if (!refreshedOrder)
                 throw new NotFoundException('Không tìm thấy đơn hàng.');
-            return this.responseMapper.toResponse(refreshedOrder);
+            const storedRefundBankAccount =
+                await this.orderRepository.findOwnedRefundBankAccount(
+                    ownerId,
+                    orderId,
+                );
+            return this.responseMapper.toResponse(
+                refreshedOrder,
+                [],
+                storedRefundBankAccount,
+            );
         }
         await this.productClient.release(
             order.idempotencyKey,
@@ -731,10 +751,56 @@ export class OrderCommandService {
                 await this.orderEvents.publishCancelled(cancelledOrder);
             }
         }
-        return this.responseMapper.toResponse(cancelledOrder);
+        const storedRefundBankAccount =
+            await this.orderRepository.findOwnedRefundBankAccount(
+                ownerId,
+                orderId,
+            );
+        return this.responseMapper.toResponse(
+            cancelledOrder,
+            [],
+            storedRefundBankAccount,
+        );
     }
 
-    // Chuẩn hóa khoảng trắng trước khi lưu và bỏ qua tài khoản nếu khách không gửi đủ ba trường.
+    // Customer sửa yêu cầu đã hủy trong khi khoản hoàn chưa kết thúc; repository khóa order/attempt và giữ quyền sở hữu.
+    // Application chuẩn hóa reason/account trước persistence rồi đọc lại snapshot để response khớp dữ liệu admin sẽ xử lý.
+    async updateCancellationDetails(
+        ownerId: string,
+        orderId: string,
+        dto: CancelOrderDto,
+    ): Promise<OrderResponse> {
+        if (!ownerId?.trim())
+            throw new BadRequestException('Thiếu user context.');
+        const refundBankAccount = this.normalizeRefundBankAccount(
+            dto.refundBankAccount,
+        );
+        await this.orderRepository.updateCancelledOrderDetails(
+            ownerId,
+            orderId,
+            dto.reason?.trim() || null,
+            refundBankAccount,
+        );
+
+        const order = await this.orderRepository.findOwnedById(
+            ownerId,
+            orderId,
+        );
+        if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
+        const storedRefundBankAccount =
+            await this.orderRepository.findOwnedRefundBankAccount(
+                ownerId,
+                orderId,
+            );
+        return this.responseMapper.toResponse(
+            order,
+            [],
+            storedRefundBankAccount,
+        );
+    }
+
+    // Chuẩn hóa Unicode, khoảng trắng và chữ hoa để tên lưu ổn định cho thao tác chuyển hoàn.
+    // Tên phải còn trong giới hạn và theo đúng tập ký tự được chấp nhận; lỗi bị từ chối trước khi repository lưu.
     private normalizeRefundBankAccount(
         value?: RefundBankAccountInput,
     ): RefundBankAccountInput | undefined {
@@ -742,7 +808,12 @@ export class OrderCommandService {
         const normalized = {
             bankCode: value.bankCode.trim().toLowerCase(),
             bankName: value.bankName.trim(),
-            accountHolder: value.accountHolder.trim(),
+            // Không xóa ký tự ngoài quy tắc để tránh vô tình biến một tên sai thành tên người khác.
+            accountHolder: value.accountHolder
+                .normalize('NFC')
+                .trim()
+                .replace(/\s+/gu, ' ')
+                .toLocaleUpperCase('vi-VN'),
             accountNumber: value.accountNumber.trim(),
         };
         // DTO vẫn là ranh giới định dạng; kiểm tra này bảo vệ service khi được gọi nội bộ hoặc từ test.
@@ -752,6 +823,7 @@ export class OrderCommandService {
             normalized.bankName.length > 100 ||
             normalized.accountHolder.length < 2 ||
             normalized.accountHolder.length > 100 ||
+            !REFUND_ACCOUNT_HOLDER_PATTERN.test(normalized.accountHolder) ||
             !/^\d{6,30}$/.test(normalized.accountNumber)
         ) {
             throw new BadRequestException(

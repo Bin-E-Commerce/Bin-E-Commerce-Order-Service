@@ -6,6 +6,7 @@ import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
 import { OrderDeliveryConfirmationMethod } from '@/database/delivery/enums/order-delivery-confirmation-method.enum';
 import { OrderDeliveryConfirmationStatus } from '@/database/delivery/enums/order-delivery-confirmation-status.enum';
+import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
 
 // Contract trả về sau khi tạo hoặc đọc một order thuộc user hiện tại.
 export interface OrderResponse {
@@ -24,6 +25,8 @@ export interface OrderResponse {
     shippingAddress: Record<string, unknown>;
     items: OrderItemResponse[];
     cancelReason: string | null;
+    // Chỉ response detail được scope theo owner mới có snapshot ngân hàng của giao dịch hoàn.
+    refundBankAccount?: RefundBankAccountInput | null;
     cancelledAt: string | null;
     statusHistory: OrderStatusHistoryResponse[];
     warnings: string[];

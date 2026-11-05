@@ -15,12 +15,17 @@ import type {
     SellerOrderListItemResponse,
     SellerOrderResponse,
 } from '@/modules/order/application/types/order/order-response.type';
+import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
 
 // Không leak idempotency key, fingerprint hay ownerId ra public response.
 @Injectable()
 export class OrderResponseMapper {
-    // Map aggregate đã load relations thành response chỉ đọc.
-    toResponse(order: Order, warnings: string[] = []): OrderResponse {
+    // Map aggregate thành response chỉ đọc; tài khoản hoàn chỉ được truyền từ query đã xác minh owner.
+    toResponse(
+        order: Order,
+        warnings: string[] = [],
+        refundBankAccount?: RefundBankAccountInput | null,
+    ): OrderResponse {
         return {
             id: order.id,
             orderNumber: order.orderNumber,
@@ -50,6 +55,7 @@ export class OrderResponseMapper {
                 lineTotal: item.lineTotal,
             })),
             cancelReason: order.cancelReason,
+            refundBankAccount: refundBankAccount ?? null,
             cancelledAt: order.cancelledAt?.toISOString() ?? null,
             statusHistory: [...(order.statusHistory ?? [])]
                 .sort(

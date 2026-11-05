@@ -8,6 +8,7 @@ import {
     Param,
     ParseUUIDPipe,
     Post,
+    Put,
     Query,
 } from '@nestjs/common';
 import {
@@ -159,6 +160,20 @@ export class OrderController {
             orderId,
             dto,
             ownerEmail,
+        );
+    }
+
+    // Customer chỉ sửa thông tin yêu cầu của đơn đã hủy; service xác minh owner và trạng thái refund trước khi ghi.
+    @Put(':orderId/cancellation')
+    updateCancellationDetails(
+        @Headers('x-user-id') ownerId: string,
+        @Param('orderId', new ParseUUIDPipe()) orderId: string,
+        @Body() dto: CancelOrderDto,
+    ): Promise<OrderResponse> {
+        return this.orderCommandService.updateCancellationDetails(
+            ownerId,
+            orderId,
+            dto,
         );
     }
 }
