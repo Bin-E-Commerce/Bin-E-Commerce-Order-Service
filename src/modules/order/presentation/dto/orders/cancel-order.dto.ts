@@ -1,4 +1,6 @@
-import { Type } from 'class-transformer';
+// DTO kiểm tra payload hủy đơn ở HTTP boundary; tên nhận hoàn phải đúng định dạng tên cá nhân.
+
+import { Transform, Type } from 'class-transformer';
 import {
     IsOptional,
     IsString,
@@ -23,6 +25,21 @@ export class RefundBankAccountDto {
     @IsString()
     @MinLength(2)
     @MaxLength(100)
+    // Chuẩn hóa Unicode, khoảng trắng và chữ hoa trước các decorator kiểm tra cùng giá trị mà service sẽ lưu.
+    @Transform(({ value }) =>
+        typeof value === 'string'
+            ? value
+                  .normalize('NFC')
+                  .trim()
+                  .replace(/\s+/gu, ' ')
+                  .toLocaleUpperCase('vi-VN')
+            : value,
+    )
+    // Chỉ nhận chữ, khoảng trắng và dấu chấm/nháy đơn/gạch nối; tên vẫn phải khớp dữ liệu ngân hàng khi hoàn tiền.
+    @Matches(/^\p{L}[\p{L}\p{M}]*(?:[ .'-][\p{L}\p{M}]+)*$/u, {
+        message:
+            "Tên chủ tài khoản chỉ được gồm chữ cái, khoảng trắng, dấu chấm (.), dấu nháy đơn ('), hoặc dấu gạch nối (-).",
+    })
     accountHolder!: string;
 
     @IsString()

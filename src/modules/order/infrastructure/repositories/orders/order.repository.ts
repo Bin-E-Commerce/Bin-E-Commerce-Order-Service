@@ -134,6 +134,140 @@ export class OrderRepository {
         });
     }
 
+    // Sửa reason/account của đơn đã hủy trong cùng transaction và chỉ khi refund chưa được ghi nhận hoàn tất.
+    // Khóa order rồi attempt theo cùng thứ tự với luồng hủy để cập nhật không đè lên trạng thái xử lý hoàn đang chạy.
+    async updateCancelledOrderDetails(
+        ownerId: string,
+        orderId: string,
+        reason: string | null,
+        refundBankAccount?: RefundBankAccountInput,
+    ): Promise<void> {
+        if (!this.dataSource)
+            throw new ConflictException(
+                'Order database transaction is not available.',
+            );
+
+        await this.dataSource.transaction(async (manager) => {
+            const orderRepository = manager.getRepository(Order);
+            const order = await orderRepository
+                .createQueryBuilder('order')
+                .where('order.id = :orderId', { orderId })
+                .andWhere('order.owner_id = :ownerId', { ownerId })
+                .setLock('pessimistic_write')
+                .getOne();
+            if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
+            if (order.status !== OrderStatus.CANCELLED) {
+                throw new ConflictException(
+                    'Chỉ có thể sửa thông tin của đơn đã hủy.',
+                );
+            }
+            if (order.paymentStatus === PaymentStatus.REFUNDED) {
+                throw new ConflictException(
+                    'Khoản hoàn đã hoàn tất nên không thể sửa thông tin nhận tiền.',
+                );
+            }
+
+            // PAY2S còn ở trạng thái PAID là dữ liệu hủy cũ chưa tạo refund; bắt buộc có tài khoản trước khi chuyển sang hàng chờ.
+            if (
+                order.paymentMethod === PaymentMethod.PAY2S &&
+                order.paymentStatus === PaymentStatus.PAID &&
+                !refundBankAccount
+            ) {
+                throw new ConflictException(
+                    'Vui lòng nhập tài khoản ngân hàng nhận hoàn.',
+                );
+            }
+
+            order.cancelReason = reason;
+            if (refundBankAccount) {
+                if (order.paymentMethod !== PaymentMethod.PAY2S) {
+                    throw new ConflictException(
+                        'Đơn này không có khoản Pay2S cần hoàn tiền.',
+                    );
+                }
+
+                const attemptRepository = manager.getRepository(PaymentAttempt);
+                const attempt = await attemptRepository
+                    .createQueryBuilder('attempt')
+                    .addSelect([
+                        'attempt.refundBankCode',
+                        'attempt.refundBankName',
+                        'attempt.refundAccountHolder',
+                        'attempt.refundAccountNumber',
+                    ])
+                    .where('attempt.order_id = :orderId', { orderId })
+                    .andWhere('attempt.status IN (:...statuses)', {
+                        statuses: ['PAID', 'REFUND_PENDING', 'REFUND_FAILED'],
+                    })
+                    .orderBy('attempt.created_at', 'DESC')
+                    .setLock('pessimistic_write')
+                    .getOne();
+                if (!attempt || attempt.refundProcessedAt) {
+                    throw new ConflictException(
+                        'Không thể thay đổi tài khoản sau khi giao dịch hoàn đã được xử lý.',
+                    );
+                }
+
+                attempt.refundBankCode = refundBankAccount.bankCode;
+                attempt.refundBankName = refundBankAccount.bankName;
+                attempt.refundAccountHolder = refundBankAccount.accountHolder;
+                attempt.refundAccountNumber = refundBankAccount.accountNumber;
+                if (attempt.status === 'PAID') {
+                    attempt.status = 'REFUND_PENDING';
+                    order.paymentStatus = PaymentStatus.REFUND_PENDING;
+                }
+                await attemptRepository.save(attempt);
+            }
+
+            await orderRepository.save(order);
+        });
+    }
+
+    // Đọc tài khoản hoàn snapshot của đúng order và owner; các cột select:false chỉ được mở trong query này.
+    async findOwnedRefundBankAccount(
+        ownerId: string,
+        orderId: string,
+    ): Promise<RefundBankAccountInput | null> {
+        const attempt = await this.repository.manager
+            .getRepository(PaymentAttempt)
+            .createQueryBuilder('attempt')
+            .addSelect([
+                'attempt.refundBankCode',
+                'attempt.refundBankName',
+                'attempt.refundAccountHolder',
+                'attempt.refundAccountNumber',
+            ])
+            .innerJoin(Order, 'order', 'order.id = attempt.orderId')
+            .where('order.id = :orderId', { orderId })
+            .andWhere('order.owner_id = :ownerId', { ownerId })
+            .andWhere('attempt.status IN (:...statuses)', {
+                statuses: [
+                    'PAID',
+                    'REFUND_PENDING',
+                    'REFUND_FAILED',
+                    'REFUNDED',
+                ],
+            })
+            .orderBy('attempt.created_at', 'DESC')
+            .getOne();
+
+        if (
+            !attempt?.refundBankCode ||
+            !attempt.refundBankName ||
+            !attempt.refundAccountHolder ||
+            !attempt.refundAccountNumber
+        ) {
+            return null;
+        }
+
+        return {
+            bankCode: attempt.refundBankCode,
+            bankName: attempt.refundBankName,
+            accountHolder: attempt.refundAccountHolder,
+            accountNumber: attempt.refundAccountNumber,
+        };
+    }
+
     // Chỉ đổi attempt đã thu tiền; PENDING/FAILED attempt không được biến thành nghĩa vụ hoàn giả.
     private async markPaidAttemptRefundPending(
         manager: import('typeorm').EntityManager,
