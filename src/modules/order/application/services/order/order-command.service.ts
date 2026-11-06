@@ -58,7 +58,7 @@ import { PaymentService } from '@/modules/order/application/services/payment/che
 const REVIEW_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // Đồng bộ tập ký tự với CancelOrderDto để luồng gọi nội bộ không bỏ qua quy tắc tên nhận hoàn.
 const REFUND_ACCOUNT_HOLDER_PATTERN =
-    /^\p{L}[\p{L}\p{M}]*(?:[ .'-][\p{L}\p{M}]+)*$/u;
+    /^\p{L}[\p{L}\p{M}]*(?: \p{L}[\p{L}\p{M}]*)*$/u;
 
 // Điều phối transaction boundary và giữ mọi kiểm tra ownership ở server-side.
 @Injectable()
@@ -772,13 +772,20 @@ export class OrderCommandService {
     ): Promise<OrderResponse> {
         if (!ownerId?.trim())
             throw new BadRequestException('Thiếu user context.');
+        const reason = dto.reason?.trim();
+        // Không cho request sửa xóa lý do cũ hoặc thay bằng chuỗi trắng; dữ liệu đang hiển thị luôn có lý do hợp lệ.
+        if (!reason) {
+            throw new BadRequestException(
+                'Vui lòng chọn hoặc nhập lý do hủy đơn hàng.',
+            );
+        }
         const refundBankAccount = this.normalizeRefundBankAccount(
             dto.refundBankAccount,
         );
         await this.orderRepository.updateCancelledOrderDetails(
             ownerId,
             orderId,
-            dto.reason?.trim() || null,
+            reason,
             refundBankAccount,
         );
 

@@ -2,6 +2,7 @@
 
 import { Transform, Type } from 'class-transformer';
 import {
+    IsDefined,
     IsOptional,
     IsString,
     Matches,
@@ -35,10 +36,10 @@ export class RefundBankAccountDto {
                   .toLocaleUpperCase('vi-VN')
             : value,
     )
-    // Chỉ nhận chữ, khoảng trắng và dấu chấm/nháy đơn/gạch nối; tên vẫn phải khớp dữ liệu ngân hàng khi hoàn tiền.
-    @Matches(/^\p{L}[\p{L}\p{M}]*(?:[ .'-][\p{L}\p{M}]+)*$/u, {
+    // Chỉ nhận chữ Unicode và khoảng trắng; tên vẫn phải khớp dữ liệu ngân hàng khi hoàn tiền.
+    @Matches(/^\p{L}[\p{L}\p{M}]*(?: \p{L}[\p{L}\p{M}]*)*$/u, {
         message:
-            "Tên chủ tài khoản chỉ được gồm chữ cái, khoảng trắng, dấu chấm (.), dấu nháy đơn ('), hoặc dấu gạch nối (-).",
+            'Tên chủ tài khoản chỉ được gồm chữ cái có dấu và khoảng trắng.',
     })
     accountHolder!: string;
 
@@ -47,10 +48,19 @@ export class RefundBankAccountDto {
     accountNumber!: string;
 }
 
-// Lý do hủy tùy chọn; tài khoản nhận hoàn chỉ gửi khi khách hủy đơn Pay2S đã thu tiền.
+// Tài khoản nhận hoàn chỉ gửi khi khách hủy đơn Pay2S đã thu tiền.
 export class CancelOrderDto {
-    @IsOptional()
+    // Trim trước validation để chuỗi toàn khoảng trắng cũng bị coi là chưa nhập lý do.
+    @Transform(({ value }) =>
+        typeof value === 'string' ? value.trim() : value,
+    )
+    @IsDefined({
+        message: 'Vui lòng chọn hoặc nhập lý do hủy đơn hàng.',
+    })
     @IsString()
+    @MinLength(1, {
+        message: 'Vui lòng chọn hoặc nhập lý do hủy đơn hàng.',
+    })
     @MaxLength(500)
     reason?: string;
 
