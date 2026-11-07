@@ -4,6 +4,7 @@ import {
     ArrayMinSize,
     IsArray,
     IsBoolean,
+    IsDateString,
     IsEnum,
     IsIn,
     IsOptional,
@@ -33,10 +34,32 @@ export class CreateOrderReturnDto {
     description?: string;
 
     @IsArray()
+    @ArrayMinSize(1)
     @ArrayMaxSize(6)
     @ValidateNested({ each: true })
     @Type(() => ReturnEvidenceDto)
     evidence?: ReturnEvidenceDto[];
+}
+
+// Payload customer được phép sửa khi return vẫn đang chờ shop xử lý.
+export class UpdateOrderReturnDto {
+    @IsDateString()
+    expectedUpdatedAt!: string;
+
+    @IsEnum(OrderReturnReason)
+    reason!: OrderReturnReason;
+
+    @IsOptional()
+    @IsString()
+    @MaxLength(1000)
+    description?: string;
+
+    @IsArray()
+    @ArrayMinSize(1)
+    @ArrayMaxSize(6)
+    @ValidateNested({ each: true })
+    @Type(() => ReturnEvidenceDto)
+    evidence!: ReturnEvidenceDto[];
 }
 
 export class ReturnEvidenceDto {

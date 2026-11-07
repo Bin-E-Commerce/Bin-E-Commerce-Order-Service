@@ -221,6 +221,14 @@ export class OrderDeliveryConfirmationService {
                 throw new BadRequestException(
                     'Vui lòng chọn lý do đơn hàng có vấn đề.',
                 );
+            // Mọi nhánh tạo yêu cầu hoàn phải có bằng chứng; khiếu nại chưa nhận hàng giữ quy trình riêng.
+            if (
+                dto.reason !== OrderDeliveryIssueReason.NOT_RECEIVED &&
+                !dto.evidence?.length
+            )
+                throw new BadRequestException(
+                    'Yêu cầu hoàn hàng cần ít nhất một ảnh hoặc video bằng chứng.',
+                );
             const itemIds = dto.itemIds ?? [];
             // Đọc item sau khi đã khóa order; tránh LEFT JOIN trong câu lệnh FOR UPDATE khiến PostgreSQL từ chối khóa phía nullable.
             const orderItems = await manager.getRepository(OrderItem).find({

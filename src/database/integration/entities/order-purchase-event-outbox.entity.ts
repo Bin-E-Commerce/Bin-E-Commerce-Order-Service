@@ -2,9 +2,10 @@ import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
 import type {
     OrderCreatedEvent,
     OrderPurchaseEvent,
+    ReturnChangedEvent,
 } from '@common/kafka/events/order.events';
 
-// Outbox giữ order/purchase event trong Order DB để worker gửi lại sau khi Kafka phục hồi.
+// Outbox giữ integration event trong Order DB để worker gửi lại sau khi Kafka phục hồi.
 @Entity({ name: 'order_purchase_event_outbox' })
 @Index('idx_order_purchase_event_outbox_pending', ['status', 'availableAt'])
 export class OrderPurchaseEventOutboxEntity {
@@ -18,7 +19,7 @@ export class OrderPurchaseEventOutboxEntity {
     aggregateId!: string;
 
     @Column({ name: 'payload', type: 'jsonb' })
-    payload!: OrderCreatedEvent | OrderPurchaseEvent;
+    payload!: OrderCreatedEvent | OrderPurchaseEvent | ReturnChangedEvent;
 
     @Column({ name: 'status', type: 'varchar', length: 16, default: 'PENDING' })
     status!: 'PENDING' | 'PROCESSING' | 'PUBLISHED';
