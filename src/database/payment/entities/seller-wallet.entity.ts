@@ -34,6 +34,14 @@ export class SellerWallet {
     })
     availableBalance!: string;
 
+    // Ngày đến hạn chỉ được tạo khi available balance lần đầu chuyển âm và được DB trigger giữ ổn định.
+    @Column({ name: 'debt_due_at', type: 'timestamptz', nullable: true })
+    debtDueAt!: Date | null;
+
+    // Marker đã đồng bộ sang Seller Service; không phải số dư và không thay thế ledger.
+    @Column({ name: 'finance_locked_at', type: 'timestamptz', nullable: true })
+    financeLockedAt!: Date | null;
+
     @Column({
         name: 'reserved_balance',
         type: 'numeric',

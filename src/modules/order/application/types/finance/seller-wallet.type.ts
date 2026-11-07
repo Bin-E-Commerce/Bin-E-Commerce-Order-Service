@@ -18,6 +18,14 @@ export interface SellerWalletSnapshot {
     total: number;
     page: number;
     pageSize: number;
+    debt?: {
+        debtBalance: string;
+        debtLimit: string;
+        dueAt: string | null;
+        isAtLimit: boolean;
+        isOverdue: boolean;
+        shopLocked: boolean;
+    };
 }
 
 // Snapshot tài khoản nhận chỉ hiển thị số đã che; raw account number ở backend chỉ được gửi cho admin có quyền tài chính.
