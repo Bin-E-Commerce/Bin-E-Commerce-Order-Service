@@ -14,6 +14,11 @@ export type WithdrawalTransferLookup =
     | { withdrawalId: string; transferMemoCode?: never }
     | { withdrawalId?: never; transferMemoCode: string };
 
+// Memo mới gắn UUID payment attempt; memo order number cũ chỉ được dùng nếu tìm đúng một khoản hoàn.
+export type RefundTransferLookup =
+    | { refundTransferCode: string; legacyOrderNumberCode?: never }
+    | { refundTransferCode?: never; legacyOrderNumberCode: string };
+
 export type WithdrawalTransferStagingResult =
     | 'STAGED'
     | 'DUPLICATE'
@@ -23,6 +28,17 @@ export type WithdrawalTransferStagingResult =
     | 'ALREADY_PAID'
     | 'ALREADY_HAS_EVENT'
     | 'LEGACY_PROCESSING'
+    | 'EVENT_ALREADY_USED';
+
+// Kết quả ghép giao dịch OUT với khoản hoàn Pay2S; chỉ STAGED mới có candidate mới được lưu.
+export type RefundTransferStagingResult =
+    | 'STAGED'
+    | 'DUPLICATE'
+    | 'NOT_FOUND'
+    | 'AMBIGUOUS'
+    | 'NOT_PROCESSING'
+    | 'AMOUNT_MISMATCH'
+    | 'ALREADY_HAS_EVENT'
     | 'EVENT_ALREADY_USED';
 
 export type WithdrawalConfirmationResult =

@@ -63,6 +63,7 @@ export class OrderRepository {
         reason: string | null,
         refundBankAccount?: RefundBankAccountInput,
         requireRefundBankAccount = false,
+        refundBankAccountId?: string,
     ): Promise<{ didCancel: boolean; refundPending: boolean }> {
         if (!this.dataSource)
             throw new ConflictException(
@@ -88,6 +89,7 @@ export class OrderRepository {
                         order.id,
                         refundBankAccount,
                         requireRefundBankAccount,
+                        refundBankAccountId,
                     );
                     order.paymentStatus = PaymentStatus.REFUND_PENDING;
                     await orderRepository.save(order);
@@ -116,6 +118,7 @@ export class OrderRepository {
                     order.id,
                     refundBankAccount,
                     requireRefundBankAccount,
+                    refundBankAccountId,
                 );
                 order.paymentStatus = PaymentStatus.REFUND_PENDING;
             }
@@ -134,14 +137,15 @@ export class OrderRepository {
         });
     }
 
-    // Sửa reason/account của đơn đã hủy trong cùng transaction và chỉ khi refund chưa được ghi nhận hoàn tất.
-    // Khóa order rồi attempt theo cùng thứ tự với luồng hủy để cập nhật không đè lên trạng thái xử lý hoàn đang chạy.
+    // Chỉnh lý do và tài khoản nhận của đơn đã hủy; khóa order rồi các attempt mở để customer và admin dùng cùng người nhận.
     async updateCancelledOrderDetails(
         ownerId: string,
         orderId: string,
         reason: string | null,
         refundBankAccount?: RefundBankAccountInput,
+        refundBankAccountId?: string,
     ): Promise<void> {
+        // Thiếu transaction thì từ chối cập nhật để không lưu lý do mà bỏ sót snapshot ngân hàng.
         if (!this.dataSource)
             throw new ConflictException(
                 'Order database transaction is not available.',
@@ -155,7 +159,9 @@ export class OrderRepository {
                 .andWhere('order.owner_id = :ownerId', { ownerId })
                 .setLock('pessimistic_write')
                 .getOne();
+            // Lọc theo owner ngay trong truy vấn khóa để không tiết lộ hay sửa đơn của customer khác.
             if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
+            // Sau khi đơn chuyển trạng thái, chỉ cho sửa thông tin hủy; khoản đã hoàn là bằng chứng tài chính bất biến.
             if (order.status !== OrderStatus.CANCELLED) {
                 throw new ConflictException(
                     'Chỉ có thể sửa thông tin của đơn đã hủy.',
@@ -167,7 +173,7 @@ export class OrderRepository {
                 );
             }
 
-            // PAY2S còn ở trạng thái PAID là dữ liệu hủy cũ chưa tạo refund; bắt buộc có tài khoản trước khi chuyển sang hàng chờ.
+            // PAY2S còn PAID là dữ liệu hủy cũ chưa có recipient; bắt buộc lấy tài khoản trước khi tạo nghĩa vụ hoàn.
             if (
                 order.paymentMethod === PaymentMethod.PAY2S &&
                 order.paymentStatus === PaymentStatus.PAID &&
@@ -180,6 +186,7 @@ export class OrderRepository {
 
             order.cancelReason = reason;
             if (refundBankAccount) {
+                // Không gắn thông tin ngân hàng vào đơn COD hay nguồn khác vì admin chỉ chuyển hoàn Pay2S tại đây.
                 if (order.paymentMethod !== PaymentMethod.PAY2S) {
                     throw new ConflictException(
                         'Đơn này không có khoản Pay2S cần hoàn tiền.',
@@ -187,7 +194,7 @@ export class OrderRepository {
                 }
 
                 const attemptRepository = manager.getRepository(PaymentAttempt);
-                const attempt = await attemptRepository
+                const attempts = await attemptRepository
                     .createQueryBuilder('attempt')
                     .addSelect([
                         'attempt.refundBankCode',
@@ -199,28 +206,107 @@ export class OrderRepository {
                     .andWhere('attempt.status IN (:...statuses)', {
                         statuses: ['PAID', 'REFUND_PENDING', 'REFUND_FAILED'],
                     })
-                    .orderBy('attempt.created_at', 'DESC')
+                    .andWhere('attempt.refundProcessedAt IS NULL')
+                    .orderBy('attempt.created_at', 'ASC')
                     .setLock('pessimistic_write')
-                    .getOne();
-                if (!attempt || attempt.refundProcessedAt) {
+                    .getMany();
+                // Rỗng nghĩa là không còn giao dịch chưa xử lý để sửa; không được làm mới dữ liệu sau khi hoàn xong.
+                if (attempts.length === 0) {
                     throw new ConflictException(
                         'Không thể thay đổi tài khoản sau khi giao dịch hoàn đã được xử lý.',
                     );
                 }
 
-                attempt.refundBankCode = refundBankAccount.bankCode;
-                attempt.refundBankName = refundBankAccount.bankName;
-                attempt.refundAccountHolder = refundBankAccount.accountHolder;
-                attempt.refundAccountNumber = refundBankAccount.accountNumber;
-                if (attempt.status === 'PAID') {
-                    attempt.status = 'REFUND_PENDING';
+                // Cập nhật cùng recipient cho mọi attempt chưa xử lý; danh sách đã loại giao dịch hoàn tất và được khóa theo thứ tự tạo.
+                for (const attempt of attempts) {
+                    attempt.refundBankCode = refundBankAccount.bankCode;
+                    attempt.refundBankName = refundBankAccount.bankName;
+                    attempt.refundAccountHolder =
+                        refundBankAccount.accountHolder;
+                    attempt.refundAccountNumber =
+                        refundBankAccount.accountNumber;
+                    attempt.refundBankAccountId = refundBankAccountId ?? null;
+                    if (attempt.status === 'PAID') {
+                        attempt.status = 'REFUND_PENDING';
+                    }
+                }
+                if (
+                    attempts.some(
+                        (attempt) => attempt.status === 'REFUND_PENDING',
+                    )
+                ) {
                     order.paymentStatus = PaymentStatus.REFUND_PENDING;
                 }
-                await attemptRepository.save(attempt);
+                await attemptRepository.save(attempts);
             }
 
             await orderRepository.save(order);
         });
+    }
+
+    // Đồng bộ theo account ID; legacy dùng snapshot cũ hoặc tài khoản duy nhất vì các bản cũ không lưu ID.
+    async syncPendingRefundRecipientAccount(input: {
+        ownerId: string;
+        accountId: string;
+        allowSingleAccountLegacySync: boolean;
+        previousAccount: RefundBankAccountInput;
+        account: RefundBankAccountInput;
+    }): Promise<number> {
+        const previous = input.previousAccount;
+        const account = input.account;
+        const updated = (await this.repository.manager.query(
+            `
+                UPDATE payment_attempts AS attempt
+                SET refund_bank_account_id = $2,
+                    refund_bank_code = $9,
+                    refund_bank_name = $10,
+                    refund_account_holder = $11,
+                    refund_account_number = $12
+                FROM orders AS order_row
+                WHERE order_row.id = attempt.order_id
+                  AND order_row.owner_id = $1
+                  AND attempt.status IN ('REFUND_PENDING', 'REFUND_FAILED')
+                  AND attempt.refund_processed_at IS NULL
+                  AND (
+                      attempt.refund_bank_account_id = $2
+                      OR (
+                          attempt.refund_bank_account_id IS NULL
+                          AND (
+                              (
+                                  attempt.refund_bank_code = $3
+                                  AND attempt.refund_bank_name = $4
+                                  AND attempt.refund_account_holder = $5
+                                  AND attempt.refund_account_number = $6
+                              )
+                              OR (
+                                  attempt.refund_bank_code = $7
+                                  AND attempt.refund_bank_name = $8
+                                  AND attempt.refund_account_holder = $11
+                                  AND attempt.refund_account_number = $12
+                              )
+                          OR ($13::boolean = true)
+                          )
+                      )
+                  )
+                RETURNING attempt.id
+            `,
+            [
+                input.ownerId,
+                input.accountId,
+                previous.bankCode,
+                previous.bankName,
+                previous.accountHolder,
+                previous.accountNumber,
+                account.bankCode,
+                account.bankName,
+                account.bankCode,
+                account.bankName,
+                account.accountHolder,
+                account.accountNumber,
+                input.allowSingleAccountLegacySync,
+            ],
+        )) as Array<{ id: string }>;
+        return updated.length;
     }
 
     // Đọc tài khoản hoàn snapshot của đúng order và owner; các cột select:false chỉ được mở trong query này.
@@ -274,6 +360,7 @@ export class OrderRepository {
         orderId: string,
         refundBankAccount?: RefundBankAccountInput,
         requireRefundBankAccount = false,
+        refundBankAccountId?: string,
     ): Promise<void> {
         const attempt = await manager
             .getRepository(PaymentAttempt)
@@ -302,6 +389,7 @@ export class OrderRepository {
             attempt.refundBankName = refundBankAccount.bankName;
             attempt.refundAccountHolder = refundBankAccount.accountHolder;
             attempt.refundAccountNumber = refundBankAccount.accountNumber;
+            attempt.refundBankAccountId = refundBankAccountId ?? null;
         }
         attempt.status = 'REFUND_PENDING';
         await manager.getRepository(PaymentAttempt).save(attempt);

@@ -12,6 +12,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { Pay2sBankTransaction } from '@/modules/order/application/types/payments/pay2s-payout.type';
+import { findRefundTransferLookupInMemo } from '@/modules/order/application/utils/payments/refund-transfer-memo.util';
 import { findWithdrawalTransferLookupInMemo } from '@/modules/order/application/utils/payments/withdrawal-transfer-memo.util';
 import {
     fromCents,
@@ -77,9 +78,8 @@ export class Pay2sPayoutReconciliationService {
         return { success: true };
     }
 
-    // Chỉ event OUT từ đúng tài khoản nguồn, có ID giao dịch, số tiền hợp lệ và memo payout cũ/mới mới được stage.
-    // UUID đầy đủ giữ tương thích lịch sử; memo code ngắn được tra qua cột duy nhất để không cắt hoặc đoán payout ID.
-    // Candidate vẫn chờ admin kiểm tra tài khoản nhận vì webhook Pay2S không xác thực được người thụ hưởng.
+    // Chỉ event OUT từ tài khoản nguồn đã cấu hình, có ID/số tiền hợp lệ mới được đối chiếu theo memo.
+    // Mã HOAN khớp payment attempt; mã RUT hoặc UUID cũ khớp withdrawal; webhook chỉ stage để admin kiểm tra người nhận.
     private async stageTransaction(
         transaction: Pay2sBankTransaction,
         sourceAccountNumber: string,
@@ -98,14 +98,10 @@ export class Pay2sPayoutReconciliationService {
             return;
         }
 
-        const withdrawalLookup = findWithdrawalTransferLookupInMemo(
-            transaction.content,
-        );
-        if (!withdrawalLookup || !eventId) {
-            this.logIgnored(eventId ?? 'unknown', 'memo_or_event_id_missing');
+        if (!eventId) {
+            this.logIgnored('unknown', 'transaction_id_missing');
             return;
         }
-
         const amount = this.readMoney(transaction.transferAmount);
         if (eventId.length > 120 || amount === null) {
             this.logIgnored(eventId, 'transaction_fields_invalid');
@@ -113,6 +109,33 @@ export class Pay2sPayoutReconciliationService {
         }
 
         const transactionNumber = this.readText(transaction.transactionNumber);
+        const refundLookup = findRefundTransferLookupInMemo(
+            transaction.content,
+        );
+        if (refundLookup) {
+            const result = await this.walletRepository.stagePay2sRefundTransfer(
+                {
+                    ...refundLookup,
+                    amount,
+                    providerTransactionId: eventId,
+                    transactionNumber:
+                        transactionNumber && transactionNumber.length <= 120
+                            ? transactionNumber
+                            : null,
+                },
+            );
+            if (result !== 'STAGED' && result !== 'DUPLICATE')
+                this.logIgnored(eventId, result.toLowerCase());
+            return;
+        }
+
+        const withdrawalLookup = findWithdrawalTransferLookupInMemo(
+            transaction.content,
+        );
+        if (!withdrawalLookup) {
+            this.logIgnored(eventId, 'refund_or_withdrawal_memo_missing');
+            return;
+        }
         const result = await this.walletRepository.stagePay2sWithdrawalTransfer(
             {
                 ...withdrawalLookup,

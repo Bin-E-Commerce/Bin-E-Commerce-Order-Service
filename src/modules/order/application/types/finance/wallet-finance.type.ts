@@ -48,14 +48,15 @@ export interface AdminCodRemittanceRecord {
     createdAt: string;
 }
 
-// Một dòng hàng đợi hoàn có nguồn phân biệt để admin không nhầm tiền hoàn đơn, return và khiếu nại giao hàng.
+// Hồ sơ hoàn đang chờ, lỗi hoặc hoàn tất.
+// Nguồn được giữ riêng để admin phân biệt các luồng nghiệp vụ.
 export interface AdminRefundRecord {
     sourceType: 'PAYMENT_ATTEMPT' | 'ORDER_RETURN' | 'DELIVERY_ISSUE';
     id: string;
     orderId: string;
     orderNumber: string;
     paymentMethod: 'COD' | 'PAY2S';
-    status: 'REFUND_PENDING' | 'REFUND_FAILED';
+    status: 'REFUND_PENDING' | 'REFUND_FAILED' | 'REFUNDED';
     amount: string;
     reason: string;
     providerTransactionId: string | null;
@@ -63,7 +64,13 @@ export interface AdminRefundRecord {
     refundBankName: string | null;
     refundAccountHolder: string | null;
     refundAccountNumber: string | null;
+    refundTransferMemo: string | null;
     refundFailureNote: string | null;
+    refundOutTransactionId: string | null;
+    refundOutTransactionNumber: string | null;
+    refundOutAmount: string | null;
+    refundOutDetectedAt: string | null;
+    refundProcessedAt: string | null;
     createdAt: string;
 }
 
@@ -114,6 +121,11 @@ export interface AdminFinanceSnapshot {
     totalLedger: number;
     page: number;
     pageSize: number;
+    sellerDebtBalance?: string;
+    sellerDebtShopCount?: number;
+    overdueSellerDebtBalance?: string;
+    overdueSellerDebtShopCount?: number;
+    sellerDebtLockedShopCount?: number;
 }
 
 // Các chuỗi đếm cho biểu đồ vận hành; không trả số dư hoặc thông tin tài khoản seller.

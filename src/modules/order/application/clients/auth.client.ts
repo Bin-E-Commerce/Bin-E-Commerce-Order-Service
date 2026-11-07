@@ -7,7 +7,10 @@ import {
     CheckoutResourceNotFoundError,
     OrderDependencyUnavailableError,
 } from '@/modules/order/application/errors/order.errors';
-import type { ShippingAddressResponse } from '@/modules/order/application/types/order/external-contracts.type';
+import type {
+    OwnedRefundBankAccountResponse,
+    ShippingAddressResponse,
+} from '@/modules/order/application/types/order/external-contracts.type';
 
 // Chỉ expose một thao tác đọc địa chỉ thuộc owner hiện tại cho use case checkout.
 @Injectable()
@@ -49,6 +52,42 @@ export class AuthClient {
             if (!response.ok)
                 throw new OrderDependencyUnavailableError('Auth Service');
             return (await response.json()) as ShippingAddressResponse;
+        } catch (error) {
+            if (
+                error instanceof CheckoutResourceNotFoundError ||
+                error instanceof OrderDependencyUnavailableError
+            ) {
+                throw error;
+            }
+            throw new OrderDependencyUnavailableError('Auth Service');
+        }
+    }
+
+    // Auth kiểm tra accountId thuộc đúng owner rồi mới trả số tài khoản đầy đủ để Order lưu snapshot.
+    async getOwnedRefundBankAccount(
+        ownerId: string,
+        accountId: string,
+    ): Promise<OwnedRefundBankAccountResponse> {
+        try {
+            const response = await fetch(
+                `${this.targetBase}/api/v1/internal/users/refund-bank-accounts/${accountId}`,
+                {
+                    signal: AbortSignal.timeout(5000),
+                    headers: {
+                        accept: 'application/json',
+                        'x-user-id': ownerId,
+                        'x-internal-service-token': this.internalToken,
+                    },
+                },
+            );
+            if (response.status === 404) {
+                throw new CheckoutResourceNotFoundError(
+                    'Không tìm thấy tài khoản nhận hoàn của tài khoản này.',
+                );
+            }
+            if (!response.ok)
+                throw new OrderDependencyUnavailableError('Auth Service');
+            return (await response.json()) as OwnedRefundBankAccountResponse;
         } catch (error) {
             if (
                 error instanceof CheckoutResourceNotFoundError ||

@@ -17,6 +17,7 @@ import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { SellerOrderUserContext } from '@/modules/order/application/types/order/seller-order-user-context.type';
 import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
+import { SellerWalletDebtService } from '@/modules/order/application/services/finance/seller-wallet-debt.service';
 import {
     CreateWalletDepositDto,
     CreateWalletWithdrawalDto,
@@ -30,14 +31,16 @@ export class SellerFinanceController {
         @Inject(SELLER_WALLET_REPOSITORY)
         private readonly sellerWalletRepository: SellerWalletRepositoryPort,
         private readonly paymentService: PaymentService,
+        private readonly sellerWalletDebtService: SellerWalletDebtService,
     ) {}
 
-    // Kiểm tra danh tính/quyền trước khi gọi Seller Service resolve shop, rồi phân trang ledger ở Order Service.
+    // Kiểm tra danh tính/quyền, resolve shop và ghép snapshot công nợ vào dữ liệu ledger theo đúng chủ shop.
     @Get('wallet')
     async getWallet(
         @Headers() headers: Record<string, unknown>,
         @Query('page') pageValue?: string,
         @Query('pageSize') pageSizeValue?: string,
+        @Query('search') searchValue?: string,
     ) {
         const user = this.buildUserContext(headers);
         if (!user.userId || !user.email)
@@ -51,7 +54,15 @@ export class SellerFinanceController {
         const shopId = await this.sellerShopClient.getOwnedShopId(user);
         const page = this.toBoundedInteger(pageValue, 1, 1, 1_000_000);
         const pageSize = this.toBoundedInteger(pageSizeValue, 20, 1, 100);
-        return this.sellerWalletRepository.getSnapshot(shopId, page, pageSize);
+        // Đọc ledger trước vì getSnapshot có thể bù sale còn thiếu; debt query sau đó phải thấy balance vừa commit.
+        const snapshot = await this.sellerWalletRepository.getSnapshot(
+            shopId,
+            page,
+            pageSize,
+            this.normalizeSearchTerm(searchValue),
+        );
+        const debt = await this.sellerWalletDebtService.getShopSnapshot(shopId);
+        return { ...snapshot, debt };
     }
 
     // Tạo URL nạp Pay2S Sandbox; callback IPN riêng mới ghi có nên response trình duyệt không thể tự cộng tiền.
@@ -98,6 +109,7 @@ export class SellerFinanceController {
         @Headers() headers: Record<string, unknown>,
         @Query('page') pageValue?: string,
         @Query('pageSize') pageSizeValue?: string,
+        @Query('search') searchValue?: string,
     ) {
         const user = this.buildUserContext(headers);
         this.assertSellerFinanceAccess(user);
@@ -108,6 +120,7 @@ export class SellerFinanceController {
             shopId,
             page,
             pageSize,
+            this.normalizeSearchTerm(searchValue),
         );
     }
 
@@ -157,5 +170,11 @@ export class SellerFinanceController {
         const parsed = Number(value);
         if (!Number.isFinite(parsed)) return fallback;
         return Math.min(max, Math.max(min, Math.floor(parsed)));
+    }
+
+    // Giới hạn và chuẩn hóa từ khóa trước khi gọi persistence; SQL vẫn nhận giá trị qua bind parameter.
+    private normalizeSearchTerm(value?: string): string | undefined {
+        const normalized = value?.trim().slice(0, 100);
+        return normalized || undefined;
     }
 }
