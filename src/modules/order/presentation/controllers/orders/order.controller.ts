@@ -6,6 +6,7 @@ import {
     Headers,
     Ip,
     Param,
+    Patch,
     ParseUUIDPipe,
     Post,
     Put,
@@ -20,10 +21,14 @@ import {
 import { CancelOrderDto } from '@/modules/order/presentation/dto/orders/cancel-order.dto';
 import { CreateCodOrderDto } from '@/modules/order/presentation/dto/orders/create-cod-order.dto';
 import { CreateOrderQuoteDto } from '@/modules/order/presentation/dto/orders/create-order-quote.dto';
-import { CreateOrderReturnDto } from '@/modules/order/presentation/dto/orders/order-return.dto';
+import {
+    CreateOrderReturnDto,
+    UpdateOrderReturnDto,
+} from '@/modules/order/presentation/dto/orders/order-return.dto';
 import { OrderListQueryDto } from '@/modules/order/presentation/dto/orders/order-list-query.dto';
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { OrderReturnService } from '@/modules/order/application/services/returns/order-return.service';
+import { CustomerReturnRequestEditService } from '@/modules/order/application/services/returns/customer-return-request-edit.service';
 import { OrderDeliveryConfirmationService } from '@/modules/order/application/services/delivery/order-delivery-confirmation.service';
 import { DeliveryConfirmationDto } from '@/modules/order/presentation/dto/orders/delivery-confirmation.dto';
 import type {
@@ -39,6 +44,7 @@ export class OrderController {
     constructor(
         private readonly orderCommandService: OrderCommandService,
         private readonly orderReturnService: OrderReturnService,
+        private readonly customerReturnRequestEditService: CustomerReturnRequestEditService,
         private readonly deliveryConfirmationService: OrderDeliveryConfirmationService,
     ) {}
 
@@ -116,6 +122,20 @@ export class OrderController {
         @Param('returnId', new ParseUUIDPipe()) returnId: string,
     ) {
         return this.orderReturnService.getForCustomer(ownerId, returnId);
+    }
+
+    // Customer sửa lý do, mô tả và minh chứng khi yêu cầu vẫn đang chờ shop xử lý.
+    @Patch('returns/:returnId')
+    updateReturn(
+        @Headers('x-user-id') ownerId: string,
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Body() dto: UpdateOrderReturnDto,
+    ): Promise<{ updated: true }> {
+        return this.customerReturnRequestEditService.update(
+            ownerId,
+            returnId,
+            dto,
+        );
     }
 
     // Customer hủy request khi seller chưa xử lý.

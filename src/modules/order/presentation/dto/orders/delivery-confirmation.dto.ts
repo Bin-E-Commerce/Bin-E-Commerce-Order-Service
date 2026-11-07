@@ -1,6 +1,7 @@
 // File này xác thực payload customer dùng để xác nhận đã nhận hàng hoặc báo delivery issue.
 
 import {
+    ArrayMinSize,
     ArrayMaxSize,
     IsArray,
     IsEnum,
@@ -69,10 +70,11 @@ export class DeliveryConfirmationDto {
 
     @ValidateIf(
         (value: DeliveryConfirmationDto) =>
-            value.decision === DeliveryConfirmationDecision.ISSUE,
+            value.decision === DeliveryConfirmationDecision.ISSUE &&
+            value.reason !== OrderDeliveryIssueReason.NOT_RECEIVED,
     )
-    @IsOptional()
     @IsArray()
+    @ArrayMinSize(1)
     @ArrayMaxSize(6)
     @ValidateNested({ each: true })
     @Type(() => DeliveryIssueEvidenceDto)

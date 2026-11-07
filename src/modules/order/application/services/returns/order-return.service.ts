@@ -5,11 +5,13 @@ import {
     BadRequestException,
     ConflictException,
     Injectable,
+    Logger,
     NotFoundException,
     Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
+import type { EntityManager } from 'typeorm';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
 import {
@@ -43,16 +45,19 @@ import type { SellerWalletRepositoryPort } from '@/modules/order/application/con
 import { ORDER_RETURN_SHIPMENT_REPOSITORY } from '@/modules/order/application/contracts/order-return-shipment.repository';
 import type { OrderReturnShipmentRepositoryPort } from '@/modules/order/application/contracts/order-return-shipment.repository';
 import type { ReturnShipmentSyncRecord } from '@/modules/order/application/types/returns/return-shipment-sync.type';
-
-const EVIDENCE_REQUIRED_REASONS = new Set<OrderReturnReason>([
-    OrderReturnReason.DAMAGED,
-    OrderReturnReason.WRONG_ITEM,
-    OrderReturnReason.MISSING_ITEM,
-    OrderReturnReason.NOT_AS_DESCRIBED,
-]);
+import type { ReturnRefundCalculationOrderSnapshot } from '@/modules/order/application/types/returns/return-refund-calculation.type';
+import {
+    calculateReturnShippingRefund,
+    capReturnRefundAmount,
+    getFixedReturnShippingPayer,
+    isSellerReturnFaultReason,
+    roundReturnVnd,
+} from '@/modules/order/application/utils/returns/return-refund-calculation.util';
 
 @Injectable()
 export class OrderReturnService {
+    private readonly logger = new Logger(OrderReturnService.name);
+
     constructor(
         @InjectRepository(OrderReturnRequest)
         private readonly repository: Repository<OrderReturnRequest>,
@@ -107,7 +112,16 @@ export class OrderReturnService {
             );
         const shopId = [...shopIds][0] as string;
         const existing = await this.findActiveRequest(orderId, ownerId, shopId);
-        if (existing) return existing;
+        if (existing) {
+            // Retry chỉ phát lại thông báo cho request còn chờ duyệt; eventId ổn định giúp consumer loại bản trùng.
+            if (existing.status === OrderReturnStatus.REQUESTED)
+                await this.publishCreatedRequest(
+                    existing,
+                    order.orderNumber,
+                    ownerId,
+                );
+            return existing;
+        }
         const itemRefundAmount = this.roundVnd(
             itemIds.reduce(
                 (sum, itemId) => sum + toCents(itemMap.get(itemId)!.lineTotal),
@@ -116,7 +130,6 @@ export class OrderReturnService {
         );
         const shippingRefundAmount = this.calculateShippingRefund(
             order,
-            itemIds,
             itemRefundAmount,
             dto.reason,
             shopId,
@@ -176,7 +189,26 @@ export class OrderReturnService {
         });
         let saved: OrderReturnRequest;
         try {
-            saved = await this.repository.save(request);
+            if (this.dataSource) {
+                // Commit request cùng event; lỗi ghi outbox sẽ rollback cả hai để không mất thông báo Seller.
+                saved = await this.dataSource.transaction(async (manager) => {
+                    const created = await manager
+                        .getRepository(OrderReturnRequest)
+                        .save(request);
+                    await this.publish(
+                        created,
+                        order.orderNumber,
+                        ownerId,
+                        'return.requested',
+                        created.description,
+                        manager,
+                    );
+                    return created;
+                });
+            } else {
+                // Adapter legacy không cấp transaction vẫn lưu request và thử enqueue event sau khi lưu.
+                saved = await this.repository.save(request);
+            }
         } catch (error) {
             // Nếu request khác vừa insert cùng order/shop, trả về bản ghi đã tồn tại thay vì tạo workflow thứ hai.
             if (!this.isActiveReturnUniqueViolation(error)) throw error;
@@ -185,19 +217,20 @@ export class OrderReturnService {
                 ownerId,
                 shopId,
             );
-            if (concurrentRequest) return concurrentRequest;
+            if (concurrentRequest) {
+                await this.publishCreatedRequest(
+                    concurrentRequest,
+                    order.orderNumber,
+                    ownerId,
+                );
+                return concurrentRequest;
+            }
             throw new ConflictException(
                 'Đơn hàng đã có yêu cầu hoàn hàng đang được xử lý.',
             );
         }
         // Gửi mô tả của Customer trong event đầu tiên để notification/email cho Seller có đủ ngữ cảnh xử lý.
-        await this.publish(
-            saved,
-            order.orderNumber,
-            ownerId,
-            'return.requested',
-            request.description,
-        );
+        await this.publishCreatedRequest(saved, order.orderNumber, ownerId);
         return saved;
     }
 
@@ -253,9 +286,10 @@ export class OrderReturnService {
         status?: OrderReturnStatus,
     ) {
         const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
+        // Ưu tiên request mới nhất để seller thấy ngay yêu cầu vừa gửi ở đầu danh sách.
         const requests = await this.repository.find({
             where: { shopId, ...(status ? { status } : {}) },
-            order: { createdAt: 'ASC' },
+            order: { createdAt: 'DESC' },
         });
         return Promise.all(
             requests.map(async (request) => {
@@ -793,14 +827,38 @@ export class OrderReturnService {
         const evidence = dto.evidence ?? [];
         const images = evidence.filter((item) => item.type === 'image');
         const videos = evidence.filter((item) => item.type === 'video');
+        // Bằng chứng bắt buộc cho mọi yêu cầu hoàn; video được chấp nhận như ảnh, nhưng số lượng vẫn bị giới hạn.
+        if (evidence.length === 0)
+            throw new BadRequestException(
+                'Yêu cầu hoàn hàng cần ít nhất một ảnh hoặc video bằng chứng.',
+            );
         if (images.length > 5 || videos.length > 1)
             throw new BadRequestException(
                 'Tối đa 5 ảnh và 1 video cho bằng chứng hoàn hàng.',
             );
-        if (EVIDENCE_REQUIRED_REASONS.has(dto.reason) && images.length === 0)
-            throw new BadRequestException(
-                'Lý do này cần ít nhất một ảnh bằng chứng.',
+    }
+
+    // Gửi notification sau khi request đã lưu; lỗi Kafka không được làm API báo thất bại rồi khiến client xóa media đang được request tham chiếu.
+    // Request vẫn hiển thị qua queue Seller đọc trực tiếp từ database; retry tạo request sẽ thử phát lại event idempotent.
+    private async publishCreatedRequest(
+        request: OrderReturnRequest,
+        orderNumber: string,
+        ownerId: string,
+    ): Promise<void> {
+        try {
+            await this.publish(
+                request,
+                orderNumber,
+                ownerId,
+                'return.requested',
+                request.description,
             );
+        } catch (error) {
+            this.logger.error(
+                `Không gửi được thông báo yêu cầu hoàn ${request.id}; request đã lưu và sẽ được Seller queue đồng bộ.`,
+                error instanceof Error ? error.stack : String(error),
+            );
+        }
     }
 
     // Tìm request đang mở theo đúng phạm vi order/shop để mọi trạng thái xử lý đều được khóa nghiệp vụ.
@@ -1015,73 +1073,29 @@ export class OrderReturnService {
     }
 
     private isSellerFault(reason: OrderReturnReason): boolean {
-        return [
-            OrderReturnReason.DAMAGED,
-            OrderReturnReason.WRONG_ITEM,
-            OrderReturnReason.MISSING_ITEM,
-            OrderReturnReason.NOT_AS_DESCRIBED,
-        ].includes(reason);
+        return isSellerReturnFaultReason(reason);
     }
 
     // Các lý do lỗi hàng quy trách nhiệm shop, đổi ý do khách chịu; OTHER được seller phân loại ở bước duyệt.
     private getFixedShippingPayer(
         reason: OrderReturnReason,
     ): 'CUSTOMER' | 'SELLER' | null {
-        if (this.isSellerFault(reason)) return 'SELLER';
-        if (reason === OrderReturnReason.CHANGE_OF_MIND) return 'CUSTOMER';
-        return null;
+        return getFixedReturnShippingPayer(reason);
     }
 
     // Phân bổ phí vận chuyển theo tỷ trọng giá trị item để đơn nhiều shop không bị hoàn phí trùng.
     private calculateShippingRefund(
-        order: {
-            shippingFee: string;
-            subtotal: string;
-            shippingFeeBreakdown?: Array<Record<string, unknown>>;
-            items?: Array<{
-                id: string;
-                sellerShopId: string | null;
-                lineTotal: string;
-            }>;
-        },
-        itemIds: string[],
+        order: ReturnRefundCalculationOrderSnapshot,
         itemAmount: bigint,
         reason: OrderReturnReason,
         shopId: string,
     ): bigint {
-        if (!this.isSellerFault(reason)) return 0n;
-        const subtotal = toCents(order.subtotal);
-        const breakdown = (order.shippingFeeBreakdown ?? []).find(
-            (entry) => String(entry.shopId ?? '') === shopId,
-        );
-        const shippingFee =
-            breakdown?.fee !== undefined
-                ? toCents(String(breakdown.fee))
-                : toCents(order.shippingFee);
-        if (subtotal <= 0n || shippingFee <= 0n) return 0n;
-
-        const shopItems = (order.items ?? []).filter(
-            (item) => item.sellerShopId === shopId,
-        );
-        const shopSubtotal = shopItems.reduce(
-            (sum, item) => sum + toCents(item.lineTotal),
-            0n,
-        );
-        const allocationBase =
-            breakdown?.fee !== undefined && shopSubtotal > 0n
-                ? shopSubtotal
-                : subtotal;
-        const cappedItemAmount =
-            itemAmount > allocationBase ? allocationBase : itemAmount;
-        const proportionalAmount =
-            (shippingFee * cappedItemAmount + allocationBase / 2n) /
-            allocationBase;
-        return this.roundVnd(proportionalAmount);
+        return calculateReturnShippingRefund(order, itemAmount, reason, shopId);
     }
 
     // Làm tròn tiền VND về đồng ngay khi chốt snapshot để mọi service và UI dùng cùng một giá trị.
     private roundVnd(value: bigint): bigint {
-        return ((value + 50n) / 100n) * 100n;
+        return roundReturnVnd(value);
     }
 
     // Khóa số tiền refund trong khoảng từ 0 đến tổng tiền gốc để không thể hoàn vượt giao dịch đã thu.
@@ -1089,12 +1103,7 @@ export class OrderReturnService {
         value: bigint,
         originalOrderAmount?: string | null,
     ): bigint {
-        const nonNegativeValue = value > 0n ? value : 0n;
-        if (!originalOrderAmount) return nonNegativeValue;
-        const maximumRefundable = toCents(originalOrderAmount);
-        return nonNegativeValue > maximumRefundable
-            ? maximumRefundable
-            : nonNegativeValue;
+        return capReturnRefundAmount(value, originalOrderAmount);
     }
 
     // Phát snapshot sau commit; request mới ưu tiên mô tả Customer, các bước sau dùng ghi chú xử lý gần nhất.
@@ -1114,21 +1123,25 @@ export class OrderReturnService {
         customerUserId: string,
         eventName: ReturnEventName,
         noteOverride?: string | null,
+        manager?: EntityManager,
     ): Promise<void> {
         if (!orderNumber) return;
-        await this.events.publishReturnChanged({
-            eventName,
-            returnId: request.id,
-            orderId: request.orderId,
-            orderNumber,
-            shopId: request.shopId,
-            customerUserId,
-            sellerUserId: request.sellerUserId,
-            status: request.status,
-            refundAmount: request.refundAmount,
-            reason: request.reason,
-            note: noteOverride ?? request.reviewNote,
-        });
+        await this.events.publishReturnChanged(
+            {
+                eventName,
+                returnId: request.id,
+                orderId: request.orderId,
+                orderNumber,
+                shopId: request.shopId,
+                customerUserId,
+                sellerUserId: request.sellerUserId,
+                status: request.status,
+                refundAmount: request.refundAmount,
+                reason: request.reason,
+                note: noteOverride ?? request.reviewNote,
+            },
+            manager,
+        );
     }
 
     // Chỉ phát event cho transition mới và lấy order number qua Order repository; shipment không nhận full order snapshot.

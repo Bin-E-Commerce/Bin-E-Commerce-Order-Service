@@ -1,4 +1,4 @@
-// File này chuyển order đã commit thành integration event cho Notification Service.
+// File này chuyển order và return đã commit thành integration event cho các service downstream.
 // Service chỉ phát recipient đã được Product Service xác định bằng sellerOwnerId, không tự tin shopId từ browser.
 
 import {
@@ -17,6 +17,7 @@ import {
     OrderEvents,
 } from '@common/kafka/events/order.events';
 import type { ReturnChangedEvent } from '@common/kafka/events/order.events';
+import type { RefundCompletedEvent } from '@common/kafka/events/order.events';
 import { KafkaProducerService } from '@/kafka/kafka-producer.service';
 import { Order } from '@/database/order/entities/order.entity';
 import {
@@ -26,6 +27,7 @@ import {
 import type { OrderPurchaseEvent } from '@common/kafka/events/order.events';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { OrderPurchaseEventOutboxEntity } from '@/database/integration/entities/order-purchase-event-outbox.entity';
+import type { RefundCompletionSnapshot } from '@/modules/order/application/types/finance/refund-completion.type';
 
 type SellerRecipientSource = {
     sellerOwnerId?: string | null;
@@ -253,7 +255,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
         };
     }
 
-    // Claim tối đa 20 outbox row bằng SKIP LOCKED và trả luôn payload để không có khoảng lệch giữa bước claim và bước đọc event.
+    // Claim tối đa 20 integration event bằng SKIP LOCKED để nhiều replica không gửi cùng một outbox row đồng thời.
     private async dispatchPending(): Promise<void> {
         if (!this.purchaseOutboxRepository) return;
         await this.purchaseOutboxRepository.query(
@@ -283,7 +285,10 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
                 event_id: string;
                 topic: string;
                 aggregate_id: string;
-                payload: OrderCreatedEvent | OrderPurchaseEvent;
+                payload:
+                    | OrderCreatedEvent
+                    | OrderPurchaseEvent
+                    | ReturnChangedEvent;
                 attempt_count: number;
             }>,
             number,
@@ -332,29 +337,61 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
             await this.dispatchPending();
         } catch (error) {
             this.logger.warn(
-                `Order purchase outbox deferred: ${error instanceof Error ? error.message : 'unknown'}`,
+                `Order integration outbox deferred: ${error instanceof Error ? error.message : 'unknown'}`,
             );
         } finally {
             this.dispatching = false;
         }
     }
 
-    // Phát sự kiện return sau khi transaction đã commit; Notification Service dùng eventId ổn định để chống trùng.
-    async publishReturnChanged(input: {
-        eventName: ReturnChangedEvent['eventName'];
-        returnId: string;
-        orderId: string;
-        orderNumber: string;
-        shopId: string;
-        customerUserId: string;
-        sellerUserId: string | null;
-        status: string;
-        refundAmount: string;
-        reason: string;
-        note: string | null;
-    }): Promise<void> {
+    // Gửi snapshot sau khi khoản hoàn đã commit; eventId ổn định giúp email outbox loại bỏ lần xác nhận lặp.
+    async publishRefundCompleted(
+        input: RefundCompletionSnapshot,
+    ): Promise<boolean> {
+        const event: RefundCompletedEvent = {
+            eventId: `${OrderEvents.REFUND_COMPLETED}:${input.sourceType}:${input.refundId}`,
+            eventName: OrderEvents.REFUND_COMPLETED,
+            eventVersion: 1,
+            source: 'order-service',
+            occurredAt: input.occurredAt,
+            aggregateId: input.refundId,
+            data: {
+                refundId: input.refundId,
+                sourceType: input.sourceType,
+                orderId: input.orderId,
+                orderNumber: input.orderNumber,
+                customerUserId: input.customerUserId,
+                refundAmount: input.refundAmount,
+            },
+        };
+        return this.kafkaProducer.publish(
+            OrderEvents.REFUND_COMPLETED,
+            event,
+            input.refundId,
+        );
+    }
+
+    // Ghi event return vào outbox trước khi thử gửi; manager được truyền vào khi request và event cần commit cùng transaction.
+    async publishReturnChanged(
+        input: {
+            eventName: ReturnChangedEvent['eventName'];
+            returnId: string;
+            orderId: string;
+            orderNumber: string;
+            shopId: string;
+            customerUserId: string;
+            sellerUserId: string | null;
+            status: string;
+            refundAmount: string;
+            reason: string;
+            note: string | null;
+            revision?: string;
+        },
+        manager?: EntityManager,
+    ): Promise<void> {
+        // Revision tạo eventId riêng vì các lần sửa đều giữ trạng thái REQUESTED.
         const event: ReturnChangedEvent = {
-            eventId: `${input.eventName}:${input.returnId}:${input.status}`,
+            eventId: `${input.eventName}:${input.returnId}:${input.status}${input.revision ? `:${input.revision}` : ''}`,
             eventName: input.eventName,
             eventVersion: 1,
             source: 'order-service',
@@ -373,11 +410,41 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
                 note: input.note,
             },
         };
-        await this.kafkaProducer.publish(
-            input.eventName,
-            event,
-            input.returnId,
-        );
+        const outboxRepository = manager
+            ? manager.getRepository(OrderPurchaseEventOutboxEntity)
+            : this.purchaseOutboxRepository;
+
+        if (!outboxRepository) {
+            // Giữ tương thích cho môi trường cũ chưa đăng ký outbox; production module luôn cung cấp repository này.
+            await this.kafkaProducer.publish(
+                input.eventName,
+                event,
+                input.returnId,
+            );
+            return;
+        }
+
+        // Event ID ổn định làm cho retry idempotent; conflict không ghi đè trạng thái PUBLISHED.
+        await outboxRepository
+            .createQueryBuilder()
+            .insert()
+            .into(OrderPurchaseEventOutboxEntity)
+            .values({
+                eventId: event.eventId,
+                topic: event.eventName,
+                aggregateId: event.aggregateId,
+                payload: event,
+                status: 'PENDING',
+                attemptCount: 0,
+                availableAt: new Date(),
+                publishedAt: null,
+                updatedAt: new Date(),
+            })
+            .orIgnore()
+            .execute();
+
+        // Trong transaction chỉ enqueue; sau commit dispatcher sẽ gửi, còn lỗi Kafka được retry nền.
+        if (!manager) await this.dispatchPendingSafe();
     }
 
     // Phát tín hiệu để Notification Service nhắc khách xác nhận sau khi Shipping báo giao thành công.
