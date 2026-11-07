@@ -104,6 +104,38 @@ export class PaymentAttempt {
     })
     refundTransactionReference!: string | null;
 
+    @Column({
+        name: 'refund_out_transaction_id',
+        type: 'varchar',
+        length: 120,
+        nullable: true,
+    })
+    refundOutTransactionId!: string | null;
+
+    @Column({
+        name: 'refund_out_transaction_number',
+        type: 'varchar',
+        length: 120,
+        nullable: true,
+    })
+    refundOutTransactionNumber!: string | null;
+
+    @Column({
+        name: 'refund_out_amount',
+        type: 'numeric',
+        precision: 14,
+        scale: 2,
+        nullable: true,
+    })
+    refundOutAmount!: string | null;
+
+    @Column({
+        name: 'refund_out_detected_at',
+        type: 'timestamptz',
+        nullable: true,
+    })
+    refundOutDetectedAt!: Date | null;
+
     @Column({ name: 'refund_proof', type: 'jsonb', nullable: true })
     refundProof!: Record<string, unknown> | null;
 
@@ -173,6 +205,13 @@ export class PaymentAttempt {
         select: false,
     })
     refundAccountNumber!: string | null;
+
+    @Column({
+        name: 'refund_bank_account_id',
+        type: 'uuid',
+        nullable: true,
+    })
+    refundBankAccountId!: string | null;
 
     @Column({
         name: 'provider_response',

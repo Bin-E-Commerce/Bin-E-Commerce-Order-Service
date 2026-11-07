@@ -15,6 +15,7 @@ import {
     ServiceUnavailableException,
 } from '@nestjs/common';
 import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
+import { AdminRefundConfirmationService } from '@/modules/order/application/services/finance/admin-refund-confirmation.service';
 import { Pay2sPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/pay2s-payout-reconciliation.service';
 import { ConfirmCodRemittanceDto } from '@/modules/order/presentation/dto/finance/confirm-cod-remittance.dto';
 import { ConfirmCodRefundDto } from '@/modules/order/presentation/dto/finance/confirm-cod-refund.dto';
@@ -30,15 +31,18 @@ import {
 } from '@/modules/order/presentation/dto/finance/wallet-finance.dto';
 import { AdminFinanceActivityQueryDto } from '@/modules/order/presentation/dto/finance/admin-finance-activity-query.dto';
 import { UpdateRefundRecipientAccountDto } from '@/modules/order/presentation/dto/finance/update-refund-recipient-account.dto';
+import { SellerWalletDebtService } from '@/modules/order/application/services/finance/seller-wallet-debt.service';
 
 // Route quản lý dòng tiền; payout chỉ được ghi nhận sau webhook Pay2S và xác nhận người nhận của admin.
 @Controller({ path: 'admin/finance', version: '1' })
 export class AdminFinanceController {
     constructor(
         private readonly paymentService: PaymentService,
+        private readonly refundConfirmation: AdminRefundConfirmationService,
         private readonly payoutReconciliation: Pay2sPayoutReconciliationService,
         @Inject(SELLER_WALLET_REPOSITORY)
         private readonly walletRepository: SellerWalletRepositoryPort,
+        private readonly sellerWalletDebtService: SellerWalletDebtService,
     ) {}
 
     // Trả trạng thái cấu hình webhook Pay2S mà không làm lộ token hoặc tài khoản nguồn.
@@ -50,7 +54,7 @@ export class AdminFinanceController {
         return this.payoutReconciliation.getReadiness();
     }
 
-    // Admin overview tổng hợp số dư mô phỏng và trang ledger; không chứa thông tin ngân hàng thô.
+    // Ghép tổng công nợ/khóa shop với finance overview; không cộng nợ lần hai vào khoản seller phải trả.
     @Get('overview')
     async getOverview(
         @Headers('x-user-permissions') permissionsHeader: string,
@@ -58,10 +62,14 @@ export class AdminFinanceController {
         @Query('pageSize') pageSizeValue?: string,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.read');
-        return this.walletRepository.getAdminFinance(
-            this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
-            this.toBoundedInteger(pageSizeValue, 20, 1, 100),
-        );
+        const [overview, debt] = await Promise.all([
+            this.walletRepository.getAdminFinance(
+                this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
+                this.toBoundedInteger(pageSizeValue, 20, 1, 100),
+            ),
+            this.sellerWalletDebtService.getAdminSummary(),
+        ]);
+        return { ...overview, ...debt };
     }
 
     // Trả số hồ sơ tài chính theo ngày sau khi xác thực permission đọc finance và giới hạn khoảng báo cáo.
@@ -95,11 +103,15 @@ export class AdminFinanceController {
         @Headers('x-user-permissions') permissionsHeader: string,
         @Query('page') pageValue?: string,
         @Query('pageSize') pageSizeValue?: string,
+        @Query('reconciliationStatus') reconciliationStatus?: string,
+        @Query('search') searchValue?: string,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.read');
         return this.walletRepository.getPlatformLedger(
             this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
             this.toBoundedInteger(pageSizeValue, 50, 1, 100),
+            reconciliationStatus,
+            this.toBoundedSearch(searchValue),
         );
     }
 
@@ -110,12 +122,14 @@ export class AdminFinanceController {
         @Query('page') pageValue?: string,
         @Query('pageSize') pageSizeValue?: string,
         @Query('status') status?: string,
+        @Query('search') searchValue?: string,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.read');
         return this.walletRepository.listAdminWithdrawals(
             this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
             this.toBoundedInteger(pageSizeValue, 20, 1, 100),
             status,
+            this.toBoundedSearch(searchValue),
         );
     }
 
@@ -125,11 +139,13 @@ export class AdminFinanceController {
         @Headers('x-user-permissions') permissionsHeader: string,
         @Query('page') pageValue?: string,
         @Query('pageSize') pageSizeValue?: string,
+        @Query('search') searchValue?: string,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.read');
         return this.walletRepository.listPendingCodRemittances(
             this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
             this.toBoundedInteger(pageSizeValue, 20, 1, 100),
+            this.toBoundedSearch(searchValue),
         );
     }
 
@@ -139,11 +155,15 @@ export class AdminFinanceController {
         @Headers('x-user-permissions') permissionsHeader: string,
         @Query('page') pageValue?: string,
         @Query('pageSize') pageSizeValue?: string,
+        @Query('status') status?: string,
+        @Query('search') searchValue?: string,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.read');
         return this.walletRepository.listAdminRefunds(
             this.toBoundedInteger(pageValue, 1, 1, 1_000_000),
             this.toBoundedInteger(pageSizeValue, 20, 1, 100),
+            status,
+            this.toBoundedSearch(searchValue),
         );
     }
 
@@ -191,7 +211,7 @@ export class AdminFinanceController {
         return { resolved: true };
     }
 
-    // Xác nhận admin đã chuyển khoản cho payment attempt Pay2S được hàng đợi đánh dấu cần hoàn.
+    // Xác nhận attempt qua application service; chỉ phát email sau khi số tiền và trạng thái đã được repository chốt.
     @Post('refunds/payment-attempts/:attemptId/confirmation')
     async confirmPaymentAttemptRefund(
         @Headers('x-user-id') adminId: string,
@@ -200,7 +220,7 @@ export class AdminFinanceController {
         @Body() dto: ConfirmManualRefundDto,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
-        await this.walletRepository.recordPaymentAttemptRefund({
+        await this.refundConfirmation.confirmPaymentAttempt({
             paymentAttemptId: attemptId,
             adminId,
             amount: dto.amount,
@@ -225,7 +245,7 @@ export class AdminFinanceController {
         return { failed: true };
     }
 
-    // Xác nhận hoàn theo snapshot tiền của return; wallet và payment status được cập nhật cùng transaction.
+    // Xác nhận return theo snapshot tiền; application service phát email sau khi wallet và payment status commit.
     @Post('refunds/returns/:returnId/confirmation')
     async confirmReturnRefund(
         @Headers('x-user-id') adminId: string,
@@ -234,7 +254,7 @@ export class AdminFinanceController {
         @Body() dto: ConfirmManualRefundDto,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
-        await this.walletRepository.recordReturnRefund({
+        await this.refundConfirmation.confirmReturn({
             returnRequestId: returnId,
             adminId,
             amount: dto.amount,
@@ -259,7 +279,7 @@ export class AdminFinanceController {
         return { failed: true };
     }
 
-    // Xác nhận hoàn đã chuyển cho issue chưa nhận hàng được admin duyệt.
+    // Xác nhận delivery issue đã duyệt và thông báo customer sau khi khoản hoàn được ghi nhận.
     @Post('refunds/delivery-issues/:issueId/confirmation')
     async confirmDeliveryIssueRefund(
         @Headers('x-user-id') adminId: string,
@@ -268,7 +288,7 @@ export class AdminFinanceController {
         @Body() dto: ConfirmManualRefundDto,
     ) {
         this.assertPermission(permissionsHeader, 'admin.finance.reconcile');
-        await this.walletRepository.recordDeliveryIssueRefund({
+        await this.refundConfirmation.confirmDeliveryIssue({
             issueId,
             adminId,
             amount: dto.amount,
@@ -437,7 +457,7 @@ export class AdminFinanceController {
         return { confirmed: true };
     }
 
-    // Admin xác nhận giao dịch chuyển COD refund đã thành công, đính kèm bằng chứng do người xử lý cung cấp.
+    // Xác nhận COD refund qua cùng luồng email; repository kiểm tra lại quyền dữ liệu, trạng thái và số tiền.
     @Post('cod-refunds/:returnId/confirmation')
     async confirmCodRefund(
         @Headers('x-user-id') adminId: string,
@@ -452,7 +472,7 @@ export class AdminFinanceController {
             throw new ForbiddenException(
                 'Bạn không có quyền đối soát tài chính.',
             );
-        await this.paymentService.recordCodRefund({
+        await this.refundConfirmation.confirmCodReturn({
             returnRequestId: returnId,
             adminId,
             amount: dto.amount,
@@ -487,5 +507,11 @@ export class AdminFinanceController {
         const parsed = Number(value);
         if (!Number.isFinite(parsed)) return fallback;
         return Math.min(max, Math.max(min, Math.floor(parsed)));
+    }
+
+    // Chuẩn hóa và giới hạn từ khóa trước khi thêm vào điều kiện truy vấn.
+    private toBoundedSearch(value: string | undefined): string | undefined {
+        const normalized = value?.trim().replace(/\s+/g, ' ').slice(0, 100);
+        return normalized || undefined;
     }
 }

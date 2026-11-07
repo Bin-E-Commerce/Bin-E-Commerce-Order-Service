@@ -7,7 +7,7 @@ import {
     OnModuleDestroy,
     OnModuleInit,
 } from '@nestjs/common';
-import { DataSource, EntityManager, In, IsNull } from 'typeorm';
+import { DataSource, EntityManager, In } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
@@ -31,6 +31,7 @@ import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment
 import {
     fromCents,
     toCents,
+    toSignedCents,
 } from '@/modules/order/application/utils/money/order-money.util';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
 import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
@@ -48,6 +49,8 @@ import type {
     WalletWithdrawalRecord,
 } from '@/modules/order/application/types/finance/wallet-finance.type';
 import type {
+    RefundTransferLookup,
+    RefundTransferStagingResult,
     WithdrawalConfirmationResult,
     WithdrawalTransferLookup,
     WithdrawalTransferStagingResult,
@@ -62,6 +65,7 @@ import {
     createWithdrawalTransferMemo,
     createWithdrawalTransferMemoCode,
 } from '@/modules/order/application/utils/payments/withdrawal-transfer-memo.util';
+import { createRefundTransferMemo } from '@/modules/order/application/utils/payments/refund-transfer-memo.util';
 
 const DELIVERY_ISSUE_RECONFIRMATION_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
 
@@ -567,15 +571,23 @@ export class SellerWalletRepository
         shopId: string,
         page: number,
         pageSize: number,
+        search?: string,
     ): Promise<{ items: WalletWithdrawalRecord[]; total: number }> {
-        const [rows, total] = await this.dataSource
+        const query = this.dataSource
             .getRepository(WalletWithdrawalRequest)
-            .findAndCount({
-                where: { shopId },
-                order: { createdAt: 'DESC' },
-                skip: (page - 1) * pageSize,
-                take: pageSize,
-            });
+            .createQueryBuilder('withdrawal')
+            .where('withdrawal.shopId = :shopId', { shopId })
+            .orderBy('withdrawal.createdAt', 'DESC')
+            .skip((page - 1) * pageSize)
+            .take(pageSize);
+        if (search) {
+            // Chỉ dò dữ liệu payout đã mask; số tài khoản đầy đủ không được truy vấn hoặc trả về seller.
+            query.andWhere(
+                '(withdrawal.bankName ILIKE :search OR withdrawal.accountHolder ILIKE :search OR withdrawal.accountNumberMasked ILIKE :search OR CAST(withdrawal.id AS text) ILIKE :search)',
+                { search: `%${search}%` },
+            );
+        }
+        const [rows, total] = await query.getManyAndCount();
         return {
             items: rows.map((row) => this.toWithdrawalRecord(row)),
             total,
@@ -699,6 +711,7 @@ export class SellerWalletRepository
         page: number,
         pageSize: number,
         status?: string,
+        search?: string,
     ): Promise<{ items: WalletWithdrawalRecord[]; total: number }> {
         const allowed = [
             'REQUESTED',
@@ -707,18 +720,27 @@ export class SellerWalletRepository
             'REJECTED',
             'FAILED',
         ];
-        const where =
-            status && allowed.includes(status)
-                ? { status: status as WalletWithdrawalRequest['status'] }
-                : {};
-        const [rows, total] = await this.dataSource
-            .getRepository(WalletWithdrawalRequest)
-            .findAndCount({
-                where,
-                order: { createdAt: 'DESC' },
-                skip: (page - 1) * pageSize,
-                take: pageSize,
-            });
+        const repository = this.dataSource.getRepository(
+            WalletWithdrawalRequest,
+        );
+        const query = repository.createQueryBuilder('withdrawal');
+        // Trạng thái không hợp lệ không được hiểu thành SQL tùy ý; khi đó giữ nguyên danh sách tất cả trạng thái.
+        if (status && allowed.includes(status)) {
+            query.andWhere('withdrawal.status = :status', { status });
+        }
+        if (search) {
+            const searchPattern = `%${search}%`;
+            // Tìm trên dữ liệu đã che; không đọc hoặc lọc theo số tài khoản thô.
+            query.andWhere(
+                '(withdrawal.bankName ILIKE :search OR withdrawal.accountHolder ILIKE :search OR withdrawal.accountNumberMasked ILIKE :search OR CAST(withdrawal.id AS text) ILIKE :search OR CAST(withdrawal.shopId AS text) ILIKE :search)',
+                { search: searchPattern },
+            );
+        }
+        const [rows, total] = await query
+            .orderBy('withdrawal.createdAt', 'DESC')
+            .skip((page - 1) * pageSize)
+            .take(pageSize)
+            .getManyAndCount();
         return {
             items: rows.map((row) => this.toWithdrawalRecord(row)),
             total,
@@ -729,27 +751,42 @@ export class SellerWalletRepository
     async listPendingCodRemittances(
         page: number,
         pageSize: number,
+        search?: string,
     ): Promise<{ items: AdminCodRemittanceRecord[]; total: number }> {
-        const [orders, total] = await this.dataSource
+        const query = this.dataSource
             .getRepository(Order)
-            .findAndCount({
-                select: {
-                    id: true,
-                    orderNumber: true,
-                    totalAmount: true,
-                    completedAt: true,
-                    createdAt: true,
-                },
-                where: {
-                    paymentMethod: PaymentMethod.COD,
-                    paymentStatus: PaymentStatus.PAID,
-                    fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
-                    codRemittedAt: IsNull(),
-                },
-                order: { completedAt: 'ASC', createdAt: 'ASC' },
-                skip: (page - 1) * pageSize,
-                take: pageSize,
-            });
+            .createQueryBuilder('order')
+            .select([
+                'order.id',
+                'order.orderNumber',
+                'order.totalAmount',
+                'order.completedAt',
+                'order.createdAt',
+            ])
+            .where('order.paymentMethod = :paymentMethod', {
+                paymentMethod: PaymentMethod.COD,
+            })
+            .andWhere('order.paymentStatus = :paymentStatus', {
+                paymentStatus: PaymentStatus.PAID,
+            })
+            .andWhere('order.fulfillmentStatus = :fulfillmentStatus', {
+                fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
+            })
+            .andWhere('order.codRemittedAt IS NULL');
+        if (search) {
+            const searchPattern = `%${search}%`;
+            // Tìm trong nhóm đơn đã thu, giao xong và chưa đối soát.
+            query.andWhere(
+                '(order.orderNumber ILIKE :search OR CAST(order.id AS text) ILIKE :search)',
+                { search: searchPattern },
+            );
+        }
+        const [orders, total] = await query
+            .orderBy('order.completedAt', 'ASC')
+            .addOrderBy('order.createdAt', 'ASC')
+            .skip((page - 1) * pageSize)
+            .take(pageSize)
+            .getManyAndCount();
 
         return {
             items: orders.map((order) => ({
@@ -765,11 +802,19 @@ export class SellerWalletRepository
         };
     }
 
-    // Ghép ba nguồn hoàn vào một hàng đợi có phân trang ổn định, chỉ trả dữ liệu admin cần để chuyển khoản.
+    // Ghép hồ sơ chờ, lỗi và đã hoàn từ ba nguồn; không loại hồ sơ hoàn tất khỏi lịch sử.
+    // Dùng thời điểm xử lý nếu có để khoản mới nhất luôn đứng trước trong phân trang.
     async listAdminRefunds(
         page: number,
         pageSize: number,
+        status?: string,
+        search?: string,
     ): Promise<{ items: AdminRefundRecord[]; total: number }> {
+        // Chỉ nhận ba trạng thái refund; COUNT và dữ liệu trang dùng chung bộ lọc.
+        const allowedStatuses = ['REFUND_PENDING', 'REFUND_FAILED', 'REFUNDED'];
+        const normalizedStatus =
+            status && allowedStatuses.includes(status) ? status : null;
+        const normalizedSearch = search?.trim() || null;
         const sources = `
             SELECT attempt.id, 'PAYMENT_ATTEMPT'::text AS "sourceType",
                    order_row.id AS "orderId", order_row.order_number AS "orderNumber",
@@ -789,10 +834,15 @@ export class SellerWalletRepository
                    attempt.refund_account_holder AS "refundAccountHolder",
                    attempt.refund_account_number AS "refundAccountNumber",
                    attempt.refund_failure_note AS "refundFailureNote",
+                   attempt.refund_out_transaction_id AS "refundOutTransactionId",
+                   attempt.refund_out_transaction_number AS "refundOutTransactionNumber",
+                   attempt.refund_out_amount::text AS "refundOutAmount",
+                   attempt.refund_out_detected_at AS "refundOutDetectedAt",
+                   attempt.refund_processed_at AS "refundProcessedAt",
                    attempt.created_at AS "createdAt"
             FROM payment_attempts attempt
             INNER JOIN orders order_row ON order_row.id = attempt.order_id
-            WHERE attempt.status IN ('REFUND_PENDING', 'REFUND_FAILED')
+            WHERE attempt.status IN ('REFUND_PENDING', 'REFUND_FAILED', 'REFUNDED')
             UNION ALL
             SELECT request.id, 'ORDER_RETURN'::text AS "sourceType",
                    order_row.id AS "orderId", order_row.order_number AS "orderNumber",
@@ -804,10 +854,15 @@ export class SellerWalletRepository
                    NULL::text AS "refundAccountHolder",
                    NULL::text AS "refundAccountNumber",
                    request.refund_failure_note AS "refundFailureNote",
+                   NULL::text AS "refundOutTransactionId",
+                   NULL::text AS "refundOutTransactionNumber",
+                   NULL::text AS "refundOutAmount",
+                   NULL::timestamptz AS "refundOutDetectedAt",
+                   request.refund_processed_at AS "refundProcessedAt",
                    request.created_at AS "createdAt"
             FROM order_return_requests request
             INNER JOIN orders order_row ON order_row.id = request.order_id
-            WHERE request.status IN ('REFUND_PENDING', 'REFUND_FAILED')
+            WHERE request.status IN ('REFUND_PENDING', 'REFUND_FAILED', 'REFUNDED')
             UNION ALL
             SELECT issue.id, 'DELIVERY_ISSUE'::text AS "sourceType",
                    order_row.id AS "orderId", order_row.order_number AS "orderNumber",
@@ -819,22 +874,51 @@ export class SellerWalletRepository
                    NULL::text AS "refundAccountHolder",
                    NULL::text AS "refundAccountNumber",
                    issue.refund_failure_note AS "refundFailureNote",
+                   NULL::text AS "refundOutTransactionId",
+                   NULL::text AS "refundOutTransactionNumber",
+                   NULL::text AS "refundOutAmount",
+                   NULL::timestamptz AS "refundOutDetectedAt",
+                   issue.refund_processed_at AS "refundProcessedAt",
                    issue.created_at AS "createdAt"
             FROM order_delivery_issues issue
             INNER JOIN orders order_row ON order_row.id = issue.order_id
-            WHERE issue.refund_status IN ('REFUND_PENDING', 'REFUND_FAILED')
+            WHERE issue.refund_status IN ('REFUND_PENDING', 'REFUND_FAILED', 'REFUNDED')
         `;
-        const [countRows, items] = await Promise.all([
+        // COUNT và dữ liệu trang dùng chung bộ lọc để tổng không sai lệch.
+        const filters = `
+            WHERE ($1::text IS NULL OR refund_queue.status = $1)
+              AND ($2::text IS NULL
+                   OR refund_queue."orderNumber" ILIKE '%' || $2 || '%'
+                   OR COALESCE(refund_queue."providerTransactionId", '') ILIKE '%' || $2 || '%'
+                   OR refund_queue.reason ILIKE '%' || $2 || '%'
+                   OR refund_queue.id::text ILIKE '%' || $2 || '%')
+        `;
+        const [countRows, rows] = await Promise.all([
             this.dataSource.query(
-                `SELECT COUNT(*)::int AS total FROM (${sources}) refund_queue`,
+                `SELECT COUNT(*)::int AS total FROM (${sources}) refund_queue ${filters}`,
+                [normalizedStatus, normalizedSearch],
             ) as Promise<Array<{ total: number }>>,
             this.dataSource.query(
-                `SELECT * FROM (${sources}) refund_queue
-                 ORDER BY "createdAt" ASC, id ASC
-                 LIMIT $1 OFFSET $2`,
-                [pageSize, (page - 1) * pageSize],
-            ) as Promise<AdminRefundRecord[]>,
+                `SELECT * FROM (${sources}) refund_queue ${filters}
+                 ORDER BY COALESCE(refund_queue."refundProcessedAt", refund_queue."createdAt") DESC,
+                          refund_queue.id DESC
+                 LIMIT $3 OFFSET $4`,
+                [
+                    normalizedStatus,
+                    normalizedSearch,
+                    pageSize,
+                    (page - 1) * pageSize,
+                ],
+            ) as Promise<Array<Omit<AdminRefundRecord, 'refundTransferMemo'>>>,
         ]);
+        // Cùng một hàm dựng memo phục vụ QR và webhook để mã hiển thị luôn khớp khóa đối soát.
+        const items = rows.map((refund) => ({
+            ...refund,
+            refundTransferMemo:
+                refund.sourceType === 'PAYMENT_ATTEMPT'
+                    ? createRefundTransferMemo(refund.id)
+                    : null,
+        }));
         return { items, total: Number(countRows[0]?.total ?? 0) };
     }
 
@@ -1028,6 +1112,7 @@ export class SellerWalletRepository
     }
 
     // Chốt hoàn Pay2S sau xác nhận của admin; amount phải khớp snapshot trước khi cập nhật trạng thái và ledger.
+    // Các cột tài khoản nhận là `select: false`, nên truy vấn khóa phải chọn tường minh để không báo thiếu giả.
     async recordPaymentAttemptRefund(input: {
         paymentAttemptId: string;
         adminId: string;
@@ -1037,10 +1122,20 @@ export class SellerWalletRepository
             throw new BadRequestException('Thiếu danh tính admin.');
         await this.dataSource.transaction(async (manager) => {
             const attemptRepository = manager.getRepository(PaymentAttempt);
-            const attempt = await attemptRepository.findOne({
-                where: { id: input.paymentAttemptId },
-                lock: { mode: 'pessimistic_write' },
-            });
+            // Tải đủ dữ liệu nhận tiền trong cùng truy vấn khóa để quyết định hoàn dựa trên snapshot đã lưu.
+            const attempt = await attemptRepository
+                .createQueryBuilder('attempt')
+                .addSelect([
+                    'attempt.refundBankCode',
+                    'attempt.refundBankName',
+                    'attempt.refundAccountHolder',
+                    'attempt.refundAccountNumber',
+                ])
+                .where('attempt.id = :paymentAttemptId', {
+                    paymentAttemptId: input.paymentAttemptId,
+                })
+                .setLock('pessimistic_write')
+                .getOne();
             if (!attempt)
                 throw new BadRequestException(
                     'Không tìm thấy giao dịch Pay2S.',
@@ -1082,7 +1177,7 @@ export class SellerWalletRepository
                 !attempt.refundAccountNumber?.trim()
             )
                 throw new ConflictException(
-                    'Cần lưu tài khoản nhận đã xác minh trước khi hoàn Pay2S.',
+                    'Cần lưu đầy đủ thông tin tài khoản nhận trước khi hoàn Pay2S.',
                 );
 
             attempt.status = 'REFUNDED';
@@ -1366,6 +1461,116 @@ export class SellerWalletRepository
         }
     }
 
+    // Ghép mã HOAN trong webhook với đúng payment attempt, khóa hồ sơ và giữ giao dịch OUT làm candidate chưa xác nhận.
+    // Số tiền phải khớp số tiền đã thu; event lặp được ACK idempotent, còn event trùng/không rõ sẽ không gắn vào refund.
+    async stagePay2sRefundTransfer(
+        input: RefundTransferLookup & {
+            amount: string;
+            providerTransactionId: string;
+            transactionNumber: string | null;
+        },
+    ): Promise<RefundTransferStagingResult> {
+        // Chỉ nhận code hợp lệ và mã giao dịch có giới hạn để không query theo memo tùy ý hoặc lưu payload phình.
+        if (
+            (!input.refundTransferCode && !input.legacyOrderNumberCode) ||
+            (input.refundTransferCode !== undefined &&
+                !/^[0-9A-F]{18}$/.test(input.refundTransferCode)) ||
+            (input.legacyOrderNumberCode !== undefined &&
+                !/^BIN[A-Z0-9]{1,15}$/.test(input.legacyOrderNumberCode)) ||
+            !input.providerTransactionId.trim() ||
+            input.providerTransactionId.length > 120
+        )
+            return 'NOT_FOUND';
+
+        try {
+            return await this.dataSource.transaction(async (manager) => {
+                // Memo mới tra theo UUID prefix có index; memo cũ chỉ ghép khi mã đơn xác định duy nhất.
+                let matches: Array<{ id: string }>;
+                if (input.refundTransferCode) {
+                    // Memo mới có UUID prefix index riêng và không cần quét mã đơn.
+                    matches = (await manager.query(
+                        `SELECT id
+                         FROM payment_attempts
+                         WHERE UPPER(LEFT(REPLACE(id::text, '-', ''), 18)) = $1
+                           AND status IN ('REFUND_PENDING', 'REFUND_FAILED')
+                         FOR UPDATE`,
+                        [input.refundTransferCode],
+                    )) as Array<{ id: string }>;
+                } else {
+                    // Memo cũ chỉ ghép đúng mã đơn compact; khóa các attempt cùng đơn để phát hiện trường hợp mơ hồ.
+                    matches = (await manager.query(
+                        `SELECT attempt.id
+                         FROM payment_attempts attempt
+                         INNER JOIN orders order_row ON order_row.id = attempt.order_id
+                         WHERE UPPER(REGEXP_REPLACE(order_row.order_number, '[^A-Z0-9]', '', 'g')) = $1
+                           AND attempt.status IN ('REFUND_PENDING', 'REFUND_FAILED')
+                         FOR UPDATE OF attempt`,
+                        [input.legacyOrderNumberCode],
+                    )) as Array<{ id: string }>;
+                }
+                // Code rỗng/không tồn tại được ACK như giao dịch không khớp; collision bị từ chối để tránh gắn nhầm tiền.
+                if (matches.length === 0) return 'NOT_FOUND';
+                if (matches.length > 1) return 'AMBIGUOUS';
+
+                // Kiểm tra lại phần tử dù số lượng đã xác thực để boundary vẫn an toàn dưới strict indexed access.
+                const matchedAttemptId = matches[0]?.id;
+                if (!matchedAttemptId) return 'NOT_FOUND';
+                const attemptRepository = manager.getRepository(PaymentAttempt);
+                const attempt = await attemptRepository.findOne({
+                    where: { id: matchedAttemptId },
+                });
+                if (!attempt) return 'NOT_FOUND';
+
+                const order = await manager.getRepository(Order).findOne({
+                    where: { id: attempt.orderId },
+                });
+                // Chỉ khoản hoàn thanh toán Pay2S được nhận webhook này; COD và hồ sơ return dùng quy trình riêng.
+                if (!order || order.paymentMethod !== PaymentMethod.PAY2S)
+                    return 'NOT_PROCESSING';
+                // Không ghép giao dịch thiếu/thừa tiền vào hồ sơ, kể cả khi memo trùng chính xác.
+                if (toCents(attempt.amount) !== toCents(input.amount))
+                    return 'AMOUNT_MISMATCH';
+                // Cùng event lặp lại là idempotent; event khác trên cùng attempt cần điều tra, không ghi đè audit.
+                if (attempt.refundOutTransactionId)
+                    return attempt.refundOutTransactionId ===
+                        input.providerTransactionId
+                        ? 'DUPLICATE'
+                        : 'ALREADY_HAS_EVENT';
+
+                // Không cho cùng mã giao dịch Pay2S xuất hiện ở luồng rút seller hoặc một khoản hoàn khác.
+                const usedByRefund = await attemptRepository.findOne({
+                    where: {
+                        refundOutTransactionId: input.providerTransactionId,
+                    },
+                });
+                const usedByWithdrawal = await manager
+                    .getRepository(WalletWithdrawalRequest)
+                    .findOne({
+                        where: {
+                            pay2sTransactionId: input.providerTransactionId,
+                        },
+                    });
+                // Một event chỉ được liên kết một lần; kiểm tra tuần tự để không chạy song song truy vấn trên cùng transaction.
+                if (usedByRefund || usedByWithdrawal)
+                    return 'EVENT_ALREADY_USED';
+
+                // Candidate lưu nguyên event, số tiền và thời điểm; trạng thái refund vẫn chờ admin xác minh người nhận.
+                attempt.refundOutTransactionId = input.providerTransactionId;
+                attempt.refundOutTransactionNumber = input.transactionNumber;
+                attempt.refundOutAmount = input.amount;
+                attempt.refundOutDetectedAt = new Date();
+                await attemptRepository.save(attempt);
+                return 'STAGED';
+            });
+        } catch (error) {
+            // Unique index là chốt cuối khi webhook trùng đến đồng thời trên nhiều replica.
+            const driverError = (error as { driverError?: { code?: string } })
+                .driverError;
+            if (driverError?.code === '23505') return 'EVENT_ALREADY_USED';
+            throw error;
+        }
+    }
+
     // Tất toán một lần sau khi admin xác minh trên ngân hàng rằng giao dịch candidate tới đúng tài khoản seller.
     // Candidate, trạng thái request, khoản reserve và hai ledger cùng được khóa/ghi trong một transaction.
     async confirmPay2sWithdrawalTransfer(input: {
@@ -1465,14 +1670,31 @@ export class SellerWalletRepository
     async getPlatformLedger(
         page: number,
         pageSize: number,
+        reconciliationStatus?: string,
+        search?: string,
     ): Promise<{ items: PlatformFinanceLedgerRecord[]; total: number }> {
-        const [rows, total] = await this.dataSource
+        const query = this.dataSource
             .getRepository(PlatformFinanceLedger)
-            .findAndCount({
-                order: { createdAt: 'DESC' },
-                skip: (page - 1) * pageSize,
-                take: pageSize,
-            });
+            .createQueryBuilder('ledger');
+        // Lọc theo việc đã vào đợt đối soát; không đổi trạng thái ghi sổ giao dịch.
+        if (reconciliationStatus === 'BATCHED') {
+            query.andWhere('ledger.settlementBatchId IS NOT NULL');
+        } else if (reconciliationStatus === 'UNBATCHED') {
+            query.andWhere('ledger.settlementBatchId IS NULL');
+        }
+        if (search) {
+            const searchPattern = `%${search}%`;
+            // Tìm ngay trong DB, tránh tải toàn bộ ledger lên bộ nhớ ứng dụng.
+            query.andWhere(
+                "(ledger.kind ILIKE :search OR COALESCE(ledger.reference, '') ILIKE :search OR CAST(ledger.orderId AS text) ILIKE :search OR CAST(ledger.shopId AS text) ILIKE :search OR CAST(ledger.returnRequestId AS text) ILIKE :search)",
+                { search: searchPattern },
+            );
+        }
+        const [rows, total] = await query
+            .orderBy('ledger.createdAt', 'DESC')
+            .skip((page - 1) * pageSize)
+            .take(pageSize)
+            .getManyAndCount();
         return {
             items: rows.map((row) => this.toPlatformLedgerRecord(row)),
             total,
@@ -1634,7 +1856,9 @@ export class SellerWalletRepository
         );
     }
 
-    // Đảo toàn bộ phần sale còn lại theo shop, pending trước rồi available; không vay chéo số dư của order khác.
+    // Đảo phần sale còn lại theo từng shop, ưu tiên pending rồi available để không vay chéo số dư order khác.
+    // Ledger reversal lưu giá trị âm; đọc hai tổng này bằng parser có dấu để tính đúng phần đã đảo ở lần trước.
+    // Khóa ví và ghi điều chỉnh trong transaction của caller để balance và ledger tiếp tục nhất quán cùng nhau.
     private async reverseOrderSaleInTransaction(
         manager: EntityManager,
         orderId: string,
@@ -1659,13 +1883,14 @@ export class SellerWalletRepository
         }>;
 
         for (const row of rows) {
-            // Các khoản đảo trước đã mang số âm; cộng chúng vào sale/release để chỉ lấy phần shop còn giữ.
+            // Các khoản sale/release gốc không âm, còn tổng reversal có dấu nên phải parse bằng toSignedCents.
             const pendingRemaining =
                 toCents(row.sale_amount) -
                 toCents(row.released_amount) +
-                toCents(row.pending_reversed);
+                toSignedCents(row.pending_reversed);
             const availableRemaining =
-                toCents(row.released_amount) + toCents(row.available_reversed);
+                toCents(row.released_amount) +
+                toSignedCents(row.available_reversed);
             const pendingDebit = pendingRemaining > 0n ? pendingRemaining : 0n;
             const availableDebit =
                 availableRemaining > 0n ? availableRemaining : 0n;
@@ -2513,19 +2738,29 @@ export class SellerWalletRepository
         shopId: string,
         page: number,
         pageSize: number,
+        search?: string,
     ): Promise<SellerWalletSnapshot> {
         await this.reconcileMissingPaidOrderCredits(shopId);
         const wallet = await this.dataSource
             .getRepository(SellerWallet)
             .findOne({ where: { shopId } });
-        const [transactions, total] = await this.dataSource
+        const query = this.dataSource
             .getRepository(SellerWalletLedger)
-            .findAndCount({
-                where: { shopId },
-                order: { createdAt: 'DESC', id: 'DESC' },
-                skip: (page - 1) * pageSize,
-                take: pageSize,
-            });
+            .createQueryBuilder('ledger')
+            .leftJoin(Order, 'orderRow', 'orderRow.id = ledger.orderId')
+            .where('ledger.shopId = :shopId', { shopId })
+            .orderBy('ledger.createdAt', 'DESC')
+            .addOrderBy('ledger.id', 'DESC')
+            .skip((page - 1) * pageSize)
+            .take(pageSize);
+        if (search) {
+            // Tìm mã đơn, mã hồ sơ, loại bút toán hoặc số tiền trước khi phân trang kết quả.
+            query.andWhere(
+                '(orderRow.orderNumber ILIKE :search OR ledger.kind ILIKE :search OR CAST(ledger.amount AS text) ILIKE :search OR CAST(ledger.orderId AS text) ILIKE :search OR CAST(ledger.returnRequestId AS text) ILIKE :search)',
+                { search: `%${search}%` },
+            );
+        }
+        const [transactions, total] = await query.getManyAndCount();
         const orderIds = [
             ...new Set(
                 transactions

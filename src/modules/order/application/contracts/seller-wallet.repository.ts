@@ -13,6 +13,8 @@ import type {
     WalletWithdrawalRecord,
 } from '@/modules/order/application/types/finance/wallet-finance.type';
 import type {
+    RefundTransferStagingResult,
+    RefundTransferLookup,
     WithdrawalConfirmationResult,
     WithdrawalTransferLookup,
     WithdrawalTransferStagingResult,
@@ -39,6 +41,7 @@ export interface SellerWalletRepositoryPort {
         shopId: string,
         page: number,
         pageSize: number,
+        search?: string,
     ): Promise<SellerWalletSnapshot>;
     releaseCompletedOrder(orderId: string): Promise<void>;
     recordReturnShippingFee(
@@ -94,6 +97,7 @@ export interface SellerWalletRepositoryPort {
         shopId: string,
         page: number,
         pageSize: number,
+        search?: string,
     ): Promise<{ items: WalletWithdrawalRecord[]; total: number }>;
     getAdminFinance(
         page: number,
@@ -107,14 +111,18 @@ export interface SellerWalletRepositoryPort {
         page: number,
         pageSize: number,
         status?: string,
+        search?: string,
     ): Promise<{ items: WalletWithdrawalRecord[]; total: number }>;
     listPendingCodRemittances(
         page: number,
         pageSize: number,
+        search?: string,
     ): Promise<{ items: AdminCodRemittanceRecord[]; total: number }>;
     listAdminRefunds(
         page: number,
         pageSize: number,
+        status?: string,
+        search?: string,
     ): Promise<{ items: AdminRefundRecord[]; total: number }>;
     updatePaymentAttemptRefundRecipientAccount(input: {
         paymentAttemptId: string;
@@ -174,6 +182,13 @@ export interface SellerWalletRepositoryPort {
             transactionNumber: string | null;
         },
     ): Promise<WithdrawalTransferStagingResult>;
+    stagePay2sRefundTransfer(
+        input: RefundTransferLookup & {
+            amount: string;
+            providerTransactionId: string;
+            transactionNumber: string | null;
+        },
+    ): Promise<RefundTransferStagingResult>;
     confirmPay2sWithdrawalTransfer(input: {
         withdrawalId: string;
         adminId: string;
@@ -182,6 +197,8 @@ export interface SellerWalletRepositoryPort {
     getPlatformLedger(
         page: number,
         pageSize: number,
+        reconciliationStatus?: string,
+        search?: string,
     ): Promise<{ items: PlatformFinanceLedgerRecord[]; total: number }>;
     createSettlementBatch(input: {
         adminId: string;

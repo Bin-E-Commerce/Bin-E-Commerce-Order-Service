@@ -367,7 +367,10 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         return { success: true };
     }
 
-    // Redirect chỉ xác minh và đọc trạng thái đã lưu; không dùng trình duyệt làm nguồn authoritative cho payment.
+    // Redirect phải qua chữ ký rồi được đối chiếu merchant reference và amount với attempt đã lưu.
+    // Chỉ trạng thái do IPN ghi trong database mới được báo PAID; callback trình duyệt không tự ghi nhận tiền.
+    // transId trên redirect là tùy chọn, nên nếu Pay2S có gửi thì mới so với ID đã được IPN lưu.
+    // Nếu ID có mặt nhưng không khớp, trả UNVERIFIED để UI dừng chờ thay vì báo nhầm thành công.
     async processPay2sReturn(
         query: Record<string, unknown>,
     ): Promise<PaymentReturnResponse> {
@@ -384,22 +387,30 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
                 );
             if (!deposit || !this.isAmountEqual(payload.amount, deposit.amount))
                 return { status: 'UNVERIFIED' };
-            if (
-                deposit.status === 'PAID' &&
-                deposit.providerTransactionId === String(payload.transId ?? '')
-            )
+            if (deposit.status === 'PAID') {
+                // IPN là nguồn PAID; transId trên Return có thể vắng mặt, nhưng nếu có thì phải khớp tuyệt đối.
+                if (
+                    payload.transId &&
+                    deposit.providerTransactionId !== payload.transId
+                )
+                    return { status: 'UNVERIFIED' };
                 return { status: 'WALLET_DEPOSIT_PAID', depositId: deposit.id };
+            }
             if (deposit.status === 'FAILED')
                 return { status: 'WALLET_DEPOSIT_FAILED' };
             return { status: 'PENDING' };
         }
         if (!this.isAmountEqual(payload.amount, attempt.amount))
             return { status: 'UNVERIFIED' };
-        if (
-            attempt.status === 'PAID' &&
-            attempt.providerTransactionId === String(payload.transId ?? '')
-        )
+        if (attempt.status === 'PAID') {
+            // IPN đã chốt trạng thái; thiếu transId trên Return không được làm đơn quay lại PENDING.
+            if (
+                payload.transId &&
+                attempt.providerTransactionId !== payload.transId
+            )
+                return { status: 'UNVERIFIED' };
             return { status: 'PAID', orderId: attempt.orderId };
+        }
         if (attempt.status === 'REFUND_PENDING')
             return { status: 'REFUND_PENDING' };
         if (attempt.status === 'REFUNDED') return { status: 'REFUNDED' };

@@ -9,6 +9,7 @@ import {
     Param,
     ParseUUIDPipe,
     Post,
+    Put,
     Query,
     UnauthorizedException,
 } from '@nestjs/common';
@@ -21,6 +22,7 @@ import { CancelOrderDto } from '@/modules/order/presentation/dto/orders/cancel-o
 import { InternalSellerDashboardQueryDto } from '@/modules/order/presentation/dto/internal/internal-seller-dashboard-query.dto';
 import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
 import { InternalVariantSalesQueryDto } from '@/modules/order/presentation/dto/internal/internal-variant-sales-query.dto';
+import { SyncRefundBankAccountDto } from '@/modules/order/presentation/dto/internal/sync-refund-bank-account.dto';
 
 @Controller({ path: 'internal/orders', version: '1' })
 export class InternalOrderController {
@@ -232,6 +234,24 @@ export class InternalOrderController {
                 from: new Date(query.previousFrom),
                 to: new Date(query.previousTo),
             },
+        );
+    }
+
+    // Auth gọi sau khi customer sửa hồ sơ; chỉ cập nhật refund đang chờ của user sở hữu tài khoản.
+    @Put('refund-bank-accounts/:accountId/sync')
+    syncRefundBankAccountProfile(
+        @Param('accountId', new ParseUUIDPipe()) accountId: string,
+        @Headers('x-user-id') ownerId: string,
+        @Headers('x-internal-service-token') token: string,
+        @Body() dto: SyncRefundBankAccountDto,
+    ) {
+        this.assertInternalToken(token);
+        return this.orderCommandService.syncRefundBankAccountProfile(
+            ownerId,
+            accountId,
+            dto.allowSingleAccountLegacySync,
+            dto.previousAccount,
+            dto.account,
         );
     }
 

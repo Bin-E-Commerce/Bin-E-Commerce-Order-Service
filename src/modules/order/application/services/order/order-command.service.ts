@@ -677,9 +677,8 @@ export class OrderCommandService {
         ) {
             throw new OrderCancellationConflictError(order.status);
         }
-        const refundBankAccount = this.normalizeRefundBankAccount(
-            dto.refundBankAccount,
-        );
+        const { account: refundBankAccount, accountId: refundBankAccountId } =
+            await this.resolveRefundBankAccount(ownerId, dto);
         const paidPay2sOrder =
             order.paymentMethod === PaymentMethod.PAY2S &&
             order.paymentStatus === PaymentStatus.PAID;
@@ -697,6 +696,7 @@ export class OrderCommandService {
                 order.cancelReason,
                 refundBankAccount,
                 requireRefundBankAccount,
+                refundBankAccountId,
             );
             if (cancellation.refundPending)
                 await this.paymentService.reverseCancelledOrder(orderId);
@@ -731,6 +731,7 @@ export class OrderCommandService {
             dto.reason?.trim() || null,
             refundBankAccount,
             requireRefundBankAccount,
+            refundBankAccountId,
         );
         if (cancellation.refundPending)
             await this.paymentService.reverseCancelledOrder(orderId);
@@ -779,14 +780,14 @@ export class OrderCommandService {
                 'Vui lòng chọn hoặc nhập lý do hủy đơn hàng.',
             );
         }
-        const refundBankAccount = this.normalizeRefundBankAccount(
-            dto.refundBankAccount,
-        );
+        const { account: refundBankAccount, accountId: refundBankAccountId } =
+            await this.resolveRefundBankAccount(ownerId, dto);
         await this.orderRepository.updateCancelledOrderDetails(
             ownerId,
             orderId,
             reason,
             refundBankAccount,
+            refundBankAccountId,
         );
 
         const order = await this.orderRepository.findOwnedById(
@@ -804,6 +805,59 @@ export class OrderCommandService {
             [],
             storedRefundBankAccount,
         );
+    }
+
+    // Chỉ Auth Service gọi endpoint này; đồng bộ refund còn mở theo account ID hoặc snapshot legacy đã xác thực.
+    async syncRefundBankAccountProfile(
+        ownerId: string,
+        accountId: string,
+        allowSingleAccountLegacySync: boolean,
+        previousAccount: RefundBankAccountInput,
+        account: RefundBankAccountInput,
+    ): Promise<{ updatedCount: number }> {
+        if (!ownerId?.trim())
+            throw new BadRequestException('Thiếu user context nội bộ.');
+        const normalizedPrevious =
+            this.normalizeRefundBankAccount(previousAccount);
+        const normalizedAccount = this.normalizeRefundBankAccount(account);
+        if (!normalizedPrevious || !normalizedAccount)
+            throw new BadRequestException(
+                'Thông tin đồng bộ tài khoản nhận hoàn chưa đầy đủ.',
+            );
+
+        const updatedCount =
+            await this.orderRepository.syncPendingRefundRecipientAccount({
+                ownerId,
+                accountId,
+                allowSingleAccountLegacySync,
+                previousAccount: normalizedPrevious,
+                account: normalizedAccount,
+            });
+        return { updatedCount };
+    }
+
+    // Tài khoản đã lưu được đọc lại từ Auth để xác thực ownership và tránh tin số tài khoản do browser gửi.
+    private async resolveRefundBankAccount(
+        ownerId: string,
+        dto: CancelOrderDto,
+    ): Promise<{ account?: RefundBankAccountInput; accountId?: string }> {
+        const accountId = dto.savedRefundBankAccountId?.trim();
+        if (accountId) {
+            const ownedAccount =
+                await this.authClient.getOwnedRefundBankAccount(
+                    ownerId,
+                    accountId,
+                );
+            const account = this.normalizeRefundBankAccount(ownedAccount);
+            if (!account)
+                throw new BadRequestException(
+                    'Thông tin tài khoản nhận hoàn chưa đầy đủ.',
+                );
+            return { account, accountId: ownedAccount.id };
+        }
+        return {
+            account: this.normalizeRefundBankAccount(dto.refundBankAccount),
+        };
     }
 
     // Chuẩn hóa Unicode, khoảng trắng và chữ hoa để tên lưu ổn định cho thao tác chuyển hoàn.

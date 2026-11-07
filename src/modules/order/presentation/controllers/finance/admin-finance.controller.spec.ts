@@ -4,8 +4,10 @@ import {
     ServiceUnavailableException,
 } from '@nestjs/common';
 import type { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
+import type { AdminRefundConfirmationService } from '@/modules/order/application/services/finance/admin-refund-confirmation.service';
 import type { Pay2sPayoutReconciliationService } from '@/modules/order/application/services/payment/payouts/pay2s-payout-reconciliation.service';
 import type { SellerWalletRepositoryPort } from '@/modules/order/application/contracts/seller-wallet.repository';
+import type { SellerWalletDebtService } from '@/modules/order/application/services/finance/seller-wallet-debt.service';
 import { AdminFinanceController } from '@/modules/order/presentation/controllers/finance/admin-finance.controller';
 
 describe('AdminFinanceController payout', () => {
@@ -14,18 +16,22 @@ describe('AdminFinanceController payout', () => {
     let mockReadiness: jest.Mock;
     let mockTransition: jest.Mock;
 
-    // Mỗi case dùng mock riêng để kiểm tra không ghi trạng thái khi điều kiện chưa đạt.
+    // Mock cả snapshot công nợ để controller có thể ghép overview mà không gọi repository thật.
     beforeEach(() => {
         mockReadiness = jest.fn().mockReturnValue({ ready: true, missing: [] });
         mockTransition = jest.fn().mockResolvedValue(undefined);
         target = new AdminFinanceController(
             {} as PaymentService,
+            {} as AdminRefundConfirmationService,
             {
                 getReadiness: mockReadiness,
             } as unknown as Pay2sPayoutReconciliationService,
             {
                 transitionWithdrawal: mockTransition,
             } as unknown as SellerWalletRepositoryPort,
+            {
+                getAdminSummary: jest.fn().mockResolvedValue({}),
+            } as unknown as SellerWalletDebtService,
         );
     });
 

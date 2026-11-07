@@ -37,6 +37,15 @@ export interface ShippingAddressResponse {
     street: string;
 }
 
+// Snapshot ngân hàng trả từ Auth sau khi xác nhận account ID thuộc owner của order.
+export interface OwnedRefundBankAccountResponse {
+    id: string;
+    bankCode: string;
+    bankName: string;
+    accountHolder: string;
+    accountNumber: string;
+}
+
 export interface CheckoutQuoteItem {
     productId: string;
     variantId: string;

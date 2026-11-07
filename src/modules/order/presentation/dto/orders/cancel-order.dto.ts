@@ -5,6 +5,7 @@ import {
     IsDefined,
     IsOptional,
     IsString,
+    IsUUID,
     Matches,
     MaxLength,
     MinLength,
@@ -63,6 +64,10 @@ export class CancelOrderDto {
     })
     @MaxLength(500)
     reason?: string;
+
+    @IsOptional()
+    @IsUUID()
+    savedRefundBankAccountId?: string;
 
     @IsOptional()
     @ValidateNested()

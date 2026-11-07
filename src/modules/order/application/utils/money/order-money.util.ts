@@ -10,6 +10,16 @@ export function toCents(value: string): bigint {
     return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
 }
 
+// Chuyển giá trị ledger có thể âm sang cents; giữ nguyên validator decimal hiện có cho phần trị tuyệt đối.
+export function toSignedCents(value: string): bigint {
+    const normalized = value.trim();
+    const isNegative = normalized.startsWith('-');
+    const absoluteValue = isNegative ? normalized.slice(1) : normalized;
+    const cents = toCents(absoluteValue);
+
+    return isNegative ? -cents : cents;
+}
+
 // Trả decimal chuẩn hai chữ số để PostgreSQL và frontend nhận cùng một representation.
 export function fromCents(value: bigint): string {
     const sign = value < 0n ? '-' : '';
