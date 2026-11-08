@@ -31,6 +31,8 @@ export interface SellerWalletRepositoryPort {
         reference: string,
     ): Promise<void>;
     reverseRefund(returnRequestId: string): Promise<void>;
+    // Đảo tiền hàng của sản phẩm hoàn ngay khi shop xác nhận hàng đạt.
+    reverseReturnSaleAtInspection(returnRequestId: string): Promise<void>;
     reverseCancelledOrder(orderId: string): Promise<void>;
     recordCodRefund(input: {
         returnRequestId: string;
@@ -44,9 +46,23 @@ export interface SellerWalletRepositoryPort {
         search?: string,
     ): Promise<SellerWalletSnapshot>;
     releaseCompletedOrder(orderId: string): Promise<void>;
+    // Ghi chi phí thật của GHN vào ledger nền tảng mà không làm thay đổi ví seller.
+    recordReturnShippingPlatformCost(
+        returnRequestId: string,
+        amount: string,
+    ): Promise<void>;
+    // Ghi phí vào ví seller sau khi request đã được shop xác nhận kiểm tra đạt.
     recordReturnShippingFee(
         returnRequestId: string,
         amount: string,
+    ): Promise<void>;
+    // Ghi khoản phí giao ban đầu mà seller phải hoàn lại cho khách khi request lỗi hàng được kiểm tra đạt.
+    recordReturnOutboundShippingFee(returnRequestId: string): Promise<void>;
+    // Bù khoản seller debit cũ nếu request đã kết thúc với kết quả kiểm tra không đạt.
+    reverseFailedReturnShippingFee(returnRequestId: string): Promise<void>;
+    // Đảo phần phí giao ban đầu nếu một request từng ghi nợ seller nhưng kết quả kiểm tra cuối là không đạt.
+    reverseFailedReturnOutboundShippingFee(
+        returnRequestId: string,
     ): Promise<void>;
     recordCustomerReturnShippingReceivable(
         returnRequestId: string,

@@ -216,40 +216,43 @@ describe('SellerWalletRepository withdrawals', () => {
         );
     });
 
-    // Thiếu balance hoặc race thắng bởi request khác bị từ chối trước khi tạo payout hay ledger.
-    it('rejects a withdrawal larger than the currently available balance', async () => {
-        const walletRepository = {
-            findOne: jest.fn().mockResolvedValue({
-                shopId: 'shop-1',
-                availableBalance: '10000.00',
-                reservedBalance: '0.00',
-            }),
-            save: jest.fn(),
-        };
-        const withdrawalRepository = { save: jest.fn() };
-        const manager = createManager(
-            new Map<Function, Record<string, jest.Mock>>([
-                [SellerWallet, walletRepository],
-                [WalletWithdrawalRequest, withdrawalRepository],
-            ]),
-        );
-        const repository = new SellerWalletRepository(
-            createDataSource(manager),
-        );
+    // Số dư dương thiếu tiền hoặc âm vì công nợ đều bị từ chối trước khi tạo payout hay ledger.
+    it.each(['10000.00', '-18900.00'])(
+        'rejects a withdrawal when available balance %s cannot cover it',
+        async (availableBalance) => {
+            const walletRepository = {
+                findOne: jest.fn().mockResolvedValue({
+                    shopId: 'shop-1',
+                    availableBalance,
+                    reservedBalance: '0.00',
+                }),
+                save: jest.fn(),
+            };
+            const withdrawalRepository = { save: jest.fn() };
+            const manager = createManager(
+                new Map<Function, Record<string, jest.Mock>>([
+                    [SellerWallet, walletRepository],
+                    [WalletWithdrawalRequest, withdrawalRepository],
+                ]),
+            );
+            const repository = new SellerWalletRepository(
+                createDataSource(manager),
+            );
 
-        await expect(
-            repository.requestWithdrawal({
-                shopId: 'shop-1',
-                sellerUserId: 'seller-1',
-                amount: '20000',
-                bankCode: 'MB',
-                bankName: 'MB Bank',
-                accountHolder: 'NGUYEN VAN A',
-                accountNumber: '12345678',
-            }),
-        ).rejects.toBeInstanceOf(ConflictException);
-        expect(withdrawalRepository.save).not.toHaveBeenCalled();
-    });
+            await expect(
+                repository.requestWithdrawal({
+                    shopId: 'shop-1',
+                    sellerUserId: 'seller-1',
+                    amount: '20000',
+                    bankCode: 'MB',
+                    bankName: 'MB Bank',
+                    accountHolder: 'NGUYEN VAN A',
+                    accountNumber: '12345678',
+                }),
+            ).rejects.toBeInstanceOf(ConflictException);
+            expect(withdrawalRepository.save).not.toHaveBeenCalled();
+        },
+    );
 
     // Webhook chỉ stage giao dịch; admin xác nhận người nhận mới tất toán và retry không ghi ledger lần hai.
     it('stages and confirms a Pay2S payout exactly once', async () => {
@@ -437,18 +440,25 @@ describe('SellerWalletRepository return-shipping receivables', () => {
 });
 
 describe('SellerWalletRepository return-shipping charges', () => {
-    // Shop chỉ bị trừ một lần khi GHN đã chốt phí; retry callback tìm thấy source key cũ và không trừ thêm.
-    it('debits seller wallet once for a seller-paid return fee', async () => {
+    // Shop có thể đang âm vì công nợ; khoản GHN chiều về vẫn ghi đủ và retry không trừ lần hai.
+    it('debits a seller-paid return fee once when the wallet is already negative', async () => {
         const wallet = {
             shopId: 'shop-1',
-            availableBalance: '50000.00',
+            availableBalance: '-18900.00',
         };
         let savedPlatformEntry: Record<string, unknown> | null = null;
         const walletRepository = {
             findOne: jest.fn().mockResolvedValue(wallet),
             save: jest.fn().mockImplementation(async (value) => value),
         };
-        const sellerLedgerRepository = { save: jest.fn() };
+        let savedSellerEntry: Record<string, unknown> | null = null;
+        const sellerLedgerRepository = {
+            findOne: jest.fn().mockImplementation(async () => savedSellerEntry),
+            save: jest.fn().mockImplementation(async (value) => {
+                savedSellerEntry = value;
+                return value;
+            }),
+        };
         const platformLedgerRepository = {
             findOne: jest
                 .fn()
@@ -485,7 +495,7 @@ describe('SellerWalletRepository return-shipping charges', () => {
         await repository.recordReturnShippingFee('return-1', '12000.00');
         await repository.recordReturnShippingFee('return-1', '12000.00');
 
-        expect(wallet.availableBalance).toBe('38000.00');
+        expect(wallet.availableBalance).toBe('-30900.00');
         expect(walletRepository.save).toHaveBeenCalledTimes(1);
         expect(sellerLedgerRepository.save).toHaveBeenCalledWith(
             expect.objectContaining({
@@ -495,6 +505,125 @@ describe('SellerWalletRepository return-shipping charges', () => {
             }),
         );
         expect(sellerLedgerRepository.save).toHaveBeenCalledTimes(1);
+    });
+
+    // Shop âm sẵn vẫn ghi được phí chiều đi; callback/đọc ví lặp không trừ lần hai.
+    it('debits the outbound shipping refund once when the wallet is already negative', async () => {
+        const wallet = {
+            shopId: 'shop-1',
+            availableBalance: '-18900.00',
+        };
+        let savedSellerEntry: Record<string, unknown> | null = null;
+        const walletRepository = {
+            findOne: jest.fn().mockResolvedValue(wallet),
+            save: jest.fn().mockImplementation(async (value) => value),
+        };
+        const sellerLedgerRepository = {
+            findOne: jest.fn().mockImplementation(async () => savedSellerEntry),
+            save: jest.fn().mockImplementation(async (value) => {
+                savedSellerEntry = value;
+                return value;
+            }),
+        };
+        const manager = {
+            getRepository: jest.fn((entity: Function) => {
+                if (entity === OrderReturnRequest)
+                    return {
+                        findOne: jest.fn().mockResolvedValue({
+                            id: 'return-1',
+                            shopId: 'shop-1',
+                            orderId: 'order-1',
+                            returnShippingPayer: 'SELLER',
+                            inspectionPassed: true,
+                            refundShippingAmount: '20900.00',
+                        }),
+                    };
+                if (entity === SellerWallet) return walletRepository;
+                if (entity === SellerWalletLedger)
+                    return sellerLedgerRepository;
+                return undefined;
+            }),
+            query: jest.fn().mockResolvedValue(undefined),
+        } as unknown as EntityManager;
+        const repository = new SellerWalletRepository(
+            createDataSource(manager),
+        );
+
+        await repository.recordReturnOutboundShippingFee('return-1');
+        await repository.recordReturnOutboundShippingFee('return-1');
+
+        expect(wallet.availableBalance).toBe('-39800.00');
+        expect(walletRepository.save).toHaveBeenCalledTimes(1);
+        expect(sellerLedgerRepository.save).toHaveBeenCalledWith(
+            expect.objectContaining({
+                kind: 'RETURN_SHIPPING_DEBIT',
+                amount: '-20900.00',
+                sourceKey: 'return-outbound-shipping:return-1',
+            }),
+        );
+        expect(sellerLedgerRepository.save).toHaveBeenCalledTimes(1);
+    });
+
+    // Đảo debit ở ví vẫn âm phải trả về đúng dư nợ còn lại sau khi hàng không đạt.
+    it('reverses an outbound shipping refund from a negative wallet after failed inspection', async () => {
+        const wallet = {
+            shopId: 'shop-1',
+            availableBalance: '-39800.00',
+        };
+        const debit = {
+            kind: 'RETURN_SHIPPING_DEBIT',
+            amount: '-20900.00',
+        };
+        let reversal: Record<string, unknown> | null = null;
+        const walletRepository = {
+            findOne: jest.fn().mockResolvedValue(wallet),
+            save: jest.fn().mockImplementation(async (value) => value),
+        };
+        const sellerLedgerRepository = {
+            findOne: jest
+                .fn()
+                .mockResolvedValueOnce(debit)
+                .mockImplementation(async () => reversal),
+            save: jest.fn().mockImplementation(async (value) => {
+                reversal = value;
+                return value;
+            }),
+        };
+        const manager = {
+            getRepository: jest.fn((entity: Function) => {
+                if (entity === OrderReturnRequest)
+                    return {
+                        findOne: jest.fn().mockResolvedValue({
+                            id: 'return-1',
+                            shopId: 'shop-1',
+                            orderId: 'order-1',
+                            status: OrderReturnStatus.INSPECTION_FAILED,
+                            returnShippingPayer: 'SELLER',
+                            refundShippingAmount: '20900.00',
+                        }),
+                    };
+                if (entity === SellerWallet) return walletRepository;
+                if (entity === SellerWalletLedger)
+                    return sellerLedgerRepository;
+                return undefined;
+            }),
+            query: jest.fn().mockResolvedValue(undefined),
+        } as unknown as EntityManager;
+        const repository = new SellerWalletRepository(
+            createDataSource(manager),
+        );
+
+        await repository.reverseFailedReturnOutboundShippingFee('return-1');
+
+        expect(wallet.availableBalance).toBe('-18900.00');
+        expect(walletRepository.save).toHaveBeenCalledTimes(1);
+        expect(sellerLedgerRepository.save).toHaveBeenCalledWith(
+            expect.objectContaining({
+                kind: 'RETURN_SHIPPING_DEBIT',
+                amount: '20900.00',
+                sourceKey: 'return-outbound-shipping-reversal:return-1',
+            }),
+        );
     });
 });
 
