@@ -2,12 +2,18 @@
 // Transaction manager được mô phỏng để kiểm tra locking và business rule mà không cần PostgreSQL thật.
 /// <reference types="jest" />
 import { Test, type TestingModule } from '@nestjs/testing';
+import { BadRequestException } from '@nestjs/common';
 import { createMock, type DeepMocked } from '@golevelup/ts-jest';
 import { DataSource } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderDeliveryIssue } from '@/database/delivery/entities/order-delivery-issue.entity';
+import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
+import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
+import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
+import { OrderDeliveryIssueReason } from '@/database/delivery/enums/order-delivery-issue-reason.enum';
+import { OrderDeliveryIssueStatus } from '@/database/delivery/enums/order-delivery-issue-status.enum';
 import { OrderDeliveryConfirmationStatus } from '@/database/delivery/enums/order-delivery-confirmation-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
@@ -58,7 +64,13 @@ describe('OrderDeliveryConfirmationService', () => {
     };
 
     // Gắn transaction mock vào DataSource để callback luôn chạy trong manager giả lập.
-    const mockTransaction = (order: Order | null) => {
+    const mockTransaction = (
+        order: Order | null,
+        options?: {
+            linkedReturn?: OrderReturnRequest;
+            itemIds?: string[];
+        },
+    ) => {
         const orderRepository = {
             createQueryBuilder: jest
                 .fn()
@@ -66,12 +78,19 @@ describe('OrderDeliveryConfirmationService', () => {
             save: jest.fn().mockImplementation(async (value: Order) => value),
         };
         const itemRepository = {
-            find: jest.fn().mockResolvedValue([]),
+            find: jest
+                .fn()
+                .mockResolvedValue(
+                    (options?.itemIds ?? []).map((id) => ({ id })),
+                ),
         };
         const issueRepository = {
             findOne: jest.fn().mockResolvedValue(null),
             create: jest.fn((value: unknown) => value),
             save: jest.fn().mockImplementation(async (value: unknown) => value),
+        };
+        const returnRepository = {
+            findOne: jest.fn().mockResolvedValue(options?.linkedReturn ?? null),
         };
         const manager = {
             getRepository: jest.fn((entity: unknown) =>
@@ -79,13 +98,15 @@ describe('OrderDeliveryConfirmationService', () => {
                     ? itemRepository
                     : entity === OrderDeliveryIssue
                       ? issueRepository
-                      : orderRepository,
+                      : entity === OrderReturnRequest
+                        ? returnRepository
+                        : orderRepository,
             ),
         };
         mockDataSource.transaction.mockImplementation(async (callback: any) =>
             callback(manager),
         );
-        return orderRepository;
+        return { orderRepository, issueRepository, returnRepository };
     };
 
     // Khởi tạo TestingModule với toàn bộ dependency của delivery use case.
@@ -234,6 +255,76 @@ describe('OrderDeliveryConfirmationService', () => {
         expect(
             mockOrderEvents.publishDeliveryIssueReported,
         ).toHaveBeenCalledWith(orderId);
+    });
+
+    // Lý do CHANGE_OF_MIND được lưu chi tiết ở return; issue enum cũ dùng OTHER và evidence rỗng được phép theo linkedReturn.
+    it('links a change-of-mind return without evidence through the legacy generic issue reason', async () => {
+        const order = createDeliveredOrder();
+        const linkedReturn = {
+            id: 'return-1',
+            orderId,
+            ownerId,
+            status: OrderReturnStatus.REQUESTED,
+            itemIds: ['item-1'],
+            reason: OrderReturnReason.CHANGE_OF_MIND,
+        } as OrderReturnRequest;
+        const { issueRepository } = mockTransaction(order, {
+            linkedReturn,
+            itemIds: ['item-1'],
+        });
+        mockOrderRepository.findOwnedById.mockResolvedValue(order);
+        mockResponseMapper.toResponse.mockReturnValue({ id: orderId } as never);
+
+        await target.confirm(ownerId, orderId, {
+            decision: DeliveryConfirmationDecision.ISSUE,
+            reason: OrderDeliveryIssueReason.OTHER,
+            itemIds: ['item-1'],
+            returnRequestId: linkedReturn.id,
+            evidence: [],
+        });
+
+        expect(issueRepository.save).toHaveBeenCalledWith(
+            expect.objectContaining({
+                reason: OrderDeliveryIssueReason.OTHER,
+                evidence: [],
+                status: OrderDeliveryIssueStatus.RESOLVED,
+                returnRequestId: linkedReturn.id,
+            }),
+        );
+        expect(order.fulfillmentStatus).toBe(
+            OrderFulfillmentStatus.RETURN_REFUND,
+        );
+    });
+
+    // Lý do lỗi sản phẩm vẫn cần evidence kể cả khi DTO cho phép mảng rỗng để hỗ trợ CHANGE_OF_MIND.
+    it('rejects a linked seller-fault return without evidence', async () => {
+        const order = createDeliveredOrder();
+        const linkedReturn = {
+            id: 'return-fault',
+            orderId,
+            ownerId,
+            status: OrderReturnStatus.REQUESTED,
+            itemIds: ['item-1'],
+            reason: OrderReturnReason.DAMAGED,
+        } as OrderReturnRequest;
+        const { issueRepository } = mockTransaction(order, {
+            linkedReturn,
+            itemIds: ['item-1'],
+        });
+        mockOrderRepository.findOwnedById.mockResolvedValue(order);
+
+        await expect(
+            target.confirm(ownerId, orderId, {
+                decision: DeliveryConfirmationDecision.ISSUE,
+                reason: OrderDeliveryIssueReason.DAMAGED,
+                itemIds: ['item-1'],
+                returnRequestId: linkedReturn.id,
+                evidence: [],
+            }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+
+        expect(issueRepository.save).not.toHaveBeenCalled();
+        expect(order.fulfillmentStatus).toBe(OrderFulfillmentStatus.DELIVERED);
     });
 
     // Worker không được auto-complete order còn hạn hoặc đã chuyển sang issue.

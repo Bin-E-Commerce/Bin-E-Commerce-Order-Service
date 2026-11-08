@@ -13,6 +13,7 @@ import { OrderDeliveryIssue } from '@/database/delivery/entities/order-delivery-
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
 import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
+import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
 import { OrderDeliveryConfirmationMethod } from '@/database/delivery/enums/order-delivery-confirmation-method.enum';
 import { OrderDeliveryConfirmationStatus } from '@/database/delivery/enums/order-delivery-confirmation-status.enum';
 import { OrderDeliveryIssueStatus } from '@/database/delivery/enums/order-delivery-issue-status.enum';
@@ -154,8 +155,8 @@ export class OrderDeliveryConfirmationService {
     }
 
     // Xử lý quyết định của customer trong một transaction khóa order và issue liên quan.
-    // RECEIVED hoàn tất order ngay; ISSUE chuyển đơn ra khỏi tab "Chờ xác nhận" bằng cách
-    // chốt fulfillment về RETURN_REFUND, còn return request vẫn giữ state riêng để Seller xử lý.
+    // RECEIVED hoàn tất order ngay; ISSUE chuyển đơn ra khỏi tab "Chờ xác nhận" và liên kết return còn chờ shop.
+    // Evidence được quyết định theo lý do return đã lưu: lỗi hàng bắt buộc có file, đổi ý thì không.
     // Nhánh ISSUE idempotent để retry sau timeout không tạo issue hoặc lịch sử hủy trùng.
     async confirm(
         ownerId: string,
@@ -221,14 +222,6 @@ export class OrderDeliveryConfirmationService {
                 throw new BadRequestException(
                     'Vui lòng chọn lý do đơn hàng có vấn đề.',
                 );
-            // Mọi nhánh tạo yêu cầu hoàn phải có bằng chứng; khiếu nại chưa nhận hàng giữ quy trình riêng.
-            if (
-                dto.reason !== OrderDeliveryIssueReason.NOT_RECEIVED &&
-                !dto.evidence?.length
-            )
-                throw new BadRequestException(
-                    'Yêu cầu hoàn hàng cần ít nhất một ảnh hoặc video bằng chứng.',
-                );
             const itemIds = dto.itemIds ?? [];
             // Đọc item sau khi đã khóa order; tránh LEFT JOIN trong câu lệnh FOR UPDATE khiến PostgreSQL từ chối khóa phía nullable.
             const orderItems = await manager.getRepository(OrderItem).find({
@@ -265,6 +258,11 @@ export class OrderDeliveryConfirmationService {
                     throw new BadRequestException(
                         'Yêu cầu hoàn hàng không thuộc đơn hàng này.',
                     );
+                // Cancel có thể chạy giữa bước tạo request và ghi delivery issue; chỉ liên kết request còn chờ shop.
+                if (linkedReturn.status !== OrderReturnStatus.REQUESTED)
+                    throw new ConflictException(
+                        'Yêu cầu hoàn hàng đã bị hủy hoặc không còn chờ xử lý.',
+                    );
                 const returnItemIds = new Set(linkedReturn.itemIds);
                 if (
                     itemIds.length === 0 ||
@@ -279,8 +277,9 @@ export class OrderDeliveryConfirmationService {
                     DAMAGED: OrderReturnReason.DAMAGED,
                     WRONG_ITEM: OrderReturnReason.WRONG_ITEM,
                     MISSING_ITEM: OrderReturnReason.MISSING_ITEM,
-                    OTHER: OrderReturnReason.OTHER,
                 };
+                // OTHER là mã issue tổng quát cho các lý do return không có mã riêng trong legacy issue enum.
+                // Reason chi tiết trên linkedReturn vẫn là nguồn chuẩn để tính phí và quyết định refund.
                 if (
                     expectedReturnReason[dto.reason] &&
                     linkedReturn.reason !== expectedReturnReason[dto.reason]
@@ -289,6 +288,17 @@ export class OrderDeliveryConfirmationService {
                         'Lý do khiếu nại không khớp yêu cầu hoàn hàng.',
                     );
             }
+
+            // Chỉ kiểm tra sau khi đã xác thực linkedReturn để dùng reason server-side, không tin loại issue OTHER do client gửi.
+            // NOT_RECEIVED legacy và CHANGE_OF_MIND không cần tệp; mọi return lỗi khác vẫn bị chặn nếu thiếu evidence.
+            if (
+                dto.reason !== OrderDeliveryIssueReason.NOT_RECEIVED &&
+                linkedReturn?.reason !== OrderReturnReason.CHANGE_OF_MIND &&
+                !dto.evidence?.length
+            )
+                throw new BadRequestException(
+                    'Yêu cầu hoàn hàng cần ít nhất một ảnh hoặc video bằng chứng.',
+                );
 
             const issueRepository = manager.getRepository(OrderDeliveryIssue);
             const existingIssue = await issueRepository.findOne({
