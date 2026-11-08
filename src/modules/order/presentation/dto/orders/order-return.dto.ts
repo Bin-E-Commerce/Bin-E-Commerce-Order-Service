@@ -16,7 +16,10 @@ import {
     ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
+import {
+    CUSTOMER_ORDER_RETURN_REASONS,
+    OrderReturnReason,
+} from '@/database/returns/enums/order-return-reason.enum';
 
 // Request tạo yêu cầu trả hàng cho các item thuộc order của customer.
 export class CreateOrderReturnDto {
@@ -25,16 +28,20 @@ export class CreateOrderReturnDto {
     @IsUUID('4', { each: true })
     itemIds!: string[];
 
-    @IsEnum(OrderReturnReason)
+    @IsIn([...CUSTOMER_ORDER_RETURN_REASONS])
     reason!: OrderReturnReason;
+
+    // Account ID bắt buộc để Order Service kiểm tra quyền sở hữu với Auth trước khi mở yêu cầu hoàn.
+    @IsUUID('4')
+    savedRefundBankAccountId!: string;
 
     @IsOptional()
     @IsString()
     @MaxLength(1000)
     description?: string;
 
+    @IsOptional()
     @IsArray()
-    @ArrayMinSize(1)
     @ArrayMaxSize(6)
     @ValidateNested({ each: true })
     @Type(() => ReturnEvidenceDto)
@@ -54,12 +61,12 @@ export class UpdateOrderReturnDto {
     @MaxLength(1000)
     description?: string;
 
+    @IsOptional()
     @IsArray()
-    @ArrayMinSize(1)
     @ArrayMaxSize(6)
     @ValidateNested({ each: true })
     @Type(() => ReturnEvidenceDto)
-    evidence!: ReturnEvidenceDto[];
+    evidence?: ReturnEvidenceDto[];
 }
 
 export class ReturnEvidenceDto {

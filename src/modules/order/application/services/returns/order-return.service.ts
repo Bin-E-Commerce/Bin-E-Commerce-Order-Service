@@ -8,6 +8,7 @@ import {
     Logger,
     NotFoundException,
     Optional,
+    ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
@@ -22,6 +23,8 @@ import { Order } from '@/database/order/entities/order.entity';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { OrderDeliveryConfirmationStatus } from '@/database/delivery/enums/order-delivery-confirmation-status.enum';
 import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
+import { RETURN_REQUEST_CANCELLATION_REPOSITORY } from '@/modules/order/application/contracts/return-request-cancellation.repository';
+import type { ReturnRequestCancellationRepositoryPort } from '@/modules/order/application/contracts/return-request-cancellation.repository';
 import { SellerShopClient } from '@/modules/order/application/clients/seller-shop.client';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import {
@@ -46,6 +49,10 @@ import { ORDER_RETURN_SHIPMENT_REPOSITORY } from '@/modules/order/application/co
 import type { OrderReturnShipmentRepositoryPort } from '@/modules/order/application/contracts/order-return-shipment.repository';
 import type { ReturnShipmentSyncRecord } from '@/modules/order/application/types/returns/return-shipment-sync.type';
 import type { ReturnRefundCalculationOrderSnapshot } from '@/modules/order/application/types/returns/return-refund-calculation.type';
+import type { SellerReturnFinancePreview } from '@/modules/order/application/types/returns/seller-return-finance-preview.type';
+import { SellerWalletDebtService } from '@/modules/order/application/services/finance/seller-wallet-debt.service';
+import { AuthClient } from '@/modules/order/application/clients/auth.client';
+import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
 import {
     calculateReturnShippingRefund,
     capReturnRefundAmount,
@@ -53,6 +60,16 @@ import {
     isSellerReturnFaultReason,
     roundReturnVnd,
 } from '@/modules/order/application/utils/returns/return-refund-calculation.util';
+
+const REFUND_ACCOUNT_HOLDER_PATTERN =
+    /^\p{L}[\p{L}\p{M}]*(?: [\p{L}][\p{L}\p{M}]*)*$/u;
+const SELLER_REDACTED_RETURN_FIELDS = new Set([
+    'refundBankAccountId',
+    'refundBankCode',
+    'refundBankName',
+    'refundAccountHolder',
+    'refundAccountNumber',
+]);
 
 @Injectable()
 export class OrderReturnService {
@@ -73,20 +90,22 @@ export class OrderReturnService {
         @Optional()
         @Inject(ORDER_RETURN_SHIPMENT_REPOSITORY)
         private readonly returnShipmentRepository?: OrderReturnShipmentRepositoryPort,
+        @Optional()
+        @Inject(RETURN_REQUEST_CANCELLATION_REPOSITORY)
+        private readonly returnRequestCancellationRepository?: ReturnRequestCancellationRepositoryPort,
+        @Optional()
+        private readonly sellerWalletDebtService?: SellerWalletDebtService,
+        @Optional() private readonly authClient?: AuthClient,
     ) {}
 
     // Tạo một request cho đúng một shop; UI nhiều shop phải gọi lại endpoint theo từng nhóm item.
+    // Chỉ nhận đơn DELIVERED vì COMPLETED nghĩa là khách đã xác nhận hoàn thành và đóng quyền bắt đầu return mới.
     // Kiểm tra application layer giúp phản hồi nhanh khi quy trình hoàn đang mở.
     // Unique partial index ở database xử lý trường hợp hai request chạy đồng thời sau cùng một lần kiểm tra.
     async create(ownerId: string, orderId: string, dto: CreateOrderReturnDto) {
         const order = await this.orders.findOwnedById(ownerId, orderId);
         if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
-        if (
-            ![
-                OrderFulfillmentStatus.DELIVERED,
-                OrderFulfillmentStatus.COMPLETED,
-            ].includes(order.fulfillmentStatus)
-        )
+        if (order.fulfillmentStatus !== OrderFulfillmentStatus.DELIVERED)
             throw new ConflictException(
                 'Đơn hàng chưa đủ điều kiện hoàn hàng.',
             );
@@ -122,6 +141,16 @@ export class OrderReturnService {
                 );
             return existing;
         }
+        // OTHER chỉ được giữ cho request lịch sử đã tồn tại; không cho tạo return mới bỏ qua danh sách lý do chuẩn.
+        if (dto.reason === OrderReturnReason.OTHER)
+            throw new BadRequestException(
+                'Lý do khác không còn được hỗ trợ. Vui lòng chọn một lý do trả hàng phù hợp.',
+            );
+        // Xác minh tài khoản chỉ cho request mới; retry request đã tạo vẫn idempotent dù hồ sơ ngân hàng được đổi sau đó.
+        const refundBankAccount = await this.resolveRefundBankAccount(
+            ownerId,
+            dto.savedRefundBankAccountId,
+        );
         const itemRefundAmount = this.roundVnd(
             itemIds.reduce(
                 (sum, itemId) => sum + toCents(itemMap.get(itemId)!.lineTotal),
@@ -172,6 +201,11 @@ export class OrderReturnService {
             description: dto.description?.trim() || null,
             reviewNote: null,
             evidence: dto.evidence ?? [],
+            refundBankAccountId: refundBankAccount.id,
+            refundBankCode: refundBankAccount.bankCode,
+            refundBankName: refundBankAccount.bankName,
+            refundAccountHolder: refundBankAccount.accountHolder,
+            refundAccountNumber: refundBankAccount.accountNumber,
             refundAmount: fromCents(estimatedRefundAmount),
             estimatedRefundAmount: fromCents(estimatedRefundAmount),
             refundItemAmount: fromCents(itemRefundAmount),
@@ -261,23 +295,33 @@ export class OrderReturnService {
         return this.ensureReturnShippingQuote(request, order);
     }
 
-    // Customer chỉ được hủy khi seller chưa duyệt và thao tác này idempotent.
+    // Hủy nguyên tử request đang chờ shop; nếu request khóa luồng delivery issue thì khôi phục order về DELIVERED/PENDING.
+    // Adapter kiểm tra lại trạng thái dưới row lock để seller duyệt đồng thời không bị ghi đè; retry đã hủy không phát event trùng.
     async cancel(ownerId: string, returnId: string) {
-        const request = await this.getForCustomer(ownerId, returnId);
-        if (request.status === OrderReturnStatus.CUSTOMER_CANCELLED)
-            return request;
-        if (request.status !== OrderReturnStatus.REQUESTED)
+        if (!this.returnRequestCancellationRepository)
+            throw new ConflictException(
+                'Chức năng hủy yêu cầu hoàn hàng chưa sẵn sàng.',
+            );
+
+        const result =
+            await this.returnRequestCancellationRepository.cancelRequested(
+                ownerId,
+                returnId,
+            );
+        if (result.kind === 'NOT_FOUND')
+            throw new NotFoundException('Không tìm thấy yêu cầu hoàn hàng.');
+        if (result.kind === 'NOT_CANCELLABLE')
             throw new ConflictException('Yêu cầu đã được shop xử lý.');
-        request.status = OrderReturnStatus.CUSTOMER_CANCELLED;
-        const saved = await this.repository.save(request);
-        const order = await this.orders.findOwnedById(ownerId, request.orderId);
+        if (result.kind === 'ALREADY_CANCELLED')
+            return this.getForCustomer(ownerId, returnId);
+
         await this.publish(
-            saved,
-            order?.orderNumber ?? '',
+            result.snapshot,
+            result.snapshot.orderNumber,
             ownerId,
             'return.cancelled',
         );
-        return saved;
+        return this.getForCustomer(ownerId, returnId);
     }
 
     // Seller queue chỉ trả request thuộc shop được resolve từ session, đồng thời bổ sung quote cho request legacy.
@@ -291,7 +335,7 @@ export class OrderReturnService {
             where: { shopId, ...(status ? { status } : {}) },
             order: { createdAt: 'DESC' },
         });
-        return Promise.all(
+        const sellerRequests = await Promise.all(
             requests.map(async (request) => {
                 const order = await this.orders.findOwnedById(
                     request.ownerId,
@@ -301,6 +345,9 @@ export class OrderReturnService {
                     ? this.ensureReturnShippingQuote(request, order)
                     : request;
             }),
+        );
+        return sellerRequests.map((request) =>
+            this.toSellerSafeRequest(request),
         );
     }
 
@@ -413,7 +460,76 @@ export class OrderReturnService {
                 ? 'return.approved'
                 : 'return.rejected',
         );
-        return saved;
+        return this.toSellerSafeRequest(saved);
+    }
+
+    // Trả preview tài chính tối thiểu cho request thuộc shop hiện tại; không cấp quyền đọc lịch sử ví cho nhân viên xử lý return.
+    async getSellerReturnFinancePreview(
+        currentUser: SellerOrderUserContext,
+        returnId: string,
+        selectedPayer?: 'CUSTOMER' | 'SELLER',
+    ): Promise<SellerReturnFinancePreview> {
+        // Resolve tenant bằng identity đã xác minh; route không nhận shopId từ browser.
+        const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
+        const request = await this.repository.findOne({
+            where: { id: returnId, shopId },
+        });
+        // Trả cùng lỗi không tìm thấy cho ID ngoài shop để không tiết lộ request của tenant khác.
+        if (!request)
+            throw new NotFoundException('Không tìm thấy yêu cầu hoàn hàng.');
+        // Snapshot chỉ hợp lệ trước khi duyệt; request đổi state giữa lúc mở dialog sẽ phải tải lại.
+        if (request.status !== OrderReturnStatus.REQUESTED) {
+            throw new ConflictException(
+                'Chỉ xem được dự báo ví cho yêu cầu đang chờ shop duyệt.',
+            );
+        }
+
+        // Lý do cố định không thể đổi payer bằng query; OTHER phải xác nhận shop là bên chịu phí.
+        const fixedPayer = this.getFixedShippingPayer(
+            request.reason as OrderReturnReason,
+        );
+        const resolvedPayer =
+            fixedPayer ?? selectedPayer ?? request.returnShippingPayer;
+        if (resolvedPayer !== 'SELLER') {
+            throw new ConflictException(
+                'Dự báo ví chỉ áp dụng khi shop là bên chịu phí hoàn.',
+            );
+        }
+        if (!this.sellerWalletRepository || !this.sellerWalletDebtService) {
+            throw new Error(
+                'Seller wallet services are required to preview return fees.',
+            );
+        }
+
+        // Lượt đi dùng đúng khoản phí giao ban đầu sẽ hoàn cho khách; lượt về dùng quote GHN đã lưu trên request.
+        // Hai chiều chỉ cộng vào dự báo khi shop là payer, còn số thực tế vẫn được ghi theo từng sự kiện cuối cùng.
+        const estimatedOutboundShippingFee = toCents(
+            request.refundShippingAmount,
+        );
+        const estimatedReturnShippingFee = toCents(
+            request.returnShippingEstimatedCost,
+        );
+        const estimatedShippingFee =
+            estimatedOutboundShippingFee + estimatedReturnShippingFee;
+
+        // Đọc snapshot ví trước vì bước này đối soát ledger đã chốt; debt snapshot sau đó phải thấy balance vừa được sửa.
+        const wallet = await this.sellerWalletRepository.getSnapshot(
+            shopId,
+            1,
+            1,
+        );
+        const debt = await this.sellerWalletDebtService.getShopSnapshot(shopId);
+        return {
+            availableBalance: wallet.availableBalance,
+            currentDebtBalance: debt.debtBalance,
+            estimatedOutboundShippingFee: fromCents(
+                estimatedOutboundShippingFee,
+            ),
+            estimatedReturnShippingFee: fromCents(estimatedReturnShippingFee),
+            estimatedShippingFee: fromCents(estimatedShippingFee),
+            debtLimit: debt.debtLimit,
+            shopLocked: debt.shopLocked,
+        };
     }
 
     // Callback carrier mở bước tracking khi đã nhận kiện hoặc nhận lại vận đơn retry.
@@ -463,13 +579,25 @@ export class OrderReturnService {
         return record;
     }
 
+    // Callback nhận hàng lặp sau kiểm tra/refund phải trả snapshot hiện tại, không làm request quay về RECEIVED.
     async markReceived(returnId: string) {
         const request = await this.repository.findOne({
             where: { id: returnId },
         });
         if (!request)
             throw new NotFoundException('Không tìm thấy yêu cầu hoàn hàng.');
-        if (request.status === OrderReturnStatus.RECEIVED) return request;
+        // Các trạng thái này chỉ xuất hiện sau khi shop đã nhận kiện; callback đến trễ không được hồi sinh state cũ.
+        if (
+            [
+                OrderReturnStatus.RECEIVED,
+                OrderReturnStatus.INSPECTION_PASSED,
+                OrderReturnStatus.INSPECTION_FAILED,
+                OrderReturnStatus.REFUND_PENDING,
+                OrderReturnStatus.REFUND_FAILED,
+                OrderReturnStatus.REFUNDED,
+            ].includes(request.status)
+        )
+            return request;
         if (
             ![
                 OrderReturnStatus.AWAITING_SHIPMENT,
@@ -544,7 +672,9 @@ export class OrderReturnService {
         };
     }
 
-    // Shipping Service chỉ gọi sau mốc GHN nhận kiện; tại đây mới chốt phí thật và cập nhật refund cuối cùng.
+    // Callback GHN chốt chi phí carrier và tiền refund, nhưng không đồng nghĩa seller đã nhận lại hàng đạt.
+    // Ghi platform ledger trước để chi phí thật không bị mất; seller ledger chỉ được ghi sau inspection pass.
+    // Retry cùng amount tự bù ledger thiếu, còn amount khác bị từ chối để không sửa lịch sử tài chính.
     async updateReturnShippingCost(returnId: string, amount: string) {
         const request = await this.repository.findOne({
             where: { id: returnId },
@@ -559,14 +689,59 @@ export class OrderReturnService {
                     'Phí vận chuyển hoàn đã chốt và không thể thay đổi.',
                 );
             }
+            // Callback lặp luôn bù sổ nền tảng; sổ seller chỉ được bù nếu yêu cầu đã qua kiểm tra đạt.
+            if (actualCost > 0n) {
+                if (!this.sellerWalletRepository) {
+                    throw new Error(
+                        'Seller wallet repository is required to record return shipping fees.',
+                    );
+                }
+                await this.sellerWalletRepository.recordReturnShippingPlatformCost(
+                    returnId,
+                    fromCents(actualCost),
+                );
+                if (
+                    request.returnShippingPayer === 'SELLER' &&
+                    request.inspectionPassed === true
+                ) {
+                    await this.sellerWalletRepository.recordReturnShippingFee(
+                        returnId,
+                        fromCents(actualCost),
+                    );
+                    // Callback đến sau khi kiểm hàng vẫn phải ghi phần giao ban đầu đã hoàn cho khách.
+                    await this.sellerWalletRepository.recordReturnOutboundShippingFee(
+                        returnId,
+                    );
+                }
+            }
+            if (
+                request.status === OrderReturnStatus.INSPECTION_FAILED &&
+                request.returnShippingPayer === 'CUSTOMER' &&
+                actualCost > 0n
+            ) {
+                if (!this.sellerWalletRepository)
+                    throw new Error(
+                        'Seller wallet repository is required to record return-shipping receivables.',
+                    );
+                await this.sellerWalletRepository.recordCustomerReturnShippingReceivable(
+                    returnId,
+                    fromCents(actualCost),
+                );
+            }
             return request;
         }
-        if (
-            ![
-                OrderReturnStatus.AWAITING_SHIPMENT,
-                OrderReturnStatus.IN_TRANSIT,
-            ].includes(request.status)
-        ) {
+        const shipmentStartedStatuses = [
+            OrderReturnStatus.AWAITING_SHIPMENT,
+            OrderReturnStatus.IN_TRANSIT,
+            OrderReturnStatus.RECEIVED,
+            OrderReturnStatus.INSPECTION_PASSED,
+            OrderReturnStatus.INSPECTION_FAILED,
+            OrderReturnStatus.REFUND_PENDING,
+            OrderReturnStatus.REFUND_FAILED,
+            OrderReturnStatus.REFUNDED,
+        ];
+        // Cho phép callback phí đến trễ sau lúc shop nhận/kiểm tra kiện; request đã bị từ chối hoặc hủy vẫn bị chặn.
+        if (!shipmentStartedStatuses.includes(request.status)) {
             throw new ConflictException(
                 'Yêu cầu chưa ở trạng thái tạo vận đơn hoàn.',
             );
@@ -590,27 +765,86 @@ export class OrderReturnService {
             request.orderId,
         );
         if (!order) throw new NotFoundException('Không tìm thấy đơn hàng gốc.');
-        // Ghi phí courier trước khi chốt return; source key giúp retry sau timeout không trừ ví seller lần hai.
+        const outboundShippingRefund = this.roundVnd(
+            toCents(request.refundShippingAmount),
+        );
+        const finalRefund =
+            itemAmount + outboundShippingRefund - customerDeduction;
+        const cappedRefund = this.capRefundAmount(
+            finalRefund,
+            order.totalAmount,
+        );
+        // Không sửa số tiền đã chuyển cho khách; nếu khách chịu phí mà callback đến sau REFUNDED thì cần đối soát thủ công.
+        if (
+            request.status === OrderReturnStatus.REFUNDED &&
+            toCents(request.refundAmount) !== cappedRefund
+        ) {
+            throw new ConflictException(
+                'Phí hoàn đến sau khi đã xác nhận refund và làm thay đổi số tiền; cần đối soát thủ công.',
+            );
+        }
+        // Ghi chi phí carrier sau khi xác thực refund; writer riêng không chạm ví shop trước khi có kết quả kiểm hàng.
         if (actualCost > 0n) {
-            await this.sellerWalletRepository?.recordReturnShippingFee(
+            if (!this.sellerWalletRepository) {
+                throw new Error(
+                    'Seller wallet repository is required to record return shipping fees.',
+                );
+            }
+            await this.sellerWalletRepository.recordReturnShippingPlatformCost(
                 returnId,
                 fromCents(actualCost),
             );
         }
-
-        const outboundShippingRefund = this.roundVnd(
-            toCents(request.refundShippingAmount),
-        );
         request.returnShippingCost = fromCents(actualCost);
         request.returnShippingFee = fromCents(customerDeduction);
         request.returnShippingFinalizedAt = new Date();
         request.customerReturnShippingReceivableAmount = fromCents(0n);
-        const finalRefund =
-            itemAmount + outboundShippingRefund - customerDeduction;
-        request.refundAmount = fromCents(
-            this.capRefundAmount(finalRefund, order.totalAmount),
-        );
-        return this.repository.save(request);
+        request.refundAmount = fromCents(cappedRefund);
+        const saved = await this.repository.save(request);
+        // Nếu GHN chốt phí trễ, ghi nợ seller chỉ cho hồ sơ đã đạt kiểm tra; trạng thái fail được miễn khoản nợ này.
+        if (
+            actualCost > 0n &&
+            saved.returnShippingPayer === 'SELLER' &&
+            saved.inspectionPassed === true
+        ) {
+            if (!this.sellerWalletRepository)
+                throw new Error(
+                    'Seller wallet repository is required to record return shipping fees.',
+                );
+            await this.sellerWalletRepository.recordReturnShippingFee(
+                returnId,
+                fromCents(actualCost),
+            );
+        }
+        if (
+            saved.returnShippingPayer === 'SELLER' &&
+            saved.inspectionPassed === true
+        ) {
+            // Nếu kiểm hàng xong trước callback GHN, vẫn ghi khoản giao ban đầu ngay; phí về sẽ được ghi khi GHN chốt.
+            if (!this.sellerWalletRepository)
+                throw new Error(
+                    'Seller wallet repository is required to record outbound return shipping fees.',
+                );
+            await this.sellerWalletRepository.recordReturnOutboundShippingFee(
+                returnId,
+            );
+        }
+        // Nếu phí khách trả chỉ được chốt sau khi shop đã từ chối hoàn, đồng bộ khoản phải thu thay vì trừ ví shop.
+        if (
+            saved.status === OrderReturnStatus.INSPECTION_FAILED &&
+            saved.returnShippingPayer === 'CUSTOMER' &&
+            actualCost > 0n
+        ) {
+            if (!this.sellerWalletRepository)
+                throw new Error(
+                    'Seller wallet repository is required to record return-shipping receivables.',
+                );
+            await this.sellerWalletRepository.recordCustomerReturnShippingReceivable(
+                returnId,
+                fromCents(actualCost),
+            );
+        }
+        return saved;
     }
 
     // Từ chối yêu cầu khi phí carrier sau lúc tạo nhãn vượt giá trị món khách hoàn.
@@ -717,7 +951,9 @@ export class OrderReturnService {
         return result.request;
     }
 
-    // Seller ghi nhận pass/fail sau khi kiểm tra; phase hiện tại chỉ dừng ở chờ hoàn tiền hoặc chờ gửi trả sản phẩm.
+    // Khóa request để chỉ một kết quả inspection thắng; pass đảo tiền hàng và ghi phí shop sau khi trạng thái được lưu.
+    // Retry cùng kết quả bù ledger lỗi mà không phát event lần hai; fail hoàn lại khoản debit cũ nếu callback đến sớm.
+    // Chi phí carrier của nền tảng và khoản phải thu khách chịu phí vẫn được xử lý riêng theo payer.
     async inspect(
         currentUser: SellerOrderUserContext,
         returnId: string,
@@ -748,6 +984,16 @@ export class OrderReturnService {
             if (
                 request.status === OrderReturnStatus.INSPECTION_FAILED &&
                 !dto.passed
+            )
+                return {
+                    saved: request,
+                    orderNumber: '',
+                    ownerId: request.ownerId,
+                    eventType: null,
+                };
+            if (
+                request.status === OrderReturnStatus.REFUND_PENDING &&
+                dto.passed
             )
                 return {
                     saved: request,
@@ -796,6 +1042,16 @@ export class OrderReturnService {
                 eventType,
             };
         });
+        if (dto.passed && toCents(result.saved.refundItemAmount) > 0n) {
+            // Hàng đã được shop nhận và xác nhận đạt nên đảo phần sale ngay; writer idempotent cũng sửa được retry sau lỗi ví.
+            if (!this.sellerWalletRepository)
+                throw new Error(
+                    'Seller wallet repository is required to reverse returned item sales.',
+                );
+            await this.sellerWalletRepository.reverseReturnSaleAtInspection(
+                result.saved.id,
+            );
+        }
         if (result.eventType)
             await this.publish(
                 result.saved,
@@ -803,6 +1059,61 @@ export class OrderReturnService {
                 result.ownerId,
                 result.eventType,
             );
+        if (
+            !dto.passed &&
+            result.saved.returnShippingPayer === 'SELLER' &&
+            result.saved.returnShippingFinalizedAt &&
+            toCents(result.saved.returnShippingCost) > 0n
+        ) {
+            // Gỡ khoản nợ cũ nếu GHN callback đã ghi trước khi shop kiểm hàng; phí carrier nền tảng không bị hoàn lại.
+            if (!this.sellerWalletRepository)
+                throw new Error(
+                    'Seller wallet repository is required to reverse failed return-shipping fees.',
+                );
+            await this.sellerWalletRepository.reverseFailedReturnShippingFee(
+                result.saved.id,
+            );
+        }
+        if (!dto.passed && result.saved.returnShippingPayer === 'SELLER') {
+            // Bù an toàn nếu một retry cũ đã ghi nợ lượt đi trước khi trạng thái kiểm tra cuối được lưu.
+            if (!this.sellerWalletRepository)
+                throw new Error(
+                    'Seller wallet repository is required to reverse outbound return shipping fees.',
+                );
+            await this.sellerWalletRepository.reverseFailedReturnOutboundShippingFee(
+                result.saved.id,
+            );
+        }
+        if (
+            dto.passed &&
+            result.saved.returnShippingPayer === 'SELLER' &&
+            toCents(result.saved.refundShippingAmount) > 0n
+        ) {
+            // Khi hàng lỗi shop được xác nhận đạt, phí giao ban đầu đã hoàn cho khách được ghi riêng khỏi phí GHN chiều về.
+            if (!this.sellerWalletRepository)
+                throw new Error(
+                    'Seller wallet repository is required to record outbound return shipping fees.',
+                );
+            await this.sellerWalletRepository.recordReturnOutboundShippingFee(
+                result.saved.id,
+            );
+        }
+        if (
+            dto.passed &&
+            result.saved.returnShippingPayer === 'SELLER' &&
+            result.saved.returnShippingFinalizedAt &&
+            toCents(result.saved.returnShippingCost) > 0n
+        ) {
+            // Sau khi transaction lưu trạng thái đạt, source key giữ debit một lần và cho retry tự bù nếu ghi ví lỗi.
+            if (!this.sellerWalletRepository)
+                throw new Error(
+                    'Seller wallet repository is required to record return shipping fees.',
+                );
+            await this.sellerWalletRepository.recordReturnShippingFee(
+                result.saved.id,
+                result.saved.returnShippingCost,
+            );
+        }
         if (
             !dto.passed &&
             result.saved.returnShippingPayer === 'CUSTOMER' &&
@@ -820,15 +1131,98 @@ export class OrderReturnService {
             );
         }
         // Pay2S/COD đều chờ admin xác nhận chuyển khoản thủ công sau khi số tiền hoàn đã được chốt.
-        return result.saved;
+        return this.toSellerSafeRequest(result.saved);
     }
 
+    // Chỉ Seller nhận snapshot vận hành của return; tài khoản ngân hàng là PII chỉ Customer và Admin được đọc.
+    private toSellerSafeRequest(
+        request: OrderReturnRequest,
+    ): Omit<
+        OrderReturnRequest,
+        | 'refundBankAccountId'
+        | 'refundBankCode'
+        | 'refundBankName'
+        | 'refundAccountHolder'
+        | 'refundAccountNumber'
+    > {
+        return Object.fromEntries(
+            Object.entries(request).filter(
+                ([field]) => !SELLER_REDACTED_RETURN_FIELDS.has(field),
+            ),
+        ) as Omit<
+            OrderReturnRequest,
+            | 'refundBankAccountId'
+            | 'refundBankCode'
+            | 'refundBankName'
+            | 'refundAccountHolder'
+            | 'refundAccountNumber'
+        >;
+    }
+
+    // Chỉ lấy snapshot từ Auth theo ID của Customer; không nhận số tài khoản đầy đủ do browser tự gửi.
+    private async resolveRefundBankAccount(
+        ownerId: string,
+        accountId: string,
+    ): Promise<RefundBankAccountInput & { id: string }> {
+        if (!this.authClient) {
+            throw new ServiceUnavailableException(
+                'Auth Service chưa sẵn sàng để xác minh tài khoản nhận hoàn.',
+            );
+        }
+        const account = await this.authClient.getOwnedRefundBankAccount(
+            ownerId,
+            accountId,
+        );
+        const normalized = {
+            id: typeof account.id === 'string' ? account.id.trim() : '',
+            bankCode:
+                typeof account.bankCode === 'string'
+                    ? account.bankCode.trim().toLowerCase()
+                    : '',
+            bankName:
+                typeof account.bankName === 'string'
+                    ? account.bankName.trim()
+                    : '',
+            accountHolder:
+                typeof account.accountHolder === 'string'
+                    ? account.accountHolder
+                          .normalize('NFC')
+                          .trim()
+                          .replace(/\s+/gu, ' ')
+                          .toLocaleUpperCase('vi-VN')
+                    : '',
+            accountNumber:
+                typeof account.accountNumber === 'string'
+                    ? account.accountNumber.trim()
+                    : '',
+        };
+        // Auth sở hữu hồ sơ gốc, Order vẫn xác nhận shape trước khi chụp vào hồ sơ hoàn bất biến.
+        if (
+            normalized.id.toLowerCase() !== accountId.toLowerCase() ||
+            !/^[a-z0-9-]{2,50}$/.test(normalized.bankCode) ||
+            normalized.bankName.length < 2 ||
+            normalized.bankName.length > 100 ||
+            !REFUND_ACCOUNT_HOLDER_PATTERN.test(normalized.accountHolder) ||
+            !/^\d{6,30}$/.test(normalized.accountNumber)
+        ) {
+            throw new BadRequestException(
+                'Tài khoản nhận hoàn đã lưu không còn hợp lệ. Hãy cập nhật hồ sơ ngân hàng rồi thử lại.',
+            );
+        }
+        return normalized;
+    }
+
+    // Lỗi sản phẩm cần evidence để shop xác minh; lý do đổi ý được tạo request với mảng rỗng.
+    // Giới hạn vẫn áp dụng cho mọi lý do để client không lách quota bằng cách chọn đổi ý.
     private validateEvidence(dto: CreateOrderReturnDto): void {
         const evidence = dto.evidence ?? [];
         const images = evidence.filter((item) => item.type === 'image');
         const videos = evidence.filter((item) => item.type === 'video');
-        // Bằng chứng bắt buộc cho mọi yêu cầu hoàn; video được chấp nhận như ảnh, nhưng số lượng vẫn bị giới hạn.
-        if (evidence.length === 0)
+        // Mọi lý do lỗi phải có ít nhất một tệp; CHANGE_OF_MIND là ngoại lệ đã chốt trong chính sách trả hàng.
+        if (
+            dto.reason !== OrderReturnReason.CHANGE_OF_MIND &&
+            evidence.length === 0
+        )
             throw new BadRequestException(
                 'Yêu cầu hoàn hàng cần ít nhất một ảnh hoặc video bằng chứng.',
             );

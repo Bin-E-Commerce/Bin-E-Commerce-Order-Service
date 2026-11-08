@@ -1,5 +1,5 @@
-// File này định nghĩa các nguyên nhân hoàn hàng được phép; client không được tự gửi reason tùy ý.
-// Quy tắc bằng chứng và phí hoàn được map từ enum này ở application service.
+// File này giữ mã nguyên nhân hoàn hàng ổn định cho API và dữ liệu lịch sử.
+// OTHER chỉ còn để đọc/xử lý request cũ; customer không được tạo lý do này mới.
 export enum OrderReturnReason {
     DAMAGED = 'DAMAGED',
     WRONG_ITEM = 'WRONG_ITEM',
@@ -8,3 +8,12 @@ export enum OrderReturnReason {
     CHANGE_OF_MIND = 'CHANGE_OF_MIND',
     OTHER = 'OTHER',
 }
+
+// Allowlist này là hợp đồng cho request mới từ customer; OTHER vẫn nằm trong enum để không làm hỏng lịch sử.
+export const CUSTOMER_ORDER_RETURN_REASONS = [
+    OrderReturnReason.DAMAGED,
+    OrderReturnReason.WRONG_ITEM,
+    OrderReturnReason.MISSING_ITEM,
+    OrderReturnReason.NOT_AS_DESCRIBED,
+    OrderReturnReason.CHANGE_OF_MIND,
+] as const;

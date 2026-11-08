@@ -54,6 +54,21 @@ export class SellerOrderController {
         );
     }
 
+    // Trả riêng các số cần cảnh báo trước khi duyệt phí shop chịu; không trả lịch sử giao dịch hoặc thông tin ví khác.
+    @Get('returns/:returnId/finance-preview')
+    getReturnFinancePreview(
+        @Headers() headers: Record<string, unknown>,
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Query('returnShippingPayer')
+        returnShippingPayer?: 'CUSTOMER' | 'SELLER',
+    ) {
+        return this.orderReturnService.getSellerReturnFinancePreview(
+            this.sellerOrderAccess.buildCurrentUserFromHeaders(headers),
+            returnId,
+            returnShippingPayer,
+        );
+    }
+
     // List Seller chỉ gồm order có item thuộc shop được resolve từ user context.
     @Get()
     @ApiOperation({ summary: 'List seller orders' })

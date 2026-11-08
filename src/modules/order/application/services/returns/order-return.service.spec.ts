@@ -12,6 +12,7 @@ import { OrderRepository } from '@/modules/order/infrastructure/repositories/ord
 import { SellerShopClient } from '@/modules/order/application/clients/seller-shop.client';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import { ShippingClient } from '@/modules/order/application/clients/shipping.client';
+import type { AuthClient } from '@/modules/order/application/clients/auth.client';
 import { OrderReturnService } from '@/modules/order/application/services/returns/order-return.service';
 
 describe('OrderReturnService', () => {
@@ -22,11 +23,14 @@ describe('OrderReturnService', () => {
     let events: DeepMocked<OrderEventsService>;
     let shipping: DeepMocked<ShippingClient>;
 
+    const refundBankAccountId = '1b4e28ba-2fa1-4d2a-883f-0016d3cca427';
+
     const orderData = {
         id: 'order-1',
         ownerId: 'customer-1',
         orderNumber: 'BIN-0001',
-        fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
+        // Ca tạo return mới dùng DELIVERED vì khách chưa xác nhận hoàn thành đơn.
+        fulfillmentStatus: OrderFulfillmentStatus.DELIVERED,
         returnWindowUntil: new Date(Date.now() + 86_400_000),
         shippingFee: '30000.00',
         subtotal: '300000.00',
@@ -93,12 +97,28 @@ describe('OrderReturnService', () => {
             getReturnShipmentState: jest.fn().mockResolvedValue(null),
         } as unknown as DeepMocked<ShippingClient>;
         shipping.calculateQuote.mockResolvedValue({ fee: '11942.86' } as never);
+        const auth = {
+            getOwnedRefundBankAccount: jest.fn().mockResolvedValue({
+                id: refundBankAccountId,
+                bankCode: 'vietcombank',
+                bankName: 'Vietcombank',
+                accountHolder: 'NGUYEN VAN A',
+                accountNumber: '0123456789',
+            }),
+        } as unknown as AuthClient;
         service = new OrderReturnService(
             returns,
             orders,
             shops,
             events,
             shipping,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            auth,
         );
         orders.findOwnedById.mockResolvedValue(order);
         const savedRequest = {} as OrderReturnRequest;
@@ -111,6 +131,7 @@ describe('OrderReturnService', () => {
     it('creates a seller-fault return with proportional shipping refund', async () => {
         await service.create('customer-1', 'order-1', {
             itemIds: ['item-1'],
+            savedRefundBankAccountId: refundBankAccountId,
             reason: OrderReturnReason.DAMAGED,
             evidence: [
                 {
@@ -141,6 +162,79 @@ describe('OrderReturnService', () => {
         );
     });
 
+    // Khách đổi ý không được hoàn phí shop giao ban đầu; estimate chỉ trừ phí khách → shop.
+    it('does not refund outbound shipping for a change-of-mind return', async () => {
+        await service.create('customer-1', 'order-1', {
+            itemIds: ['item-1'],
+            savedRefundBankAccountId: refundBankAccountId,
+            reason: OrderReturnReason.CHANGE_OF_MIND,
+            evidence: [
+                {
+                    assetId: 'asset-1',
+                    url: 'https://cdn.test/evidence.webp',
+                    type: 'image',
+                },
+            ],
+        });
+
+        const persisted = returns.save.mock.calls[0]![0] as OrderReturnRequest;
+        expect(persisted.refundItemAmount).toBe('100000.00');
+        expect(persisted.refundShippingAmount).toBe('0.00');
+        expect(persisted.returnShippingPayer).toBe('CUSTOMER');
+        expect(persisted.estimatedRefundAmount).toBe('88057.00');
+    });
+
+    // GHN chốt phí trả hàng do Seller chịu thì phí được ghi cho Seller, không khấu trừ vào tiền Customer nhận lại.
+    it('keeps seller-fault refund intact after seller-paid return shipping is finalized', async () => {
+        const request = {
+            id: 'return-1',
+            orderId: 'order-1',
+            ownerId: 'customer-1',
+            status: OrderReturnStatus.AWAITING_SHIPMENT,
+            reason: OrderReturnReason.DAMAGED,
+            returnShippingPayer: 'SELLER',
+            returnShippingEstimatedCost: '11943.00',
+            refundItemAmount: '100000.00',
+            refundShippingAmount: '10000.00',
+            returnShippingFee: '0.00',
+            returnShippingCost: '0.00',
+            returnShippingFinalizedAt: null,
+            customerReturnShippingReceivableAmount: '0.00',
+            inspectionPassed: false,
+            refundAmount: '110000.00',
+        } as OrderReturnRequest;
+        const wallet = {
+            recordReturnShippingPlatformCost: jest
+                .fn()
+                .mockResolvedValue(undefined),
+            recordReturnShippingFee: jest.fn().mockResolvedValue(undefined),
+        };
+        returns.findOne.mockResolvedValue(request);
+        returns.save.mockResolvedValue(request);
+        orders.findOwnedById.mockResolvedValue(order);
+        service = new OrderReturnService(
+            returns,
+            orders,
+            shops,
+            events,
+            shipping,
+            undefined,
+            undefined,
+            wallet as never,
+        );
+
+        await service.updateReturnShippingCost('return-1', '12345.50');
+
+        expect(request.returnShippingCost).toBe('12346.00');
+        expect(request.returnShippingFee).toBe('0.00');
+        expect(request.refundAmount).toBe('110000.00');
+        expect(wallet.recordReturnShippingPlatformCost).toHaveBeenCalledWith(
+            'return-1',
+            '12346.00',
+        );
+        expect(wallet.recordReturnShippingFee).not.toHaveBeenCalled();
+    });
+
     it('rounds proportional refund amounts to whole VND', async () => {
         orders.findOwnedById.mockResolvedValue({
             ...orderData,
@@ -151,6 +245,7 @@ describe('OrderReturnService', () => {
 
         await service.create('customer-1', 'order-1', {
             itemIds: ['item-1'],
+            savedRefundBankAccountId: refundBankAccountId,
             reason: OrderReturnReason.DAMAGED,
             evidence: [
                 {
@@ -180,8 +275,25 @@ describe('OrderReturnService', () => {
             returnShippingCost: '0.00',
             refundAmount: '100000.00',
         } as OrderReturnRequest;
+        // GHN luôn ghi phí carrier vào platform ledger; customer payer không sinh debit ví Seller.
+        const wallet = {
+            recordReturnShippingPlatformCost: jest
+                .fn()
+                .mockResolvedValue(undefined),
+            recordReturnShippingFee: jest.fn().mockResolvedValue(undefined),
+        };
         returns.findOne.mockResolvedValue(request);
         returns.save.mockResolvedValue(request);
+        service = new OrderReturnService(
+            returns,
+            orders,
+            shops,
+            events,
+            shipping,
+            undefined,
+            undefined,
+            wallet as never,
+        );
 
         await service.updateReturnShippingCost('return-1', '12345.50');
 
@@ -189,6 +301,11 @@ describe('OrderReturnService', () => {
         expect(request.returnShippingFee).toBe('12346.00');
         expect(request.refundAmount).toBe('87654.00');
         expect(request.returnShippingFinalizedAt).toBeInstanceOf(Date);
+        expect(wallet.recordReturnShippingPlatformCost).toHaveBeenCalledWith(
+            'return-1',
+            '12346.00',
+        );
+        expect(wallet.recordReturnShippingFee).not.toHaveBeenCalled();
     });
 
     // Lý do OTHER không thể duyệt cho tới khi Seller tự phân loại payer; số hoàn được tính lại theo lựa chọn đã lưu.
@@ -310,25 +427,111 @@ describe('OrderReturnService', () => {
         await expect(
             service.create('customer-1', 'order-1', {
                 itemIds: ['item-1'],
+                savedRefundBankAccountId: refundBankAccountId,
                 reason: OrderReturnReason.WRONG_ITEM,
                 evidence: [],
             }),
         ).rejects.toThrow('cần ít nhất một ảnh');
     });
 
-    // Bảo vệ mapping phí cố định; OTHER vẫn để null cho đến khi Seller duyệt và chọn bên chịu.
+    // Đổi ý không cần media; backend vẫn lưu mảng rỗng chuẩn hóa cho các màn Seller/Admin.
+    it('creates a change-of-mind return without evidence', async () => {
+        await service.create('customer-1', 'order-1', {
+            itemIds: ['item-1'],
+            savedRefundBankAccountId: refundBankAccountId,
+            reason: OrderReturnReason.CHANGE_OF_MIND,
+        });
+
+        const persisted = returns.save.mock.calls[0]![0] as OrderReturnRequest;
+        expect(persisted.reason).toBe(OrderReturnReason.CHANGE_OF_MIND);
+        expect(persisted.evidence).toEqual([]);
+        expect(persisted.returnShippingPayer).toBe('CUSTOMER');
+    });
+
+    // Lớp service chặn OTHER kể cả khi một caller nội bộ bỏ qua DTO validation.
+    it('rejects OTHER for a new customer return request', async () => {
+        await expect(
+            service.create('customer-1', 'order-1', {
+                itemIds: ['item-1'],
+                savedRefundBankAccountId: refundBankAccountId,
+                reason: OrderReturnReason.OTHER,
+                evidence: [
+                    {
+                        assetId: 'asset-1',
+                        url: 'https://cdn.test/evidence.webp',
+                        type: 'image',
+                    },
+                ],
+            }),
+        ).rejects.toThrow('Lý do khác không còn được hỗ trợ');
+
+        expect(returns.save).not.toHaveBeenCalled();
+        expect(shipping.calculateQuote).not.toHaveBeenCalled();
+    });
+
+    // Preview lỗi do shop phải cộng khoản giao ban đầu hoàn khách và quote GHN chiều về đúng một lần mỗi chiều.
+    it('previews both outbound and return shipping fees for a seller-fault return', async () => {
+        const request = {
+            id: 'return-1',
+            shopId: 'shop-1',
+            status: OrderReturnStatus.REQUESTED,
+            reason: OrderReturnReason.DAMAGED,
+            returnShippingPayer: 'SELLER',
+            refundShippingAmount: '20900.00',
+            returnShippingEstimatedCost: '20900.00',
+        } as OrderReturnRequest;
+        const wallet = {
+            getSnapshot: jest.fn().mockResolvedValue({
+                availableBalance: '-18900.00',
+            }),
+        };
+        const debtService = {
+            getShopSnapshot: jest.fn().mockResolvedValue({
+                debtBalance: '18900.00',
+                debtLimit: '500000.00',
+                shopLocked: false,
+            }),
+        };
+        returns.findOne.mockResolvedValue(request);
+        shops.getOwnedShopId.mockResolvedValue('shop-1');
+        service = new OrderReturnService(
+            returns,
+            orders,
+            shops,
+            events,
+            shipping,
+            undefined,
+            undefined,
+            wallet as never,
+            undefined,
+            undefined,
+            debtService as never,
+        );
+
+        const preview = await service.getSellerReturnFinancePreview(
+            { userId: 'seller-1', email: 'seller@example.test' } as never,
+            'return-1',
+        );
+
+        expect(preview.estimatedOutboundShippingFee).toBe('20900.00');
+        expect(preview.estimatedReturnShippingFee).toBe('20900.00');
+        expect(preview.estimatedShippingFee).toBe('41800.00');
+        expect(wallet.getSnapshot).toHaveBeenCalledWith('shop-1', 1, 1);
+    });
+
+    // Bảo vệ payer của năm lý do customer được phép chọn; OTHER chỉ xử lý ở các hồ sơ lịch sử.
     it.each([
         [OrderReturnReason.DAMAGED, 'SELLER'],
         [OrderReturnReason.WRONG_ITEM, 'SELLER'],
         [OrderReturnReason.MISSING_ITEM, 'SELLER'],
         [OrderReturnReason.NOT_AS_DESCRIBED, 'SELLER'],
         [OrderReturnReason.CHANGE_OF_MIND, 'CUSTOMER'],
-        [OrderReturnReason.OTHER, null],
     ] as const)(
         'assigns the agreed return-shipping payer for %s',
         async (reason, expectedPayer) => {
             await service.create('customer-1', 'order-1', {
                 itemIds: ['item-1'],
+                savedRefundBankAccountId: refundBankAccountId,
                 reason,
                 evidence: [
                     {
@@ -351,10 +554,19 @@ describe('OrderReturnService', () => {
             fee: '100001.00',
         } as never);
 
+        // Dùng evidence hợp lệ để assertion kiểm tra riêng giới hạn phí quote.
         await expect(
             service.create('customer-1', 'order-1', {
                 itemIds: ['item-1'],
+                savedRefundBankAccountId: refundBankAccountId,
                 reason: OrderReturnReason.CHANGE_OF_MIND,
+                evidence: [
+                    {
+                        assetId: 'asset-1',
+                        url: 'https://cdn.test/evidence.webp',
+                        type: 'image',
+                    },
+                ],
             }),
         ).rejects.toThrow('cao hơn giá trị sản phẩm');
 
@@ -424,7 +636,8 @@ describe('OrderReturnService', () => {
         expect(result.reviewNote).toContain('vận đơn đã được hủy');
         expect(order.fulfillmentStatus).toBe(OrderFulfillmentStatus.COMPLETED);
         expect(orderRepository.save).toHaveBeenCalledTimes(1);
-        expect(events.publishReturnChanged).toHaveBeenCalledWith(
+        // Chỉ ràng buộc payload nghiệp vụ; EntityManager là tham số tùy chọn của event adapter.
+        expect(events.publishReturnChanged.mock.calls[0]?.[0]).toEqual(
             expect.objectContaining({
                 eventName: 'return.rejected',
                 customerUserId: 'customer-1',
@@ -435,15 +648,25 @@ describe('OrderReturnService', () => {
         expect(events.publishReturnChanged).toHaveBeenCalledTimes(1);
     });
 
+    // Request hợp lệ về evidence để lỗi được xác định bởi quy tắc một shop.
     it('rejects a request spanning multiple shops', async () => {
         await expect(
             service.create('customer-1', 'order-1', {
                 itemIds: ['item-1', 'item-2'],
+                savedRefundBankAccountId: refundBankAccountId,
                 reason: OrderReturnReason.CHANGE_OF_MIND,
+                evidence: [
+                    {
+                        assetId: 'asset-1',
+                        url: 'https://cdn.test/evidence.webp',
+                        type: 'image',
+                    },
+                ],
             }),
         ).rejects.toThrow('một shop');
     });
 
+    // Retry gửi đủ payload hợp lệ rồi chỉ kiểm tra request đang mở được trả lại mà không quote/tạo mới.
     it.each([
         OrderReturnStatus.REQUESTED,
         OrderReturnStatus.AWAITING_SHIPMENT,
@@ -460,7 +683,15 @@ describe('OrderReturnService', () => {
         // Act
         const result = await service.create('customer-1', 'order-1', {
             itemIds: ['item-1'],
+            savedRefundBankAccountId: refundBankAccountId,
             reason: OrderReturnReason.CHANGE_OF_MIND,
+            evidence: [
+                {
+                    assetId: 'asset-1',
+                    url: 'https://cdn.test/evidence.webp',
+                    type: 'image',
+                },
+            ],
         });
 
         // Assert
@@ -469,6 +700,7 @@ describe('OrderReturnService', () => {
         expect(shipping.calculateQuote).not.toHaveBeenCalled();
     });
 
+    // Evidence hợp lệ để mô phỏng race ở unique index sau khi request mới đã qua validation.
     it('returns the request created by a concurrent insert', async () => {
         // Arrange
         const concurrentRequest = {
@@ -491,7 +723,15 @@ describe('OrderReturnService', () => {
         // Act
         const result = await service.create('customer-1', 'order-1', {
             itemIds: ['item-1'],
+            savedRefundBankAccountId: refundBankAccountId,
             reason: OrderReturnReason.CHANGE_OF_MIND,
+            evidence: [
+                {
+                    assetId: 'asset-1',
+                    url: 'https://cdn.test/evidence.webp',
+                    type: 'image',
+                },
+            ],
         });
 
         // Assert

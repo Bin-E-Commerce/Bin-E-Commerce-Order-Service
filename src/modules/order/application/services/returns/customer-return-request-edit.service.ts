@@ -8,6 +8,7 @@ import {
     NotFoundException,
 } from '@nestjs/common';
 import { OrderEvents } from '@common/kafka/events/order.events';
+import { OrderReturnReason } from '@/database/returns/enums/order-return-reason.enum';
 import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
 import { RETURN_REQUEST_EDIT_REPOSITORY } from '@/modules/order/application/contracts/return-request-edit.repository';
 import type { ReturnRequestEditRepositoryPort } from '@/modules/order/application/contracts/return-request-edit.repository';
@@ -36,6 +37,7 @@ export class CustomerReturnRequestEditService {
     ) {}
 
     // Chỉ cập nhật request REQUESTED, giữ nguyên item và tính lại snapshot tiền từ dữ liệu order server-side.
+    // Evidence rỗng chỉ hợp lệ khi lý do cuối là CHANGE_OF_MIND; mọi lý do lỗi vẫn cần bằng chứng trước khi lưu.
     async update(
         ownerId: string,
         returnId: string,
@@ -53,7 +55,17 @@ export class CustomerReturnRequestEditService {
                 'Shop đã bắt đầu xử lý yêu cầu; bạn không thể chỉnh sửa lúc này.',
             );
 
-        this.validateEvidence(dto.evidence);
+        // Chỉ giữ OTHER trên hồ sơ cũ để tương thích; customer không thể đổi một request hợp lệ sang lý do đã ngừng nhận.
+        if (
+            dto.reason === OrderReturnReason.OTHER &&
+            snapshot.reason !== OrderReturnReason.OTHER
+        )
+            throw new BadRequestException(
+                'Lý do khác không còn được hỗ trợ. Vui lòng chọn một lý do trả hàng phù hợp.',
+            );
+
+        this.validateEvidence(dto.evidence, dto.reason);
+        const evidence = dto.evidence ?? [];
         // Giữ item scope ban đầu; chỉ sửa nội dung và bằng chứng của request.
         const selectedItems = new Set(snapshot.itemIds);
         const selectedOrderItems = (snapshot.order.items ?? []).filter((item) =>
@@ -106,7 +118,7 @@ export class CustomerReturnRequestEditService {
             expectedUpdatedAt: dto.expectedUpdatedAt,
             reason: dto.reason,
             description: dto.description?.trim() || null,
-            evidence: dto.evidence,
+            evidence,
             refundItemAmount: fromCents(itemRefundAmount),
             refundShippingAmount: fromCents(shippingRefundAmount),
             estimatedRefundAmount: fromCents(estimatedRefundAmount),
@@ -148,11 +160,19 @@ export class CustomerReturnRequestEditService {
         return { updated: true };
     }
 
-    // Giới hạn evidence giống lúc tạo mới để không thể vượt policy qua endpoint sửa.
-    private validateEvidence(evidence: UpdateOrderReturnDto['evidence']): void {
-        const images = evidence.filter((item) => item.type === 'image');
-        const videos = evidence.filter((item) => item.type === 'video');
-        if (evidence.length === 0)
+    // Áp dụng cùng yêu cầu chứng cứ như khi tạo mới để endpoint sửa không thể lách policy.
+    // CHANGE_OF_MIND cho phép danh sách rỗng; các lý do lỗi phải giữ ít nhất một tệp và mọi lý do vẫn bị giới hạn quota.
+    private validateEvidence(
+        evidence: UpdateOrderReturnDto['evidence'],
+        reason: OrderReturnReason,
+    ): void {
+        const attachments = evidence ?? [];
+        const images = attachments.filter((item) => item.type === 'image');
+        const videos = attachments.filter((item) => item.type === 'video');
+        if (
+            reason !== OrderReturnReason.CHANGE_OF_MIND &&
+            attachments.length === 0
+        )
             throw new BadRequestException(
                 'Yêu cầu hoàn hàng cần ít nhất một ảnh hoặc video bằng chứng.',
             );
