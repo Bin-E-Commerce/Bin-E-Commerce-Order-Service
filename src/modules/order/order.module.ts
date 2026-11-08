@@ -25,6 +25,8 @@ import { OrderReturnService } from '@/modules/order/application/services/returns
 import { CustomerReturnRequestEditService } from '@/modules/order/application/services/returns/customer-return-request-edit.service';
 import { ReturnRequestEditRepository } from '@/modules/order/infrastructure/repositories/returns/return-request-edit.repository';
 import { RETURN_REQUEST_EDIT_REPOSITORY } from '@/modules/order/application/contracts/return-request-edit.repository';
+import { ReturnRequestCancellationRepository } from '@/modules/order/infrastructure/repositories/returns/return-request-cancellation.repository';
+import { RETURN_REQUEST_CANCELLATION_REPOSITORY } from '@/modules/order/application/contracts/return-request-cancellation.repository';
 import { OrderReturnShipmentRepository } from '@/modules/order/infrastructure/repositories/returns/order-return-shipment.repository';
 import { ORDER_RETURN_SHIPMENT_REPOSITORY } from '@/modules/order/application/contracts/order-return-shipment.repository';
 import { OrderDeliveryIssue } from '@/database/delivery/entities/order-delivery-issue.entity';
@@ -103,6 +105,11 @@ import { SellerFinanceLockClient } from '@/modules/order/application/clients/fin
         OrderReturnService,
         CustomerReturnRequestEditService,
         ReturnRequestEditRepository,
+        ReturnRequestCancellationRepository,
+        {
+            provide: RETURN_REQUEST_CANCELLATION_REPOSITORY,
+            useExisting: ReturnRequestCancellationRepository,
+        },
         {
             provide: RETURN_REQUEST_EDIT_REPOSITORY,
             useExisting: ReturnRequestEditRepository,

@@ -14,7 +14,7 @@ export function isSellerReturnFaultReason(reason: OrderReturnReason): boolean {
     ].includes(reason);
 }
 
-// Giữ chính sách payer thống nhất: lỗi hàng do shop, đổi ý do khách, OTHER chờ shop phân loại.
+// Giữ payer thống nhất: lỗi hàng do shop, đổi ý do khách; OTHER chỉ còn cho request lịch sử.
 export function getFixedReturnShippingPayer(
     reason: OrderReturnReason,
 ): 'CUSTOMER' | 'SELLER' | null {

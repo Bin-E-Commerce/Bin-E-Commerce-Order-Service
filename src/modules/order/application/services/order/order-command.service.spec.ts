@@ -150,6 +150,10 @@ describe('OrderCommandService', () => {
                         assertPay2sCheckoutAllowed: jest.fn(),
                         isSandboxMode: jest.fn().mockReturnValue(false),
                         startPay2sPayment: jest.fn(),
+                        // Mock đủ API thanh toán để nhánh hoàn ví có thể được gọi khi repository báo refundPending.
+                        reverseCancelledOrder: jest
+                            .fn()
+                            .mockResolvedValue(undefined),
                     },
                 },
             ],
@@ -518,7 +522,8 @@ describe('OrderCommandService', () => {
     });
 
     describe('cancelOwnedOrder', () => {
-        it('should release inventory and append cancellation history for a confirmed order', async () => {
+        // Application giải phóng stock rồi giao transaction và history cho OrderRepository.
+        it('should release inventory before cancelling a confirmed order', async () => {
             // Arrange
             const order = {
                 id: 'order-1',
@@ -532,39 +537,17 @@ describe('OrderCommandService', () => {
                 ...order,
                 status: OrderStatus.CANCELLED,
             } as Order;
-            const lockQueryBuilder = {
-                where: jest.fn().mockReturnThis(),
-                andWhere: jest.fn().mockReturnThis(),
-                setLock: jest.fn().mockReturnThis(),
-                getOne: jest.fn().mockResolvedValue(order),
-            };
-            const orderRepository = {
-                findOne: jest.fn().mockResolvedValue(order),
-                createQueryBuilder: jest.fn().mockReturnValue(lockQueryBuilder),
-                save: jest
-                    .fn()
-                    .mockImplementation(async (value: Order) => value),
-            };
-            const historyRepository = {
-                create: jest
-                    .fn()
-                    .mockImplementation(
-                        (value: Partial<OrderStatusHistory>) => value,
-                    ),
-                save: jest.fn().mockResolvedValue(undefined),
-            };
-            const manager = {
-                getRepository: jest.fn((entity: unknown) =>
-                    entity === Order ? orderRepository : historyRepository,
-                ),
-            };
             mockOrderRepository.findOwnedById
                 .mockResolvedValueOnce(order)
                 .mockResolvedValueOnce(cancelledOrder);
-            mockProductClient.release.mockResolvedValue(undefined);
-            mockDataSource.transaction.mockImplementation(
-                async (callback: any) => callback(manager),
+            mockOrderRepository.cancelOwnedOrder.mockResolvedValue({
+                didCancel: true,
+                refundPending: false,
+            });
+            mockOrderRepository.findOwnedRefundBankAccount.mockResolvedValue(
+                null,
             );
+            mockProductClient.release.mockResolvedValue(undefined);
             mockResponseMapper.toResponse.mockReturnValue({
                 id: 'order-1',
                 status: OrderStatus.CANCELLED,
@@ -584,18 +567,19 @@ describe('OrderCommandService', () => {
                 idempotencyKey,
                 [{ variantId, quantity: 2 }],
             );
-            expect(orderRepository.save).toHaveBeenCalledWith(
-                expect.objectContaining({
-                    status: OrderStatus.CANCELLED,
-                    cancelReason: 'Đổi ý',
-                }),
+            expect(mockOrderRepository.cancelOwnedOrder).toHaveBeenCalledWith(
+                ownerId,
+                'order-1',
+                'Đổi ý',
+                undefined,
+                true,
+                undefined,
             );
-            expect(historyRepository.save).toHaveBeenCalledWith(
-                expect.objectContaining({
-                    fromStatus: OrderStatus.CONFIRMED,
-                    toStatus: OrderStatus.CANCELLED,
-                    reason: 'Đổi ý',
-                }),
+            expect(
+                mockProductClient.release.mock.invocationCallOrder[0]!,
+            ).toBeLessThan(
+                mockOrderRepository.cancelOwnedOrder.mock
+                    .invocationCallOrder[0]!,
             );
             expect(mockOrderEvents.publishCancelled).toHaveBeenCalledWith(
                 cancelledOrder,
@@ -624,7 +608,8 @@ describe('OrderCommandService', () => {
             expect(mockDataSource.transaction).not.toHaveBeenCalled();
         });
 
-        it('should return cancelled order without releasing inventory on a repeated request', async () => {
+        // Retry vẫn hỏi repository để bù ledger nếu cần, nhưng không release lại inventory.
+        it('should retry cancellation bookkeeping without releasing inventory for an already-cancelled order', async () => {
             // Arrange
             const order = {
                 id: 'order-1',
@@ -633,6 +618,13 @@ describe('OrderCommandService', () => {
             } as Order;
             const expected = { id: 'order-1', status: OrderStatus.CANCELLED };
             mockOrderRepository.findOwnedById.mockResolvedValue(order);
+            mockOrderRepository.cancelOwnedOrder.mockResolvedValue({
+                didCancel: false,
+                refundPending: false,
+            });
+            mockOrderRepository.findOwnedRefundBankAccount.mockResolvedValue(
+                null,
+            );
             mockResponseMapper.toResponse.mockReturnValue(expected as never);
 
             // Act
@@ -645,7 +637,14 @@ describe('OrderCommandService', () => {
             // Assert
             expect(result).toEqual(expected);
             expect(mockProductClient.release).not.toHaveBeenCalled();
-            expect(mockDataSource.transaction).not.toHaveBeenCalled();
+            expect(mockOrderRepository.cancelOwnedOrder).toHaveBeenCalledWith(
+                ownerId,
+                'order-1',
+                undefined,
+                undefined,
+                true,
+                undefined,
+            );
         });
     });
 });
