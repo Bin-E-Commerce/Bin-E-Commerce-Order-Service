@@ -1,7 +1,6 @@
 // File này xác thực payload customer dùng để xác nhận đã nhận hàng hoặc báo delivery issue.
 
 import {
-    ArrayMinSize,
     ArrayMaxSize,
     IsArray,
     IsEnum,
@@ -34,6 +33,7 @@ export class DeliveryIssueEvidenceDto {
     type!: 'image' | 'video';
 }
 
+// DTO kiểm tra shape của quyết định giao hàng; evidence phụ thuộc reason return đã lưu trong database nên service xác thực min-size.
 export class DeliveryConfirmationDto {
     @IsEnum(DeliveryConfirmationDecision)
     decision!: DeliveryConfirmationDecision;
@@ -73,8 +73,8 @@ export class DeliveryConfirmationDto {
             value.decision === DeliveryConfirmationDecision.ISSUE &&
             value.reason !== OrderDeliveryIssueReason.NOT_RECEIVED,
     )
+    @IsOptional()
     @IsArray()
-    @ArrayMinSize(1)
     @ArrayMaxSize(6)
     @ValidateNested({ each: true })
     @Type(() => DeliveryIssueEvidenceDto)
