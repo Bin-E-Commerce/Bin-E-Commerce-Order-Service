@@ -27,3 +27,29 @@ export interface AdminSellerWalletDebtSummary {
     overdueSellerDebtShopCount: number;
     sellerDebtLockedShopCount: number;
 }
+
+export type AdminSellerWalletDebtFilter = 'ALL' | 'DEBT' | 'OVERDUE' | 'LOCKED';
+
+export interface AdminSellerWalletDebtListQuery {
+    page: number;
+    pageSize: number;
+    status: AdminSellerWalletDebtFilter;
+    search?: string;
+}
+
+export interface AdminSellerWalletDebtListItem {
+    shopId: string;
+    debtBalance: string;
+    dueAt: Date | null;
+    financeLockedAt: Date | null;
+    isAtLimit: boolean;
+    isOverdue: boolean;
+    updatedAt: Date;
+}
+
+export interface AdminSellerWalletDebtPage {
+    items: AdminSellerWalletDebtListItem[];
+    total: number;
+    page: number;
+    pageSize: number;
+}

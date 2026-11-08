@@ -32,6 +32,7 @@ import {
 import { AdminFinanceActivityQueryDto } from '@/modules/order/presentation/dto/finance/admin-finance-activity-query.dto';
 import { UpdateRefundRecipientAccountDto } from '@/modules/order/presentation/dto/finance/update-refund-recipient-account.dto';
 import { SellerWalletDebtService } from '@/modules/order/application/services/finance/seller-wallet-debt.service';
+import { AdminSellerWalletDebtQueryDto } from '@/modules/order/presentation/dto/finance/admin-seller-wallet-debt-query.dto';
 
 // Route quản lý dòng tiền; payout chỉ được ghi nhận sau webhook Pay2S và xác nhận người nhận của admin.
 @Controller({ path: 'admin/finance', version: '1' })
@@ -70,6 +71,16 @@ export class AdminFinanceController {
             this.sellerWalletDebtService.getAdminSummary(),
         ]);
         return { ...overview, ...debt };
+    }
+
+    // Chỉ admin có quyền đọc tài chính được xem danh sách shop nợ; DTO giới hạn trang và filter trước khi truy vấn.
+    @Get('seller-debts')
+    async getSellerDebts(
+        @Headers('x-user-permissions') permissionsHeader: string,
+        @Query() query: AdminSellerWalletDebtQueryDto,
+    ) {
+        this.assertPermission(permissionsHeader, 'admin.finance.read');
+        return this.sellerWalletDebtService.listAdminDebts(query);
     }
 
     // Trả số hồ sơ tài chính theo ngày sau khi xác thực permission đọc finance và giới hạn khoảng báo cáo.

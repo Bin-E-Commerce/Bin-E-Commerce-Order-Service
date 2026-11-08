@@ -5,6 +5,9 @@ import { SELLER_WALLET_DEBT_LIMIT } from '@/modules/order/application/constants/
 import type { SellerWalletDebtRepositoryPort } from '@/modules/order/application/contracts/finance/seller-wallet-debt.repository';
 import type {
     AdminSellerWalletDebtSummary,
+    AdminSellerWalletDebtListItem,
+    AdminSellerWalletDebtListQuery,
+    AdminSellerWalletDebtPage,
     SellerWalletDebtLockCandidate,
     SellerWalletDebtRecord,
 } from '@/modules/order/application/types/finance/seller-wallet-debt.type';
@@ -53,6 +56,92 @@ export class SellerWalletDebtRepository implements SellerWalletDebtRepositoryPor
 
         if (!summary) throw new Error('Không lấy được tổng công nợ seller.');
         return summary;
+    }
+
+    // Phân trang shop đang nợ/đang khóa, áp dụng trạng thái và mã shop bằng tham số SQL để không nội suy input.
+    async listAdminDebts(
+        query: AdminSellerWalletDebtListQuery,
+    ): Promise<AdminSellerWalletDebtPage> {
+        const conditions = [
+            '(available_balance < 0 OR finance_locked_at IS NOT NULL)',
+        ];
+        const filterParameters: unknown[] = [];
+
+        // Các trạng thái là allow-list ở DTO; mỗi nhánh bổ sung điều kiện cố định để tránh lọc sai hoặc SQL injection.
+        if (query.status === 'DEBT') {
+            conditions.push('available_balance < 0');
+        } else if (query.status === 'OVERDUE') {
+            conditions.push(
+                'available_balance < 0 AND debt_due_at IS NOT NULL AND debt_due_at <= NOW()',
+            );
+        } else if (query.status === 'LOCKED') {
+            conditions.push('finance_locked_at IS NOT NULL');
+        }
+
+        const normalizedSearch = query.search
+            ?.trim()
+            .replace(/[%_\\]/g, '')
+            .slice(0, 100);
+        if (normalizedSearch) {
+            filterParameters.push(`%${normalizedSearch}%`);
+            conditions.push(`shop_id::text ILIKE $${filterParameters.length}`);
+        }
+
+        const whereClause = `WHERE ${conditions.join(' AND ')}`;
+        const limitParameterIndex = filterParameters.length + 1;
+        const offsetParameterIndex = filterParameters.length + 2;
+        const debtLimitParameterIndex = filterParameters.length + 3;
+        const offset = (query.page - 1) * query.pageSize;
+
+        // Count và page dùng cùng một where clause; thứ tự ưu tiên quá hạn/đang khóa giúp admin thấy khoản cần xử lý trước.
+        const [countRows, items] = await Promise.all([
+            this.dataSource.query(
+                `SELECT COUNT(*)::int AS total FROM seller_wallets ${whereClause}`,
+                filterParameters,
+            ) as Promise<Array<{ total: number | string }>>,
+            this.dataSource.query(
+                `
+                    SELECT
+                        shop_id AS "shopId",
+                        CASE WHEN available_balance < 0
+                            THEN ABS(available_balance)::text
+                            ELSE '0.00'
+                        END AS "debtBalance",
+                        debt_due_at AS "dueAt",
+                        finance_locked_at AS "financeLockedAt",
+                        (available_balance < 0 AND ABS(available_balance) >= $${debtLimitParameterIndex}::numeric) AS "isAtLimit",
+                        (available_balance < 0 AND debt_due_at IS NOT NULL AND debt_due_at <= NOW()) AS "isOverdue",
+                        updated_at AS "updatedAt"
+                    FROM seller_wallets
+                    ${whereClause}
+                    ORDER BY
+                        CASE
+                            WHEN available_balance < 0 AND debt_due_at <= NOW() THEN 0
+                            WHEN finance_locked_at IS NOT NULL THEN 1
+                            ELSE 2
+                        END,
+                        debt_due_at ASC NULLS LAST,
+                        ABS(available_balance) DESC,
+                        updated_at DESC,
+                        shop_id ASC
+                    LIMIT $${limitParameterIndex}
+                    OFFSET $${offsetParameterIndex}
+                `,
+                [
+                    ...filterParameters,
+                    query.pageSize,
+                    offset,
+                    SELLER_WALLET_DEBT_LIMIT,
+                ],
+            ) as Promise<AdminSellerWalletDebtListItem[]>,
+        ]);
+
+        return {
+            items,
+            total: Number(countRows[0]?.total ?? 0),
+            page: query.page,
+            pageSize: query.pageSize,
+        };
     }
 
     // Khóa ở ngưỡng 500.000 đồng/quá hạn; chỉ mở sớm nếu nợ xuống dưới ngưỡng và vẫn còn hạn thanh toán.
