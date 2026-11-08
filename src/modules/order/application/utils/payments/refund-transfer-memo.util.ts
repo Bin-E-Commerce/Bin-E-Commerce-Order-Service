@@ -1,4 +1,5 @@
-// Tạo mã memo VietQR mới và nhận dạng cả memo đơn hàng cũ để không bỏ lỡ giao dịch đang chuyển dở.
+// Tạo và nhận dạng memo refund Pay2S.
+// Parser giữ namespace riêng cho payment attempt và yêu cầu return.
 import type { RefundTransferLookup } from '@/modules/order/application/types/payments/pay2s-payout.type';
 
 // Memo 23 ký tự giữ được trên QR ngân hàng và đủ entropy để truy ra một payment attempt.
@@ -13,7 +14,8 @@ export function createRefundTransferMemo(paymentAttemptId: string): string {
     return `HOAN ${compactId}`;
 }
 
-// Chuẩn hóa cách ngân hàng bỏ dấu cách hoặc dấu phân cách rồi trích mã hoàn có độ dài cố định.
+// Chuẩn hóa memo do ngân hàng có thể bỏ dấu cách.
+// Mỗi prefix chỉ được ánh xạ tới đúng loại hồ sơ.
 export function findRefundTransferLookupInMemo(
     value: unknown,
 ): RefundTransferLookup | null {
@@ -22,6 +24,11 @@ export function findRefundTransferLookupInMemo(
     const normalized = value.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const match = normalized.match(/HOAN([0-9A-F]{18})/);
     if (match?.[1]) return { refundTransferCode: match[1] };
+
+    // RET chỉ định danh order return, không dùng chung HOAN.
+    // Việc tách prefix ngăn webhook ghép nhầm sang payment attempt.
+    const returnMatch = normalized.match(/RET([0-9A-F]{18})/);
+    if (returnMatch?.[1]) return { returnTransferCode: returnMatch[1] };
 
     // Mã cũ dùng chính mã đơn; chỉ nhận memo ngắn bắt đầu HOANBIN, không suy ra từ nội dung dài mơ hồ.
     const legacyMatch = normalized.match(/HOAN(BIN[A-Z0-9]{1,15})$/);

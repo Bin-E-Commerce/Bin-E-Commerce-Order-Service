@@ -14,10 +14,24 @@ export type WithdrawalTransferLookup =
     | { withdrawalId: string; transferMemoCode?: never }
     | { withdrawalId?: never; transferMemoCode: string };
 
-// Memo mới gắn UUID payment attempt; memo order number cũ chỉ được dùng nếu tìm đúng một khoản hoàn.
+// HOAN gắn payment attempt, RET gắn yêu cầu trả hàng.
+// Memo order number chỉ dành cho luồng attempt cũ.
 export type RefundTransferLookup =
-    | { refundTransferCode: string; legacyOrderNumberCode?: never }
-    | { refundTransferCode?: never; legacyOrderNumberCode: string };
+    | {
+          refundTransferCode: string;
+          returnTransferCode?: never;
+          legacyOrderNumberCode?: never;
+      }
+    | {
+          refundTransferCode?: never;
+          returnTransferCode: string;
+          legacyOrderNumberCode?: never;
+      }
+    | {
+          refundTransferCode?: never;
+          returnTransferCode?: never;
+          legacyOrderNumberCode: string;
+      };
 
 export type WithdrawalTransferStagingResult =
     | 'STAGED'

@@ -79,7 +79,8 @@ export class Pay2sPayoutReconciliationService {
     }
 
     // Chỉ event OUT từ tài khoản nguồn đã cấu hình, có ID/số tiền hợp lệ mới được đối chiếu theo memo.
-    // Mã HOAN khớp payment attempt; mã RUT hoặc UUID cũ khớp withdrawal; webhook chỉ stage để admin kiểm tra người nhận.
+    // HOAN khớp payment attempt, RET khớp return request, RUT/UUID cũ khớp withdrawal.
+    // Webhook chỉ lưu candidate; Pay2S không gửi người nhận để admin tự xác minh.
     private async stageTransaction(
         transaction: Pay2sBankTransaction,
         sourceAccountNumber: string,

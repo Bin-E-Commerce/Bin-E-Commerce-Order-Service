@@ -160,6 +160,42 @@ export class OrderReturnRequest {
     @Column({ name: 'seller_user_id', type: 'uuid', nullable: true })
     sellerUserId!: string | null;
 
+    // Snapshot tài khoản được khách chọn để admin hoàn đúng người nhận; Seller API phải loại các trường này.
+    @Column({ name: 'refund_bank_account_id', type: 'uuid', nullable: true })
+    refundBankAccountId!: string | null;
+
+    @Column({
+        name: 'refund_bank_code',
+        type: 'varchar',
+        length: 50,
+        nullable: true,
+    })
+    refundBankCode!: string | null;
+
+    @Column({
+        name: 'refund_bank_name',
+        type: 'varchar',
+        length: 100,
+        nullable: true,
+    })
+    refundBankName!: string | null;
+
+    @Column({
+        name: 'refund_account_holder',
+        type: 'varchar',
+        length: 100,
+        nullable: true,
+    })
+    refundAccountHolder!: string | null;
+
+    @Column({
+        name: 'refund_account_number',
+        type: 'varchar',
+        length: 30,
+        nullable: true,
+    })
+    refundAccountNumber!: string | null;
+
     @Column({ name: 'inspection_passed', type: 'boolean', nullable: true })
     inspectionPassed!: boolean | null;
 
@@ -197,6 +233,40 @@ export class OrderReturnRequest {
         nullable: true,
     })
     refundTransactionReference!: string | null;
+
+    // Candidate OUT chứng minh Pay2S ghi nhận tiền ra.
+    // Admin vẫn phải xác minh đúng tài khoản nhận trước khi hoàn tất.
+    @Column({
+        name: 'refund_out_transaction_id',
+        type: 'varchar',
+        length: 120,
+        nullable: true,
+    })
+    refundOutTransactionId!: string | null;
+
+    @Column({
+        name: 'refund_out_transaction_number',
+        type: 'varchar',
+        length: 120,
+        nullable: true,
+    })
+    refundOutTransactionNumber!: string | null;
+
+    @Column({
+        name: 'refund_out_amount',
+        type: 'numeric',
+        precision: 14,
+        scale: 2,
+        nullable: true,
+    })
+    refundOutAmount!: string | null;
+
+    @Column({
+        name: 'refund_out_detected_at',
+        type: 'timestamptz',
+        nullable: true,
+    })
+    refundOutDetectedAt!: Date | null;
 
     @Column({ name: 'refund_proof', type: 'jsonb', nullable: true })
     refundProof!: Record<string, unknown> | null;
