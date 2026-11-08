@@ -15,6 +15,8 @@ import type { SellerWalletDebtRepositoryPort } from '@/modules/order/application
 import { SellerFinanceLockClient } from '@/modules/order/application/clients/finance/seller-finance-lock.client';
 import type {
     AdminSellerWalletDebtSummary,
+    AdminSellerWalletDebtListQuery,
+    AdminSellerWalletDebtPage,
     SellerWalletDebtLockCandidate,
     SellerWalletDebtSnapshot,
 } from '@/modules/order/application/types/finance/seller-wallet-debt.type';
@@ -73,6 +75,13 @@ export class SellerWalletDebtService implements OnModuleInit, OnModuleDestroy {
     // Trả các chỉ số công nợ riêng để admin phân biệt khoản phải thu với tiền seller còn được nhận.
     async getAdminSummary(): Promise<AdminSellerWalletDebtSummary> {
         return this.repository.getAdminSummary();
+    }
+
+    // Trả danh sách nợ đã lọc/phân trang; giới hạn pageSize được xác thực ở DTO trước khi vào repository.
+    async listAdminDebts(
+        query: AdminSellerWalletDebtListQuery,
+    ): Promise<AdminSellerWalletDebtPage> {
+        return this.repository.listAdminDebts(query);
     }
 
     // Quét tối đa 100 shop/lượt và xử lý tối đa 10 HTTP calls song song để worker không dồn tải vào Seller Service.
