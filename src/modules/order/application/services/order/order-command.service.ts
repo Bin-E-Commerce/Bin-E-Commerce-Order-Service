@@ -958,6 +958,8 @@ export class OrderCommandService {
                     productId: item.productId,
                     variantId: item.variantId,
                     categoryId: item.categoryId,
+                    // Reservation cũ có thể thiếu trường; null giữ backward compatibility và không đoán brand từ catalog.
+                    brandId: item.brandId ?? null,
                     sellerShopId: item.sellerShopId,
                     sellerOwnerId: item.sellerOwnerId,
                     sku: item.sku,

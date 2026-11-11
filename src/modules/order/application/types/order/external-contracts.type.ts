@@ -50,6 +50,8 @@ export interface CheckoutQuoteItem {
     productId: string;
     variantId: string;
     categoryId: string | null;
+    // Optional để Order đọc được reservation đã tạo trước khi Product bổ sung brand snapshot.
+    brandId?: string | null;
     sellerShopId: string | null;
     sellerOwnerId?: string | null;
     sku: string;

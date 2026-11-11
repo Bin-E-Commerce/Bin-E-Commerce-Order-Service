@@ -217,7 +217,8 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
         await this.dispatchPendingSafe();
     }
 
-    // Chuẩn hóa purchase event từ order snapshot và chỉ chọn item hợp lệ khi có return correction.
+    // Chuẩn hóa purchase event từ snapshot checkout để preference dùng đúng category/brand tại thời điểm mua.
+    // Return chỉ phát các dòng được duyệt; event cũ hoặc order cũ thiếu brand vẫn có brandId null.
     private toPurchaseEvent(
         order: Order,
         eventName: OrderPurchaseEvent['eventName'],
@@ -249,6 +250,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
                         productId: item.productId,
                         variantId: item.variantId,
                         categoryId: item.categoryId ?? null,
+                        brandId: item.brandId ?? null,
                         quantity: item.quantity,
                     })),
             },
@@ -286,9 +288,7 @@ export class OrderEventsService implements OnModuleInit, OnModuleDestroy {
                 topic: string;
                 aggregate_id: string;
                 payload:
-                    | OrderCreatedEvent
-                    | OrderPurchaseEvent
-                    | ReturnChangedEvent;
+                    OrderCreatedEvent | OrderPurchaseEvent | ReturnChangedEvent;
                 attempt_count: number;
             }>,
             number,
