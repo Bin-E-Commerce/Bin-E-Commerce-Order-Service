@@ -34,6 +34,10 @@ export class OrderItem {
     @Column({ name: 'category_id', type: 'uuid', nullable: true })
     categoryId!: string | null;
 
+    // Lưu thương hiệu tại thời điểm checkout để purchase/return event không phải suy ra từ catalog đã đổi sau này.
+    @Column({ name: 'brand_id', type: 'uuid', nullable: true })
+    brandId!: string | null;
+
     @Column({ name: 'seller_shop_id', type: 'uuid', nullable: true })
     sellerShopId!: string | null;
 

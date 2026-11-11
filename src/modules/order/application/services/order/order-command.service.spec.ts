@@ -3,7 +3,7 @@
 /// <reference types="jest" />
 import { Test, type TestingModule } from '@nestjs/testing';
 import { createMock, type DeepMocked } from '@golevelup/ts-jest';
-import { DataSource } from 'typeorm';
+import { DataSource, type EntityManager } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderItem } from '@/database/order/entities/order-item.entity';
 import { OrderStatusHistory } from '@/database/order/entities/order-status-history.entity';
@@ -100,6 +100,7 @@ describe('OrderCommandService', () => {
                 productId,
                 variantId,
                 categoryId: null,
+                brandId: 'brand-1',
                 sellerShopId: 'shop-1',
                 sellerOwnerId: 'seller-1',
                 sku: 'SKU-001',
@@ -268,8 +269,14 @@ describe('OrderCommandService', () => {
                     return historyRepository;
                 }),
             };
-            mockDataSource.transaction.mockImplementation(
-                async (callback: any) => callback(manager),
+            // Thu hẹp overload Jest mock để callback nhận đúng EntityManager giả trong transaction.
+            const transactionMock =
+                mockDataSource.transaction as unknown as jest.Mock<
+                    Promise<unknown>,
+                    [(entityManager: EntityManager) => Promise<unknown>]
+                >;
+            transactionMock.mockImplementation(async (callback) =>
+                callback(manager as unknown as EntityManager),
             );
             mockOrderRepository.findByIdempotency.mockResolvedValue(null);
             mockCartClient.getActiveCart.mockResolvedValue(createCart());
@@ -314,6 +321,7 @@ describe('OrderCommandService', () => {
             expect(itemRepository.create).toHaveBeenCalledWith(
                 expect.objectContaining({
                     productName: 'Áo thể thao chính thức',
+                    brandId: 'brand-1',
                     unitPrice: '22000.00',
                     quantity: 2,
                     lineTotal: '44000.00',
