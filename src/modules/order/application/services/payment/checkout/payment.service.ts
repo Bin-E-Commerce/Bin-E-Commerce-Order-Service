@@ -378,8 +378,8 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         return { deposit, paymentUrl: result.payUrl };
     }
 
-    // IPN là nguồn ghi nhận bền vững: verify chữ ký, đối chiếu tiền rồi khóa attempt/order trong transaction.
-    // Callback trùng chỉ ACK thành công; side effect chỉ chạy ở lần chuyển trạng thái PENDING -> PAID.
+    // IPN là nguồn ghi nhận bền vững: verify chữ ký và amount trước khi cập nhật lần thử thanh toán.
+    // Callback thu tiền khóa order/attempt; hủy hoặc thất bại chỉ đóng attempt để order còn có thể retry.
     async processPay2sIpn(
         body: Record<string, unknown>,
     ): Promise<{ success: boolean }> {
@@ -402,96 +402,8 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
             );
             return { success: false };
         }
-        if (String(payload.resultCode) === '2') {
-            // Mã 2 là Pay2S xác nhận hủy; chữ ký đã được kiểm tra trước khi đóng order và nhả tồn kho.
-            const cancelledOrderId = await this.dataSource.transaction(
-                async (manager) => {
-                    const orderRepository = manager.getRepository(Order);
-                    const order = await orderRepository.findOne({
-                        where: { id: attempt.orderId },
-                        lock: { mode: 'pessimistic_write' },
-                    });
-                    if (!order)
-                        throw new NotFoundException(
-                            'Không tìm thấy đơn hàng Pay2S.',
-                        );
-
-                    // Cùng thứ tự khóa order rồi attempt với luồng paid/cancel để hai callback cạnh tranh không deadlock.
-                    const attemptRepository =
-                        manager.getRepository(PaymentAttempt);
-                    const lockedAttempt = await attemptRepository.findOne({
-                        where: { id: attempt.id },
-                        lock: { mode: 'pessimistic_write' },
-                    });
-                    if (!lockedAttempt)
-                        throw new NotFoundException(
-                            'Không tìm thấy giao dịch Pay2S.',
-                        );
-                    if (
-                        order.status !== OrderStatus.PENDING ||
-                        order.paymentStatus !== PaymentStatus.PENDING
-                    )
-                        return null;
-
-                    // Callback cũ chỉ được đóng order nếu attempt của nó chưa có kết quả trả tiền và không có attempt retry đang mở.
-                    if (
-                        !['PENDING', 'FAILED', 'EXPIRED'].includes(
-                            lockedAttempt.status,
-                        )
-                    )
-                        return null;
-                    const currentPendingAttempt = await attemptRepository
-                        .createQueryBuilder('attempt')
-                        .where('attempt.order_id = :orderId', {
-                            orderId: order.id,
-                        })
-                        .andWhere('attempt.status = :status', {
-                            status: 'PENDING',
-                        })
-                        .setLock('pessimistic_write')
-                        .getOne();
-                    if (
-                        currentPendingAttempt &&
-                        currentPendingAttempt.id !== lockedAttempt.id
-                    )
-                        return null;
-
-                    // Giữ EXPIRED để UI phân biệt hết hạn; các trạng thái còn lại được chốt là FAILED.
-                    if (lockedAttempt.status !== 'EXPIRED')
-                        lockedAttempt.status = 'FAILED';
-                    lockedAttempt.providerResponse =
-                        this.redactCallback(payload);
-                    order.status = OrderStatus.CANCELLED;
-                    order.fulfillmentStatus =
-                        'CANCELLED' as Order['fulfillmentStatus'];
-                    order.paymentStatus = PaymentStatus.FAILED;
-                    order.cancelReason =
-                        'Pay2S xác nhận khách hàng hủy giao dịch.';
-                    order.cancelledAt = new Date();
-                    await attemptRepository.save(lockedAttempt);
-                    await orderRepository.save(order);
-                    await manager.getRepository(OrderStatusHistory).save({
-                        orderId: order.id,
-                        fromStatus: OrderStatus.PENDING,
-                        toStatus: OrderStatus.CANCELLED,
-                        reason: order.cancelReason,
-                    });
-                    return order.id;
-                },
-            );
-            if (cancelledOrderId) {
-                const cancelledOrder = await this.dataSource
-                    .getRepository(Order)
-                    .findOne({
-                        where: { id: cancelledOrderId },
-                        relations: { items: true },
-                    });
-                if (cancelledOrder)
-                    await this.releaseOrderReservation(cancelledOrder);
-            }
-            return { success: true };
-        }
         if (String(payload.resultCode) !== '0') {
+            // Hủy một phiên Pay2S không phải hủy đơn; chỉ đóng attempt hiện tại để attempt mới còn dùng được.
             await this.markAttemptFailed(attempt.id, payload);
             return { success: true };
         }
