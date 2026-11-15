@@ -106,7 +106,7 @@ It does not own the current product catalog, cart contents, user profile, shop p
 | Status history | Auditable order transition timeline |
 | Fulfillment status | To ship, shipping, delivered, completed, cancelled, failed and return/refund state |
 | Delivery confirmation | Customer confirmation, issue reporting and automatic confirmation |
-| Return request | Customer request, seller review, inspection and refund stages |
+| Return request | Customer request, seller review, receipt confirmation and refund stages |
 | Seller projection | Owner-scoped item/order views and seller return actions |
 | Purchase integration | Completed-purchase event and replay/outbox boundary |
 
@@ -431,11 +431,14 @@ REQUESTED
     -> REJECTED
     -> CUSTOMER_CANCELLED
 
-IN_TRANSIT -> RECEIVED -> INSPECTION_PASSED -> REFUND_PENDING -> REFUNDED
-                    \-> INSPECTION_FAILED
+IN_TRANSIT -> RECEIVED -> REFUND_PENDING -> REFUNDED
 IN_TRANSIT -> SHIPMENT_FAILED
 REFUND_PENDING -> REFUND_FAILED
 ~~~
+
+`INSPECTION_PASSED` and `INSPECTION_FAILED` remain supported for historical
+records; new requests no longer require a product-quality decision after the
+shop receives the package.
 
 The supported return reasons include damaged, wrong item, missing item, not as described, change of mind and other. Evidence and item IDs are stored as controlled JSON snapshots so later changes to product/media records do not erase the return context.
 
@@ -455,9 +458,9 @@ The return service separates:
 
 Seller-fault reasons can affect refundable outbound shipping according to the application rule. Money is normalized using integer-cent arithmetic and explicit rounding rather than floating-point accumulation.
 
-### Review and inspection
+### Review and return receipt
 
-Seller actions are approve, reject and inspection. Inspection outcome drives refund progression; it does not silently delete the return request or rewrite the original order snapshot.
+Seller actions are approve, reject and confirmation that the returned package reached the shop. Receipt confirmation advances the request to refund processing; the shop no longer chooses a passed/failed product-inspection result.
 
 ## 14. Seller Operations
 
@@ -469,7 +472,7 @@ Seller views are not simply customer views with a different label. A multi-selle
 - Read a seller-scoped order detail.
 - List seller return requests.
 - Approve or reject a return.
-- Record inspection outcome.
+- Confirm receipt of the returned package and start refund processing.
 - Consume shipping/order context through internal contracts where required.
 
 ### Data-leak prevention
@@ -539,7 +542,8 @@ All public application routes use /api/v1. Health is /api/v1/health.
 | GET | /api/v1/seller/orders/returns | List seller return work |
 | POST | /api/v1/seller/orders/returns/:returnId/approve | Approve return |
 | POST | /api/v1/seller/orders/returns/:returnId/reject | Reject return |
-| POST | /api/v1/seller/orders/returns/:returnId/inspection | Record inspection |
+| POST | /api/v1/seller/orders/returns/:returnId/confirm-received | Confirm returned package received and start refund processing |
+| POST | /api/v1/seller/orders/returns/:returnId/inspection | Compatibility for older clients; only a successful receipt confirmation is accepted |
 
 ### Internal contracts
 
@@ -590,7 +594,7 @@ Delivery issue records store order/owner, affected item IDs, reason, evidence, n
 
 ### Return data
 
-Return request records store order/shop/owner, selected item IDs, reason, description, evidence, review/inspection notes, seller actor, requested/reviewed/inspected timestamps and separated money values.
+Return request records store order/shop/owner, selected item IDs, reason, description, evidence, review notes, seller actor, receipt-confirmation time and separated money values. Legacy inspection columns remain for compatibility with financial ledger queries.
 
 ## 18. Consistency and Concurrency
 

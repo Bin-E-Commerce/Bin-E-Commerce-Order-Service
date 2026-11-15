@@ -414,6 +414,104 @@ export class OrderRepository {
         });
     }
 
+    // Đọc attempt mới nhất thuộc order của owner và chủ động lấy response ẩn để application chỉ ánh xạ allowlist.
+    async findOwnedPay2sPayment(
+        ownerId: string,
+        orderId: string,
+    ): Promise<{ order: Order; attempt: PaymentAttempt | null } | null> {
+        const order = await this.repository.findOne({
+            where: { id: orderId, ownerId },
+            relations: { items: true },
+        });
+        if (!order) return null;
+
+        const attempt = await this.repository.manager
+            .getRepository(PaymentAttempt)
+            .createQueryBuilder('attempt')
+            .addSelect('attempt.providerResponse')
+            .where('attempt.order_id = :orderId', { orderId })
+            .orderBy('attempt.created_at', 'DESC')
+            .getOne();
+
+        return { order, attempt };
+    }
+
+    // Chỉ hủy order Pay2S còn pending; khóa order trước attempt để callback trả tiền và hủy cùng thứ tự.
+    async cancelPendingPay2sOrder(
+        ownerId: string,
+        orderId: string,
+        expectedAttemptId: string | null,
+    ): Promise<{ didCancel: boolean; order: Order }> {
+        if (!this.dataSource)
+            throw new ConflictException(
+                'Order database transaction is not available.',
+            );
+
+        return this.dataSource.transaction(async (manager) => {
+            const orderRepository = manager.getRepository(Order);
+            const order = await orderRepository
+                .createQueryBuilder('order')
+                .where('order.id = :orderId', { orderId })
+                .andWhere('order.owner_id = :ownerId', { ownerId })
+                .setLock('pessimistic_write')
+                .getOne();
+            if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
+
+            // Hủy lặp lại là idempotent; trạng thái đã chốt không được ghi thêm lịch sử lần hai.
+            if (order.status === OrderStatus.CANCELLED)
+                return { didCancel: false, order };
+            if (
+                order.status !== OrderStatus.PENDING ||
+                order.paymentMethod !== PaymentMethod.PAY2S ||
+                order.paymentStatus !== PaymentStatus.PENDING
+            )
+                throw new ConflictException(
+                    'Đơn hàng không còn ở trạng thái chờ thanh toán Pay2S.',
+                );
+
+            // Attempt chỉ bị đánh dấu lỗi sau khi controller đã xác nhận Pay2S hủy link thành công.
+            const attemptQuery = manager
+                .getRepository(PaymentAttempt)
+                .createQueryBuilder('attempt')
+                .where('attempt.order_id = :orderId', { orderId })
+                .andWhere('attempt.status = :status', { status: 'PENDING' });
+            if (expectedAttemptId)
+                attemptQuery.andWhere('attempt.id = :attemptId', {
+                    attemptId: expectedAttemptId,
+                });
+            const attempt = await attemptQuery
+                .setLock('pessimistic_write')
+                .getOne();
+            // Snapshot attempt đã quyết định có gọi Pay2S hay không; nếu attempt đổi giữa hai bước thì không đóng nhầm order.
+            if (
+                (expectedAttemptId !== null && !attempt) ||
+                (expectedAttemptId === null && attempt)
+            )
+                throw new ConflictException(
+                    'Giao dịch đã thay đổi trạng thái. Vui lòng tải lại đơn hàng.',
+                );
+
+            if (attempt) {
+                attempt.status = 'FAILED';
+                await manager.getRepository(PaymentAttempt).save(attempt);
+            }
+            order.status = OrderStatus.CANCELLED;
+            order.fulfillmentStatus = OrderFulfillmentStatus.CANCELLED;
+            order.paymentStatus = PaymentStatus.FAILED;
+            order.cancelReason = 'Khách hàng hủy giao dịch Pay2S.';
+            order.cancelledAt = new Date();
+            await orderRepository.save(order);
+            await manager.getRepository(OrderStatusHistory).save({
+                orderId,
+                fromStatus: OrderStatus.PENDING,
+                toStatus: OrderStatus.CANCELLED,
+                reason: order.cancelReason,
+            });
+
+            return { didCancel: true, order };
+        });
+    }
+
     // Đơn Pay2S chưa thanh toán không được tính là đơn seller cần lấy hàng.
     // Dùng cùng điều kiện ở danh sách và badge để số lượng tab khớp dữ liệu hiển thị.
     findOwnedPage(

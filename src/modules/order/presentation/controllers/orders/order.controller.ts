@@ -35,6 +35,7 @@ import type {
     OrderListResponse,
     OrderResponse,
 } from '@/modules/order/application/types/order/order-response.type';
+import type { Pay2sCustomerPaymentDetails } from '@/modules/order/application/types/payments/pay2s-customer-payment.type';
 
 // Public Order API được Gateway bảo vệ bằng JWT và permission tương ứng.
 @ApiTags('orders')
@@ -93,6 +94,44 @@ export class OrderController {
             idempotencyKey,
             ownerEmail,
             ipAddress,
+        );
+    }
+
+    // Cấp lại Pay2S URL cho order chờ thanh toán; service kiểm tra owner và trạng thái trước khi gọi provider.
+    @Post(':orderId/pay2s-payment')
+    retryPay2sPayment(
+        @Headers('x-user-id') ownerId: string,
+        @Param('orderId', new ParseUUIDPipe()) orderId: string,
+        @Ip() ipAddress: string,
+    ): Promise<{ paymentUrl: string }> {
+        return this.orderCommandService.retryOwnedPay2sPayment(
+            ownerId,
+            orderId,
+            ipAddress,
+        );
+    }
+
+    // Customer chỉ xem QR của Pay2S khi order thuộc owner trong JWT context.
+    @Get(':orderId/pay2s-payment')
+    getOwnedPay2sPaymentDetails(
+        @Headers('x-user-id') ownerId: string,
+        @Param('orderId', new ParseUUIDPipe()) orderId: string,
+    ): Promise<Pay2sCustomerPaymentDetails> {
+        return this.orderCommandService.getOwnedPay2sPaymentDetails(
+            ownerId,
+            orderId,
+        );
+    }
+
+    // Chỉ chuyển đơn sang CANCELLED sau khi Order Service xác minh Pay2S đã đóng phiên đang chờ.
+    @Post(':orderId/pay2s-payment/cancel')
+    cancelOwnedPendingPay2sPayment(
+        @Headers('x-user-id') ownerId: string,
+        @Param('orderId', new ParseUUIDPipe()) orderId: string,
+    ): Promise<OrderResponse> {
+        return this.orderCommandService.cancelOwnedPendingPay2sPayment(
+            ownerId,
+            orderId,
         );
     }
 

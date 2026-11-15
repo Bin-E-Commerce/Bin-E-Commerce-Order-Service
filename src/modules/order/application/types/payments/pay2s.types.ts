@@ -3,6 +3,25 @@
 
 export type Pay2sEnvironment = 'LIVE' | 'SANDBOX';
 
+// Giao dịch ngân hàng đã xác thực bằng API lịch sử Pay2S để đối soát khi IPN bị lỡ.
+export interface Pay2sBankTransaction {
+    transactionId: string;
+    transactionDate: string;
+    accountNumber: string;
+    amount: number;
+    description: string;
+    bank: string | null;
+    type: 'IN' | 'OUT';
+}
+
+// Dữ liệu thanh toán đã được xác minh từ IPN hoặc API lịch sử, trước khi cập nhật order.
+export interface Pay2sVerifiedTransaction {
+    transactionId: string;
+    orderInfo: string;
+    providerResponse: Record<string, unknown>;
+    receivedAt: Date;
+}
+
 export interface Pay2sInvoiceMetadata {
     invoiceType: 'none';
     customerInfo: {

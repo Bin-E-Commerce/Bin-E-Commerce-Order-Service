@@ -54,6 +54,9 @@ import { OrderResponseMapper } from '@/modules/order/application/services/order/
 import { SellerOrderAccessService } from '@/modules/order/application/services/order/seller-order-access.service';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import { PaymentService } from '@/modules/order/application/services/payment/checkout/payment.service';
+import { PAY2S_ORDER_PAYMENT_TTL_MS } from '@/modules/order/application/constants/payments/pay2s.constants';
+import { mapPay2sCustomerPaymentDetails } from '@/modules/order/application/utils/payments/pay2s-customer-payment.util';
+import type { Pay2sCustomerPaymentDetails } from '@/modules/order/application/types/payments/pay2s-customer-payment.type';
 
 const REVIEW_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // Đồng bộ tập ký tự với CancelOrderDto để luồng gọi nội bộ không bỏ qua quy tắc tên nhận hoàn.
@@ -319,6 +322,141 @@ export class OrderCommandService {
             shippingFeeBreakdown: shipping.breakdown,
             paymentMethod,
         };
+    }
+
+    // Cấp lại link Pay2S cho order đang chờ của đúng customer, không tạo order hay reserve tồn kho lần nữa.
+    // Tra cứu theo owner trước để ID đoán được không làm lộ order; sau đó kiểm tra cả order và payment còn pending.
+    // PaymentService tái sử dụng attempt/merchant reference và từ chối phiên đã hết hạn hoặc Pay2S đang bị khóa.
+    async retryOwnedPay2sPayment(
+        ownerId: string,
+        orderId: string,
+        ipAddress = '127.0.0.1',
+    ): Promise<{ paymentUrl: string }> {
+        if (!ownerId?.trim())
+            throw new BadRequestException('Thiếu user context.');
+
+        const order = await this.orderRepository.findOwnedById(
+            ownerId,
+            orderId,
+        );
+        if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
+
+        // Chỉ một order chưa xác nhận, chưa thu tiền và dùng Pay2S được phép đi lại qua cổng thanh toán.
+        if (
+            order.status !== OrderStatus.PENDING ||
+            order.paymentMethod !== PaymentMethod.PAY2S ||
+            order.paymentStatus !== PaymentStatus.PENDING
+        ) {
+            throw new BadRequestException(
+                'Đơn hàng không còn ở trạng thái chờ thanh toán Pay2S.',
+            );
+        }
+
+        this.paymentService.assertPay2sCheckoutAllowed();
+        const payment = await this.paymentService.startPay2sPayment(
+            order,
+            ipAddress,
+        );
+        return { paymentUrl: payment.paymentUrl };
+    }
+
+    // Trả dữ liệu QR allowlist của Pay2S cho màn hình nội bộ; ownership và hạn thanh toán luôn lấy từ database.
+    async getOwnedPay2sPaymentDetails(
+        ownerId: string,
+        orderId: string,
+    ): Promise<Pay2sCustomerPaymentDetails> {
+        if (!ownerId?.trim())
+            throw new BadRequestException('Thiếu user context.');
+        const payment = await this.orderRepository.findOwnedPay2sPayment(
+            ownerId,
+            orderId,
+        );
+        if (!payment) throw new NotFoundException('Không tìm thấy đơn hàng.');
+        if (payment.order.paymentMethod !== PaymentMethod.PAY2S)
+            throw new NotFoundException('Không tìm thấy thanh toán Pay2S.');
+
+        return mapPay2sCustomerPaymentDetails(payment.order, payment.attempt);
+    }
+
+    // Hủy link Pay2S trước, rồi mới khóa order/attempt và ghi trạng thái CANCELLED; reservation được nhả idempotently sau commit.
+    async cancelOwnedPendingPay2sPayment(
+        ownerId: string,
+        orderId: string,
+    ): Promise<OrderResponse> {
+        if (!ownerId?.trim())
+            throw new BadRequestException('Thiếu user context.');
+        const payment = await this.orderRepository.findOwnedPay2sPayment(
+            ownerId,
+            orderId,
+        );
+        if (!payment) throw new NotFoundException('Không tìm thấy đơn hàng.');
+        if (payment.order.paymentMethod !== PaymentMethod.PAY2S)
+            throw new BadRequestException('Đơn hàng không dùng Pay2S.');
+
+        // Hủy lặp lại chỉ retry nhả reservation; khóa reservationKey khiến Product Service bỏ qua lần release đã hoàn tất.
+        if (payment.order.status === OrderStatus.CANCELLED) {
+            if (payment.order.paymentStatus === PaymentStatus.FAILED) {
+                await this.productClient.release(
+                    payment.order.idempotencyKey,
+                    (payment.order.items ?? []).map((item) => ({
+                        variantId: item.variantId,
+                        quantity: item.quantity,
+                    })),
+                );
+            }
+            return this.responseMapper.toResponse(payment.order);
+        }
+        if (
+            payment.order.status !== OrderStatus.PENDING ||
+            payment.order.paymentStatus !== PaymentStatus.PENDING
+        )
+            throw new BadRequestException(
+                'Đơn hàng không còn ở trạng thái chờ thanh toán Pay2S.',
+            );
+
+        const pendingAttempt =
+            payment.attempt?.status === 'PENDING' ? payment.attempt : null;
+        // Còn hạn thì cần Pay2S xác nhận hủy link; deadline đã qua thì hệ thống có thể đóng trực tiếp.
+        // Cắt deadline dữ liệu cũ về tối đa 10 phút từ lúc order được tạo, khớp với thời hạn mới.
+        const providerDeadline = new Date(
+            payment.order.createdAt.getTime() + PAY2S_ORDER_PAYMENT_TTL_MS,
+        );
+        const effectiveDeadline = [
+            payment.order.paymentExpiresAt,
+            pendingAttempt?.expiresAt,
+            providerDeadline,
+        ]
+            .filter((value): value is Date => value instanceof Date)
+            .reduce((earliest, value) => (value < earliest ? value : earliest));
+        if (pendingAttempt && effectiveDeadline.getTime() > Date.now()) {
+            await this.paymentService.cancelPendingPay2sPayment(
+                pendingAttempt.merchantReference,
+                pendingAttempt.environment,
+            );
+        }
+
+        const result = await this.orderRepository.cancelPendingPay2sOrder(
+            ownerId,
+            orderId,
+            pendingAttempt?.id ?? null,
+        );
+        if (result.didCancel || result.order.status === OrderStatus.CANCELLED) {
+            await this.productClient.release(
+                result.order.idempotencyKey,
+                (payment.order.items ?? []).map((item) => ({
+                    variantId: item.variantId,
+                    quantity: item.quantity,
+                })),
+            );
+        }
+
+        const cancelledOrder = await this.orderRepository.findOwnedById(
+            ownerId,
+            orderId,
+        );
+        if (!cancelledOrder)
+            throw new NotFoundException('Không tìm thấy đơn hàng.');
+        return this.responseMapper.toResponse(cancelledOrder);
     }
 
     // Đọc order theo owner để trang kết quả không thể xem đơn của tài khoản khác.
@@ -928,7 +1066,7 @@ export class OrderCommandService {
                 paymentMethod: input.dto.paymentMethod,
                 paymentExpiresAt:
                     input.dto.paymentMethod === PaymentMethod.PAY2S
-                        ? new Date(Date.now() + 15 * 60_000)
+                        ? new Date(Date.now() + PAY2S_ORDER_PAYMENT_TTL_MS)
                         : null,
                 checkoutCartItemId: input.dto.cartItemId ?? null,
                 // Lưu nguồn gateway để audit; mọi nghiệp vụ order sau khi callback hợp lệ vẫn xử lý như payment thành công.

@@ -1090,6 +1090,10 @@ export class SellerWalletRepository
                    order_row.payment_method::text AS "paymentMethod",
                    attempt.status::text AS status, attempt.amount::text AS amount,
                    COALESCE(
+                       CASE
+                           WHEN attempt.provider_response ->> 'refundReason' = 'DUPLICATE_PAYMENT'
+                               THEN 'Thanh toán Pay2S trùng; cần hoàn khoản thu thêm'
+                       END,
                        order_row.cancel_reason,
                        CASE
                            WHEN attempt.refund_account_number IS NOT NULL
@@ -2789,9 +2793,7 @@ export class SellerWalletRepository
                 kinds: ['SHIPPING_FUND_ALLOCATION', 'SHIPPING_FUND_REFUND'],
             })
             .getRawOne<{ remainingAmount: string }>();
-        const remainingAmount = toSignedCents(
-            balance?.remainingAmount ?? '0',
-        );
+        const remainingAmount = toSignedCents(balance?.remainingAmount ?? '0');
         // Không ghi refund âm nếu các bước trước đã giải phóng hết quỹ vận chuyển của đơn.
         if (remainingAmount <= 0n) return;
 

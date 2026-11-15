@@ -17,6 +17,7 @@ import {
 import type {
     Pay2sCancelPaymentInput,
     Pay2sCancelPaymentResult,
+    Pay2sBankTransaction,
     Pay2sCreatePaymentInput,
     Pay2sCreatePaymentResult,
     Pay2sIpnPayload,
@@ -198,6 +199,63 @@ export class Pay2sGatewayService implements OnModuleInit {
         };
     }
 
+    // Đọc lịch sử ngân hàng bằng Secret Key để Order Service đối soát khoản vào nếu IPN bị mất sau số lần retry của Pay2S.
+    async getTransactionHistory(
+        begin: string,
+        end: string,
+    ): Promise<Pay2sBankTransaction[]> {
+        const secretKey = this.config.get<string>('PAY2S_SECRET_KEY', '');
+        if (!secretKey)
+            throw new ServiceUnavailableException(
+                'Thiếu Secret Key Pay2S để đối soát giao dịch.',
+            );
+
+        // API lịch sử dùng token Base64 của Secret Key; token chỉ nằm trong header server-to-server.
+        const body = await this.postJson(
+            'https://api.pay2s.vn/userapi/transactions',
+            { begin, end },
+            'Không đọc được lịch sử giao dịch Pay2S.',
+            {
+                'pay2s-token': Buffer.from(secretKey, 'utf8').toString(
+                    'base64',
+                ),
+            },
+        );
+        if (body.status !== true || !Array.isArray(body.transactions))
+            throw new ServiceUnavailableException(
+                'Pay2S trả dữ liệu lịch sử giao dịch không hợp lệ.',
+            );
+
+        // Bỏ qua row sai kiểu và chỉ chuyển các field cần thiết vào tầng nghiệp vụ.
+        return body.transactions.flatMap((value) => {
+            if (!value || typeof value !== 'object' || Array.isArray(value))
+                return [];
+            const row = value as Record<string, unknown>;
+            const amount = Number(row.amount);
+            if (
+                typeof row.transaction_id !== 'string' ||
+                typeof row.transaction_date !== 'string' ||
+                typeof row.account_number !== 'string' ||
+                typeof row.description !== 'string' ||
+                !Number.isSafeInteger(amount) ||
+                amount <= 0 ||
+                (row.type !== 'IN' && row.type !== 'OUT')
+            )
+                return [];
+            return [
+                {
+                    transactionId: row.transaction_id,
+                    transactionDate: row.transaction_date,
+                    accountNumber: row.account_number,
+                    amount,
+                    description: row.description,
+                    bank: typeof row.bank === 'string' ? row.bank : null,
+                    type: row.type,
+                },
+            ];
+        });
+    }
+
     // Xác minh redirect theo bộ field riêng của Pay2S; redirect không được tự ghi nhận tiền vào database.
     verifyRedirect(payload: Pay2sRedirectPayload): boolean {
         return Boolean(
@@ -344,6 +402,7 @@ export class Pay2sGatewayService implements OnModuleInit {
         endpoint: string,
         payload: Record<string, unknown>,
         errorMessage: string,
+        additionalHeaders: Record<string, string> = {},
     ): Promise<Record<string, unknown>> {
         let response: Response;
         try {
@@ -352,6 +411,7 @@ export class Pay2sGatewayService implements OnModuleInit {
                 headers: {
                     'content-type': 'application/json; charset=UTF-8',
                     accept: 'application/json',
+                    ...additionalHeaders,
                 },
                 body: JSON.stringify(payload),
                 signal: AbortSignal.timeout(

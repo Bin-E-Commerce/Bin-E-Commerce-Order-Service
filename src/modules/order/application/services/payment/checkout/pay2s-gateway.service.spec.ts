@@ -183,4 +183,77 @@ describe('Pay2sGatewayService', () => {
         );
         fetchMock.mockRestore();
     });
+
+    // Lịch sử chỉ gửi Base64 Secret Key trong header backend và chỉ trả các giao dịch có cấu trúc hợp lệ.
+    it('should read normalized transactions from the Pay2S history API', async () => {
+        const target = createTarget();
+        const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+            ok: true,
+            text: async () =>
+                JSON.stringify({
+                    status: true,
+                    transactions: [
+                        {
+                            transaction_id: 'BANK-TRANS-1',
+                            transaction_date: '2026-11-15 10:00:00',
+                            account_number: '123456',
+                            amount: 120000,
+                            description: 'Thanh toan don BIN-1',
+                            bank: 'MBB',
+                            type: 'IN',
+                        },
+                        {
+                            transaction_id: 'BANK-TRANS-2',
+                            transaction_date: '2026-11-15 10:01:00',
+                            account_number: '123456',
+                            amount: 120000,
+                            description: 'Refund',
+                            bank: 'MBB',
+                            type: 'OUT',
+                        },
+                    ],
+                }),
+        } as Response);
+
+        const result = await target.getTransactionHistory(
+            '14/11/2026',
+            '15/11/2026',
+        );
+
+        expect(fetchMock).toHaveBeenCalledWith(
+            'https://api.pay2s.vn/userapi/transactions',
+            expect.objectContaining({
+                headers: expect.objectContaining({
+                    'pay2s-token': Buffer.from('secret', 'utf8').toString(
+                        'base64',
+                    ),
+                }),
+                body: JSON.stringify({
+                    begin: '14/11/2026',
+                    end: '15/11/2026',
+                }),
+            }),
+        );
+        expect(result).toEqual([
+            {
+                transactionId: 'BANK-TRANS-1',
+                transactionDate: '2026-11-15 10:00:00',
+                accountNumber: '123456',
+                amount: 120000,
+                description: 'Thanh toan don BIN-1',
+                bank: 'MBB',
+                type: 'IN',
+            },
+            {
+                transactionId: 'BANK-TRANS-2',
+                transactionDate: '2026-11-15 10:01:00',
+                accountNumber: '123456',
+                amount: 120000,
+                description: 'Refund',
+                bank: 'MBB',
+                type: 'OUT',
+            },
+        ]);
+        fetchMock.mockRestore();
+    });
 });

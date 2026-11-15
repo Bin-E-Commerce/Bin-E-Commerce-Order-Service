@@ -136,7 +136,19 @@ export class SellerOrderController {
         );
     }
 
-    // Seller ghi nhận kết quả kiểm tra kiện hàng đã nhận.
+    // Seller xác nhận đã nhận kiện hoàn; Order Service chốt return thành công và khởi động bước xử lý refund.
+    @Post('returns/:returnId/confirm-received')
+    confirmReturnReceived(
+        @Headers() headers: Record<string, unknown>,
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+    ) {
+        return this.orderReturnService.confirmReceived(
+            this.sellerOrderAccess.buildCurrentUserFromHeaders(headers),
+            returnId,
+        );
+    }
+
+    // Caller cũ chỉ được xác nhận kết quả thành công; lựa chọn không đạt bị chặn để không mở lại bước kiểm tra.
     @Post('returns/:returnId/inspection')
     inspectReturn(
         @Headers() headers: Record<string, unknown>,
