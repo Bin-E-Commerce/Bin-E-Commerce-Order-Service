@@ -1490,12 +1490,18 @@ export class SellerWalletRepository
                 order.paymentStatus = PaymentStatus.REFUNDED;
                 await orderRepository.save(order);
             }
-            if (order.status === OrderStatus.CANCELLED)
+            if (order.status === OrderStatus.CANCELLED) {
+                // Đơn hủy đã hoàn tiền cần đảo cả quỹ ship; source key dùng chung với bước hủy để retry không trừ lặp.
+                await this.reverseCancelledShippingFundInTransaction(
+                    manager,
+                    order,
+                );
                 await this.reverseOrderSaleInTransaction(
                     manager,
                     order.id,
                     `cancel-refund:${order.id}`,
                 );
+            }
         });
     }
 
@@ -2727,24 +2733,79 @@ export class SellerWalletRepository
         });
     }
 
-    // Đảo toàn bộ phần sale còn ghi nhận của đơn đã hủy, kể cả retry sau khi bước hủy ví trước đó bị gián đoạn.
+    // Đảo sale còn ghi nhận và phí ship đang giữ cho đơn đã hủy; retry vẫn bù được ledger nếu lần trước dừng giữa chừng.
     async reverseCancelledOrder(orderId: string): Promise<void> {
         await this.dataSource.transaction(async (manager) => {
             const order = await manager.getRepository(Order).findOne({
                 where: { id: orderId },
                 lock: { mode: 'pessimistic_write' },
             });
+            // Chỉ đơn đã hủy và đã thu/đang hoàn mới có tiền cần đảo; đơn chưa trả không tạo bút toán quỹ ship.
             if (
                 !order ||
                 order.status !== OrderStatus.CANCELLED ||
-                order.paymentStatus !== PaymentStatus.REFUND_PENDING
+                (order.paymentStatus !== PaymentStatus.REFUND_PENDING &&
+                    order.paymentStatus !== PaymentStatus.REFUNDED)
             )
                 return;
+            // Bỏ phí ship đã phân bổ khi hủy; cùng transaction với đảo sale để hai số dư không lệch nhau.
+            await this.reverseCancelledShippingFundInTransaction(
+                manager,
+                order,
+            );
             await this.reverseOrderSaleInTransaction(
                 manager,
                 order.id,
                 `cancel-refund:${order.id}`,
             );
+        });
+    }
+
+    // Đơn Pay2S đã hủy không còn giữ phí ship cho carrier; hoàn phần quỹ còn treo bằng ledger âm idempotent.
+    // Chỉ xử lý khi bút toán phân bổ tồn tại để hủy chưa thanh toán hoặc Pay2S đến muộn không tạo quỹ âm.
+    // Tính allocation ròng cùng các refund ship trước đó rồi chỉ đảo phần dương còn lại trong transaction đang khóa Order.
+    private async reverseCancelledShippingFundInTransaction(
+        manager: EntityManager,
+        order: Order,
+    ): Promise<void> {
+        const ledgerRepository = manager.getRepository(PlatformFinanceLedger);
+        const allocationSourceKey = `shipping-fund:allocation:${order.id}`;
+        // Không có allocation nghĩa là tiền ship chưa vào quỹ; dừng để không tạo khoản âm cho đơn chưa thu tiền.
+        const allocation = await ledgerRepository.findOne({
+            where: { sourceKey: allocationSourceKey },
+        });
+        if (!allocation) return;
+
+        const sourceKey = `shipping-fund:cancel-refund:${order.id}`;
+        // Source key riêng cho hủy khiến retry sau lỗi mạng không đảo lại cùng một phần phí ship.
+        if (await ledgerRepository.exist({ where: { sourceKey } })) return;
+
+        // Trừ các lần hoàn phí ship trước để chỉ nhả phần quỹ chưa được dùng, không hoàn vượt allocation gốc.
+        const balance = await ledgerRepository
+            .createQueryBuilder('ledger')
+            .select('COALESCE(SUM(ledger.amount), 0)', 'remainingAmount')
+            .where('ledger.orderId = :orderId', { orderId: order.id })
+            .andWhere('ledger.kind IN (:...kinds)', {
+                kinds: ['SHIPPING_FUND_ALLOCATION', 'SHIPPING_FUND_REFUND'],
+            })
+            .getRawOne<{ remainingAmount: string }>();
+        const remainingAmount = toSignedCents(
+            balance?.remainingAmount ?? '0',
+        );
+        // Không ghi refund âm nếu các bước trước đã giải phóng hết quỹ vận chuyển của đơn.
+        if (remainingAmount <= 0n) return;
+
+        // Bút toán dùng source key duy nhất và số dư ròng để ledger dashboard giảm đúng một lần.
+        await ledgerRepository.save({
+            kind: 'SHIPPING_FUND_REFUND',
+            amount: fromCents(-remainingAmount),
+            sourceKey,
+            shopId: null,
+            orderId: order.id,
+            returnRequestId: null,
+            reference: order.orderNumber,
+            settlementBatchId: null,
+            createdBy: null,
         });
     }
 
