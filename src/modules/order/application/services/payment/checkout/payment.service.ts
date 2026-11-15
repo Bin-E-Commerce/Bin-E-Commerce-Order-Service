@@ -40,6 +40,7 @@ type PaymentReturnResponse =
     | {
           status:
               | 'FAILED'
+              | 'CANCELLED'
               | 'REFUND_PENDING'
               | 'REFUNDED'
               | 'PENDING'
@@ -505,10 +506,10 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         return { success: true };
     }
 
-    // Redirect phải qua chữ ký rồi được đối chiếu merchant reference và amount với attempt đã lưu.
-    // Chỉ trạng thái do IPN ghi trong database mới được báo PAID; callback trình duyệt không tự ghi nhận tiền.
-    // transId trên redirect là tùy chọn, nên nếu Pay2S có gửi thì mới so với ID đã được IPN lưu.
-    // Nếu ID có mặt nhưng không khớp, trả UNVERIFIED để UI dừng chờ thay vì báo nhầm thành công.
+    // Redirect phải qua chữ ký và khớp merchant reference, amount với attempt đã lưu.
+    // Chỉ IPN/đối soát được báo PAID; redirect thất bại chỉ đóng attempt để lần retry tạo link mới.
+    // Khi kết quả đã được chốt ở database, trạng thái đó ưu tiên hơn mã redirect đến muộn.
+    // transId tùy chọn nhưng nếu có thì phải khớp bằng chứng đã lưu; mismatch trả UNVERIFIED.
     async processPay2sReturn(
         query: Record<string, unknown>,
     ): Promise<PaymentReturnResponse> {
@@ -561,6 +562,27 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         if (attempt.status === 'REFUND_PENDING')
             return { status: 'REFUND_PENDING' };
         if (attempt.status === 'REFUNDED') return { status: 'REFUNDED' };
+
+        // Redirect Pay2S đã ký xác nhận lần thử thất bại/hủy; đóng attempt cũ nhưng giữ order để khách thanh toán lại.
+        if (String(payload.resultCode) !== '0') {
+            const currentAttemptStatus = await this.markAttemptFailed(
+                attempt.id,
+                payload,
+            );
+
+            // IPN thành công có thể thắng cuộc đua với redirect; tuyệt đối không báo hủy nếu database đã ghi nhận tiền.
+            if (currentAttemptStatus === 'PAID')
+                return { status: 'PAID', orderId: attempt.orderId };
+            if (currentAttemptStatus === 'REFUND_PENDING')
+                return { status: 'REFUND_PENDING' };
+            if (currentAttemptStatus === 'REFUNDED')
+                return { status: 'REFUNDED' };
+
+            return String(payload.resultCode) === '2'
+                ? { status: 'CANCELLED' }
+                : { status: 'FAILED' };
+        }
+
         if (attempt.status === 'FAILED') return { status: 'FAILED' };
         return { status: 'PENDING' };
     }
@@ -1072,22 +1094,28 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         };
     }
 
-    // Chỉ chuyển attempt pending sang failed; callback cũ không được ghi đè PAID hoặc refund pending.
+    // Chỉ chuyển attempt PENDING sang FAILED; trả trạng thái dưới khóa để Return không che kết quả IPN đến đồng thời.
     private async markAttemptFailed(
         attemptId: string,
-        payload: Pay2sIpnPayload,
-    ): Promise<void> {
-        await this.dataSource.transaction(async (manager) => {
+        payload: Pay2sIpnPayload | Pay2sRedirectPayload,
+    ): Promise<PaymentAttempt['status'] | null> {
+        return this.dataSource.transaction(async (manager) => {
             const repository = manager.getRepository(PaymentAttempt);
             const attempt = await repository.findOne({
                 where: { id: attemptId },
                 lock: { mode: 'pessimistic_write' },
             });
-            if (!attempt || attempt.status !== 'PENDING') return;
-            attempt.status = 'FAILED';
-            attempt.providerOrderInfo = payload.orderInfo;
-            attempt.providerResponse = this.redactCallback(payload);
-            await repository.save(attempt);
+            if (!attempt) return null;
+
+            // Chỉ callback đầu tiên mới chốt PENDING; callback muộn giữ nguyên PAID/refund đã ghi trước đó.
+            if (attempt.status === 'PENDING') {
+                attempt.status = 'FAILED';
+                attempt.providerOrderInfo = payload.orderInfo;
+                attempt.providerResponse = this.redactCallback(payload);
+                await repository.save(attempt);
+            }
+
+            return attempt.status;
         });
     }
 
@@ -1430,7 +1458,9 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Loại m2signature khỏi dữ liệu lưu để không biến provider response thành bản sao credential proof.
-    private redactCallback(payload: Pay2sIpnPayload): Record<string, unknown> {
+    private redactCallback(
+        payload: Pay2sIpnPayload | Pay2sRedirectPayload,
+    ): Record<string, unknown> {
         const { m2signature: _signature, ...redacted } = payload;
         return redacted;
     }
