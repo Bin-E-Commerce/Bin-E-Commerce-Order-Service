@@ -437,7 +437,6 @@ describe('PaymentService.processPay2sIpn', () => {
         const creditOrderPending = jest.fn().mockResolvedValue(undefined);
         const enqueueCreatedForOrder = jest.fn().mockResolvedValue(undefined);
         const publishCreated = jest.fn().mockResolvedValue(undefined);
-        const checkoutCart = jest.fn().mockResolvedValue(undefined);
         const target = Object.assign(Object.create(PaymentService.prototype), {
             config: {
                 get: jest.fn((key: string, fallback?: string) =>
@@ -479,7 +478,6 @@ describe('PaymentService.processPay2sIpn', () => {
             },
             sellerWalletRepository: { creditOrderPending },
             orderEvents: { enqueueCreatedForOrder, publishCreated },
-            cartClient: { checkoutCart },
             logger: { warn: jest.fn(), error: jest.fn() },
         }) as PaymentService;
         const reconcile = (
@@ -510,7 +508,6 @@ describe('PaymentService.processPay2sIpn', () => {
         expect(enqueueCreatedForOrder).toHaveBeenCalledTimes(1);
         expect(creditOrderPending).toHaveBeenCalledTimes(1);
         expect(publishCreated).toHaveBeenCalledTimes(1);
-        expect(checkoutCart).toHaveBeenCalledTimes(1);
 
         // Quét lại cùng lịch sử không tạo hồ sơ refund thứ hai.
         (
@@ -749,7 +746,7 @@ describe('PaymentService.processPay2sIpn', () => {
         expect(attemptRepository.save).toHaveBeenCalledTimes(1);
     });
 
-    // IPN hợp lệ xác nhận order một lần; callback lặp chỉ ACK và không lặp ghi ví, event hoặc dọn cart.
+    // IPN xác nhận order một lần; callback lặp chỉ ACK và không lặp ghi ví hoặc event.
     it('confirms the order once and does not replay side effects for the same transaction', async () => {
         const attemptCreatedAt = new Date(Date.now() - 60_000);
         const attempt = {
@@ -814,7 +811,6 @@ describe('PaymentService.processPay2sIpn', () => {
         const creditOrderPending = jest.fn().mockResolvedValue(undefined);
         const enqueueCreatedForOrder = jest.fn().mockResolvedValue(undefined);
         const publishCreated = jest.fn().mockResolvedValue(undefined);
-        const checkoutCart = jest.fn().mockResolvedValue(undefined);
         const target = Object.assign(Object.create(PaymentService.prototype), {
             gateway: { verifyIpn: jest.fn().mockReturnValue(true) },
             dataSource: {
@@ -825,7 +821,6 @@ describe('PaymentService.processPay2sIpn', () => {
             },
             sellerWalletRepository: { creditOrderPending },
             orderEvents: { enqueueCreatedForOrder, publishCreated },
-            cartClient: { checkoutCart },
             logger: { warn: jest.fn(), error: jest.fn() },
         }) as PaymentService;
         const body = {
@@ -859,10 +854,9 @@ describe('PaymentService.processPay2sIpn', () => {
         expect(enqueueCreatedForOrder).toHaveBeenCalledTimes(1);
         expect(creditOrderPending).toHaveBeenCalledTimes(1);
         expect(publishCreated).toHaveBeenCalledTimes(1);
-        expect(checkoutCart).toHaveBeenCalledTimes(1);
     });
 
-    // Duplicate IPN chỉ ACK sau khi transaction xác định attempt đã PAID; event/cart không được chạy lại.
+    // Duplicate IPN chỉ ACK sau khi transaction xác định attempt đã PAID; tác động tài chính không chạy lại.
     it('does not repeat side effects for a duplicate paid IPN', async () => {
         const attempt = {
             id: 'attempt-1',
@@ -902,7 +896,6 @@ describe('PaymentService.processPay2sIpn', () => {
         };
         const creditOrderPending = jest.fn();
         const publishCreated = jest.fn();
-        const checkoutCart = jest.fn();
         const target = Object.assign(Object.create(PaymentService.prototype), {
             gateway: { verifyIpn: jest.fn().mockReturnValue(true) },
             dataSource: {
@@ -919,7 +912,6 @@ describe('PaymentService.processPay2sIpn', () => {
                 creditOrderPending,
             },
             orderEvents: { publishCreated },
-            cartClient: { checkoutCart },
             logger: { warn: jest.fn(), error: jest.fn() },
         }) as PaymentService;
         const body = {
@@ -944,7 +936,6 @@ describe('PaymentService.processPay2sIpn', () => {
         });
         expect(creditOrderPending).not.toHaveBeenCalled();
         expect(publishCreated).not.toHaveBeenCalled();
-        expect(checkoutCart).not.toHaveBeenCalled();
     });
 
     // Khoản chuyển thứ hai phải có hồ sơ hoàn riêng; gửi lại cùng IPN không được nhân thêm hồ sơ.
@@ -1003,7 +994,6 @@ describe('PaymentService.processPay2sIpn', () => {
         };
         const creditOrderPending = jest.fn();
         const publishCreated = jest.fn();
-        const checkoutCart = jest.fn();
         const target = Object.assign(Object.create(PaymentService.prototype), {
             gateway: {
                 verifyIpn: jest.fn().mockReturnValue(true),
@@ -1015,7 +1005,6 @@ describe('PaymentService.processPay2sIpn', () => {
             },
             sellerWalletRepository: { creditOrderPending },
             orderEvents: { publishCreated },
-            cartClient: { checkoutCart },
             logger: { warn: jest.fn(), error: jest.fn() },
         }) as PaymentService;
         const body = {
@@ -1054,6 +1043,5 @@ describe('PaymentService.processPay2sIpn', () => {
         );
         expect(creditOrderPending).not.toHaveBeenCalled();
         expect(publishCreated).not.toHaveBeenCalled();
-        expect(checkoutCart).not.toHaveBeenCalled();
     });
 });

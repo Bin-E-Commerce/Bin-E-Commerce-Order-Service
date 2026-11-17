@@ -3,10 +3,8 @@
 /// <reference types="jest" />
 import { Test, type TestingModule } from '@nestjs/testing';
 import { createMock, type DeepMocked } from '@golevelup/ts-jest';
-import { DataSource, type EntityManager } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
-import { OrderItem } from '@/database/order/entities/order-item.entity';
-import { OrderStatusHistory } from '@/database/order/entities/order-status-history.entity';
 import { AuthClient } from '@/modules/order/application/clients/auth.client';
 import { CartClient } from '@/modules/order/application/clients/cart.client';
 import { ProductClient } from '@/modules/order/application/clients/product.client';
@@ -20,6 +18,8 @@ import { PaymentMethod } from '@/database/order/enums/payment-method.enum';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
+import { ORDER_CHECKOUT_REPOSITORY } from '@/modules/order/application/contracts/orders/order-checkout.repository';
+import type { OrderCheckoutRepositoryPort } from '@/modules/order/application/contracts/orders/order-checkout.repository';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { SellerOrderAccessService } from '@/modules/order/application/services/order/seller-order-access.service';
@@ -58,6 +58,7 @@ describe('OrderCommandService', () => {
     let mockOrderEvents: DeepMocked<OrderEventsService>;
     let mockResponseMapper: DeepMocked<OrderResponseMapper>;
     let mockDataSource: DeepMocked<DataSource>;
+    let mockOrderCheckoutRepository: DeepMocked<OrderCheckoutRepositoryPort>;
 
     const ownerId = 'owner-1';
     const addressId = '11111111-1111-4111-8111-111111111111';
@@ -130,6 +131,8 @@ describe('OrderCommandService', () => {
         mockOrderEvents = createMock<OrderEventsService>();
         mockResponseMapper = createMock<OrderResponseMapper>();
         mockDataSource = createMock<DataSource>();
+        // Checkout persistence belongs to the repository port; tests keep the use case isolated from TypeORM writes.
+        mockOrderCheckoutRepository = createMock<OrderCheckoutRepositoryPort>();
 
         const module: TestingModule = await Test.createTestingModule({
             providers: [
@@ -146,6 +149,10 @@ describe('OrderCommandService', () => {
                 { provide: OrderEventsService, useValue: mockOrderEvents },
                 { provide: OrderResponseMapper, useValue: mockResponseMapper },
                 { provide: DataSource, useValue: mockDataSource },
+                {
+                    provide: ORDER_CHECKOUT_REPOSITORY,
+                    useValue: mockOrderCheckoutRepository,
+                },
                 {
                     provide: PaymentService,
                     useValue: {
@@ -237,48 +244,15 @@ describe('OrderCommandService', () => {
             expect(mockAuthClient.getOwnedAddress).not.toHaveBeenCalled();
         });
 
-        // Lưu order bằng giá Product Service trả về, tạo item snapshot và đóng cart sau commit.
+        // Chuyển authoritative item snapshot và cart cleanup snapshot cho repository transaction.
         it('should create a confirmed COD order with authoritative product pricing', async () => {
             // Arrange
             const reservation = createReservation();
+            const cartItemId = '44444444-4444-4444-8444-444444444444';
             const savedOrder = {
                 id: 'order-1',
                 createdAt: new Date(),
             } as Order;
-            const orderRepository = {
-                create: jest.fn((input: Partial<Order>) => ({
-                    ...input,
-                    id: savedOrder.id,
-                })),
-                save: jest.fn(async (input: Order) => ({
-                    ...input,
-                    ...savedOrder,
-                })),
-            };
-            const itemRepository = {
-                create: jest.fn((input: Partial<OrderItem>) => input),
-                save: jest.fn(async (input: OrderItem[]) => input),
-            };
-            const historyRepository = {
-                create: jest.fn((input: Partial<OrderStatusHistory>) => input),
-                save: jest.fn(async (input: OrderStatusHistory) => input),
-            };
-            const manager = {
-                getRepository: jest.fn((entity: unknown) => {
-                    if (entity === Order) return orderRepository;
-                    if (entity === OrderItem) return itemRepository;
-                    return historyRepository;
-                }),
-            };
-            // Thu hẹp overload Jest mock để callback nhận đúng EntityManager giả trong transaction.
-            const transactionMock =
-                mockDataSource.transaction as unknown as jest.Mock<
-                    Promise<unknown>,
-                    [(entityManager: EntityManager) => Promise<unknown>]
-                >;
-            transactionMock.mockImplementation(async (callback) =>
-                callback(manager as unknown as EntityManager),
-            );
             mockOrderRepository.findByIdempotency.mockResolvedValue(null);
             mockCartClient.getActiveCart.mockResolvedValue(createCart());
             mockAuthClient.getOwnedAddress.mockResolvedValue({
@@ -298,6 +272,9 @@ describe('OrderCommandService', () => {
                 street: '1 Nguyễn Huệ',
             });
             mockProductClient.reserve.mockResolvedValue(reservation);
+            mockOrderCheckoutRepository.persistCheckout.mockResolvedValue(
+                savedOrder,
+            );
             mockResponseMapper.toResponse.mockReturnValue({
                 id: savedOrder.id,
             } as never);
@@ -311,21 +288,15 @@ describe('OrderCommandService', () => {
 
             // Assert
             expect(result).toEqual({ id: savedOrder.id });
-            expect(orderRepository.create).toHaveBeenCalledWith(
+            expect(
+                mockOrderCheckoutRepository.persistCheckout,
+            ).toHaveBeenCalledWith(
                 expect.objectContaining({
                     ownerId,
-                    subtotal: '44000.00',
-                    totalAmount: '44000.00',
                     paymentMethod: PaymentMethod.COD,
-                }),
-            );
-            expect(itemRepository.create).toHaveBeenCalledWith(
-                expect.objectContaining({
-                    productName: 'Áo thể thao chính thức',
-                    brandId: 'brand-1',
-                    unitPrice: '22000.00',
-                    quantity: 2,
-                    lineTotal: '44000.00',
+                    items: reservation.items,
+                    cartCheckoutItems: [{ itemId: cartItemId, quantity: 2 }],
+                    shippingFee: '0.00',
                 }),
             );
             expect(mockProductClient.reserve).toHaveBeenCalledWith(
@@ -336,7 +307,11 @@ describe('OrderCommandService', () => {
                 expect.objectContaining({ id: savedOrder.id }),
                 reservation.items,
             );
-            expect(mockCartClient.checkoutCart).toHaveBeenCalledWith(ownerId);
+            expect(mockCartClient.checkoutCartItems).toHaveBeenCalledWith(
+                ownerId,
+                savedOrder.id,
+                [{ itemId: cartItemId, quantity: 2 }],
+            );
         });
 
         // Chặn request thiếu user context hoặc thiếu idempotency key trước mọi I/O downstream.
