@@ -14,6 +14,8 @@ import { CartClient } from '@/modules/order/application/clients/cart.client';
 import { ProductClient } from '@/modules/order/application/clients/product.client';
 import { SellerShopClient } from '@/modules/order/application/clients/seller-shop.client';
 import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
+import { OrderCheckoutRepository } from '@/modules/order/infrastructure/repositories/orders/order-checkout.repository';
+import { ORDER_CHECKOUT_REPOSITORY } from '@/modules/order/application/contracts/orders/order-checkout.repository';
 import { OrderCommandService } from '@/modules/order/application/services/order/order-command.service';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
 import { SellerOrderAccessService } from '@/modules/order/application/services/order/seller-order-access.service';
@@ -34,6 +36,7 @@ import { OrderDeliveryConfirmationService } from '@/modules/order/application/se
 import { OrderDeliveryAutomationService } from '@/modules/order/application/services/delivery/order-delivery-automation.service';
 import { ShipmentStatusConsumer } from '@/kafka/shipment-status.consumer';
 import { OrderPurchaseEventOutboxEntity } from '@/database/integration/entities/order-purchase-event-outbox.entity';
+import { OrderCartCleanupOutboxEntity } from '@/database/integration/entities/order-cart-cleanup-outbox.entity';
 import { WalletFinanceNotificationOutboxEntity } from '@/database/integration/entities/wallet-finance-notification-outbox.entity';
 import { SellerDashboardOrderService } from '@/modules/order/application/services/dashboard/seller-dashboard-order.service';
 import { PaymentAttempt } from '@/database/payment/entities/payment-attempt.entity';
@@ -55,6 +58,7 @@ import { WalletWithdrawalRequest } from '@/database/payment/entities/wallet-with
 import { PlatformFinanceLedger } from '@/database/payment/entities/platform-finance-ledger.entity';
 import { FinanceSettlementBatch } from '@/database/payment/entities/finance-settlement-batch.entity';
 import { WalletFinanceEventOutboxDispatcher } from '@/modules/order/infrastructure/events/wallet-finance-event-outbox-dispatcher.service';
+import { OrderCartCleanupOutboxDispatcher } from '@/modules/order/infrastructure/events/order-cart-cleanup-outbox-dispatcher.service';
 import { SellerWalletDebtService } from '@/modules/order/application/services/finance/seller-wallet-debt.service';
 import { SellerWalletDebtRepository } from '@/modules/order/infrastructure/repositories/finance/seller-wallet-debt.repository';
 import { SELLER_WALLET_DEBT_REPOSITORY } from '@/modules/order/application/contracts/finance/seller-wallet-debt.repository';
@@ -70,6 +74,7 @@ import { SellerFinanceLockClient } from '@/modules/order/application/clients/fin
             OrderReturnRequest,
             OrderDeliveryIssue,
             OrderPurchaseEventOutboxEntity,
+            OrderCartCleanupOutboxEntity,
             WalletFinanceNotificationOutboxEntity,
             PaymentAttempt,
             SellerWallet,
@@ -92,6 +97,11 @@ import { SellerFinanceLockClient } from '@/modules/order/application/clients/fin
     ],
     providers: [
         OrderRepository,
+        OrderCheckoutRepository,
+        {
+            provide: ORDER_CHECKOUT_REPOSITORY,
+            useExisting: OrderCheckoutRepository,
+        },
         OrderResponseMapper,
         OrderCommandService,
         CartClient,
@@ -124,6 +134,7 @@ import { SellerFinanceLockClient } from '@/modules/order/application/clients/fin
         SellerDashboardOrderService,
         ShipmentStatusConsumer,
         WalletFinanceEventOutboxDispatcher,
+        OrderCartCleanupOutboxDispatcher,
         PaymentService,
         Pay2sPayoutReconciliationService,
         Pay2sGatewayService,

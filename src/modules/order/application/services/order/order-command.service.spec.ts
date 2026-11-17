@@ -79,6 +79,7 @@ describe('OrderCommandService', () => {
         status: 'ACTIVE' as const,
         items: [
             {
+                id: '44444444-4444-4444-8444-444444444444',
                 productId,
                 variantId,
                 sellerShopId: null,

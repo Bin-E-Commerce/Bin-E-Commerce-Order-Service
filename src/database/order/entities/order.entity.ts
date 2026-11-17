@@ -139,6 +139,15 @@ export class Order {
     @Column({ name: 'checkout_cart_item_id', type: 'uuid', nullable: true })
     checkoutCartItemId!: string | null;
 
+    // Giữ ID selection để callback nhận biết order mới; quantity snapshot và retry nằm trong cleanup outbox.
+    @Column({
+        name: 'checkout_cart_item_ids',
+        type: 'uuid',
+        array: true,
+        nullable: true,
+    })
+    checkoutCartItemIds!: string[] | null;
+
     @Column({ name: 'shipping_address_id', type: 'uuid' })
     shippingAddressId!: string;
 

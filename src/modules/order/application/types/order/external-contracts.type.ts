@@ -9,6 +9,7 @@ export interface ActiveCartResponse {
 }
 
 export interface ActiveCartItem {
+    id: string;
     productId: string;
     variantId: string;
     sellerShopId: string | null;
@@ -17,6 +18,12 @@ export interface ActiveCartItem {
     variantName: string;
     imageUrl: string | null;
     unitPrice: string;
+    quantity: number;
+}
+
+// Snapshot ID/quantity được lưu vào cleanup outbox để giữ phần khách sửa sau khi order đã tạo.
+export interface CartCheckoutItemSelection {
+    itemId: string;
     quantity: number;
 }
 

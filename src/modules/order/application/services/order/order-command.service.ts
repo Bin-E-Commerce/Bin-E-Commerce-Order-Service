@@ -5,6 +5,7 @@
 
 import {
     BadRequestException,
+    Inject,
     Injectable,
     NotFoundException,
     Optional,
@@ -12,8 +13,6 @@ import {
 import { DataSource, QueryFailedError } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderDeliveryIssue } from '@/database/delivery/entities/order-delivery-issue.entity';
-import { OrderItem } from '@/database/order/entities/order-item.entity';
-import { OrderStatusHistory } from '@/database/order/entities/order-status-history.entity';
 import { CartClient } from '@/modules/order/application/clients/cart.client';
 import { AuthClient } from '@/modules/order/application/clients/auth.client';
 import { ProductClient } from '@/modules/order/application/clients/product.client';
@@ -28,6 +27,8 @@ import {
     OrderCancellationConflictError,
 } from '@/modules/order/application/errors/order.errors';
 import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
+import { ORDER_CHECKOUT_REPOSITORY } from '@/modules/order/application/contracts/orders/order-checkout.repository';
+import type { OrderCheckoutRepositoryPort } from '@/modules/order/application/contracts/orders/order-checkout.repository';
 import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
@@ -40,7 +41,10 @@ import type {
     SellerOrderListResponse,
     SellerOrderResponse,
 } from '@/modules/order/application/types/order/order-response.type';
-import type { CheckoutQuoteItem } from '@/modules/order/application/types/order/external-contracts.type';
+import type {
+    CartCheckoutItemSelection,
+    CheckoutQuoteItem,
+} from '@/modules/order/application/types/order/external-contracts.type';
 import type { OrderListQueryDto } from '@/modules/order/presentation/dto/orders/order-list-query.dto';
 import type { CancelOrderDto } from '@/modules/order/presentation/dto/orders/cancel-order.dto';
 import type { RefundBankAccountInput } from '@/modules/order/application/types/order/refund-bank-account.type';
@@ -59,6 +63,7 @@ import { mapPay2sCustomerPaymentDetails } from '@/modules/order/application/util
 import type { Pay2sCustomerPaymentDetails } from '@/modules/order/application/types/payments/pay2s-customer-payment.type';
 
 const REVIEW_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_CART_CHECKOUT_ITEMS = 1_000;
 // Đồng bộ tập ký tự với CancelOrderDto để luồng gọi nội bộ không bỏ qua quy tắc tên nhận hoàn.
 const REFUND_ACCOUNT_HOLDER_PATTERN =
     /^\p{L}[\p{L}\p{M}]*(?: \p{L}[\p{L}\p{M}]*)*$/u;
@@ -77,10 +82,14 @@ export class OrderCommandService {
         private readonly responseMapper: OrderResponseMapper,
         private readonly dataSource: DataSource,
         private readonly paymentService: PaymentService,
+        @Inject(ORDER_CHECKOUT_REPOSITORY)
+        private readonly orderCheckoutRepository: OrderCheckoutRepositoryPort,
         @Optional() private readonly shippingClient?: ShippingClient,
     ) {}
 
-    // Tạo order COD idempotent; cùng user và cùng key sẽ nhận lại order cũ thay vì reserve stock lần hai.
+    // Tạo order idempotent; Cart phải trả đúng selection trước khi reserve để không tính dư sản phẩm.
+    // Snapshot quantity đi cùng order trong transaction để cleanup chỉ trừ phần đã mua, kể cả khi callback Pay2S đến muộn.
+    // Cleanup được ghi outbox cùng order; gọi ngay cho COD để UI cập nhật sớm, còn worker đảm bảo retry khi Cart lỗi.
     async createCodOrder(
         ownerId: string,
         dto: CreateCodOrderDto,
@@ -103,6 +112,10 @@ export class OrderCommandService {
             this.paymentService.assertPay2sCheckoutAllowed();
         }
 
+        const selectedCartItemIds = this.resolveCartItemIds(
+            dto.cartItemId,
+            dto.cartItemIds,
+        );
         const fingerprint = this.createFingerprint(dto);
         const previousOrder = await this.orderRepository.findByIdempotency(
             ownerId,
@@ -127,10 +140,15 @@ export class OrderCommandService {
             return previousResponse;
         }
 
-        const cart = dto.cartItemId
-            ? await this.cartClient.getActiveCart(ownerId, dto.cartItemId)
+        // Cart Service xác nhận toàn bộ selection cùng thuộc active cart trước khi Order Service reserve hàng.
+        const cart = selectedCartItemIds
+            ? await this.cartClient.getActiveCart(ownerId, selectedCartItemIds)
             : await this.cartClient.getActiveCart(ownerId);
         if (cart.items.length === 0) throw new EmptyCartError();
+        this.assertCartCheckoutSize(cart.items.length);
+        const cartCheckoutItems: CartCheckoutItemSelection[] = cart.items.map(
+            ({ id, quantity }) => ({ itemId: id, quantity }),
+        );
 
         const address = await this.authClient.getOwnedAddress(
             ownerId,
@@ -172,12 +190,19 @@ export class OrderCommandService {
 
         let savedOrder: Order;
         try {
-            savedOrder = await this.persistOrder({
+            savedOrder = await this.orderCheckoutRepository.persistCheckout({
+                orderNumber: this.generateOrderNumber(),
                 ownerId,
-                dto,
-                idempotencyKey,
-                fingerprint,
-                address: {
+                paymentMethod: dto.paymentMethod,
+                isSandbox:
+                    dto.paymentMethod === PaymentMethod.PAY2S &&
+                    this.paymentService.isSandboxMode(),
+                checkoutCartItemId: dto.cartItemId ?? null,
+                checkoutCartItemIds: cartCheckoutItems.map(
+                    (item) => item.itemId,
+                ),
+                shippingAddressId: dto.shippingAddressId,
+                shippingAddress: {
                     label: address.label,
                     fullName: address.fullName,
                     phone: address.phone,
@@ -188,8 +213,12 @@ export class OrderCommandService {
                     ghnAddress: this.toGhnAddressSelection(address),
                 },
                 items: reservation.items,
+                cartCheckoutItems,
                 shippingFee: shipping.fee,
                 shippingFeeBreakdown: shipping.breakdown,
+                note: dto.note?.trim() || null,
+                idempotencyKey,
+                requestFingerprint: fingerprint,
             });
         } catch (error) {
             if (this.isUniqueViolation(error)) {
@@ -266,12 +295,11 @@ export class OrderCommandService {
             );
         }
 
-        // Order và stock đã commit; dọn cart là best-effort nên không chặn response checkout.
-        // Việc tách bước này khỏi critical path giảm thêm một HTTP hop sau khi mua hàng thành công.
-        const cleanupPromise = dto.cartItemId
-            ? this.cartClient.checkoutCart(ownerId, dto.cartItemId)
-            : this.cartClient.checkoutCart(ownerId);
-        void Promise.resolve(cleanupPromise).catch(() => undefined);
+        // Order đã commit; chờ lần gọi nhanh này để response thành công không làm web refetch cart quá sớm.
+        // Nếu Cart lỗi, catch giữ order hợp lệ còn outbox nền sẽ retry theo backoff.
+        await this.cartClient
+            .checkoutCartItems(ownerId, savedOrder.id, cartCheckoutItems)
+            .catch(() => undefined);
         return this.responseMapper.toResponse(savedOrder);
     }
 
@@ -281,6 +309,7 @@ export class OrderCommandService {
         shippingAddressId: string,
         paymentMethod: PaymentMethod,
         cartItemId?: string,
+        cartItemIds?: string[],
     ) {
         if (!ownerId?.trim())
             throw new BadRequestException('Thiếu user context.');
@@ -288,10 +317,15 @@ export class OrderCommandService {
             throw new BadRequestException(
                 'Phương thức thanh toán không được hỗ trợ.',
             );
-        const cart = cartItemId
-            ? await this.cartClient.getActiveCart(ownerId, cartItemId)
+        const selectedCartItemIds = this.resolveCartItemIds(
+            cartItemId,
+            cartItemIds,
+        );
+        const cart = selectedCartItemIds
+            ? await this.cartClient.getActiveCart(ownerId, selectedCartItemIds)
             : await this.cartClient.getActiveCart(ownerId);
         if (cart.items.length === 0) throw new EmptyCartError();
+        this.assertCartCheckoutSize(cart.items.length);
         const address = await this.authClient.getOwnedAddress(
             ownerId,
             shippingAddressId,
@@ -1032,112 +1066,6 @@ export class OrderCommandService {
         return normalized;
     }
 
-    // Lưu aggregate, item snapshot và audit history trong cùng một transaction database.
-    private async persistOrder(input: {
-        ownerId: string;
-        dto: CreateCodOrderDto;
-        idempotencyKey: string;
-        fingerprint: string;
-        address: Record<string, unknown>;
-        items: CheckoutQuoteItem[];
-        shippingFee: string;
-        shippingFeeBreakdown: Array<Record<string, unknown>>;
-    }): Promise<Order> {
-        return this.dataSource.transaction(async (manager) => {
-            const repository = manager.getRepository(Order);
-            const subtotalCents = input.items.reduce(
-                (total, item) =>
-                    total + toCents(item.unitPrice) * BigInt(item.quantity),
-                0n,
-            );
-            const subtotal = fromCents(subtotalCents);
-            const order = repository.create({
-                orderNumber: this.generateOrderNumber(),
-                ownerId: input.ownerId,
-                status:
-                    input.dto.paymentMethod === PaymentMethod.PAY2S
-                        ? OrderStatus.PENDING
-                        : OrderStatus.CONFIRMED,
-                fulfillmentStatus: OrderFulfillmentStatus.TO_SHIP,
-                paymentStatus:
-                    input.dto.paymentMethod === PaymentMethod.PAY2S
-                        ? PaymentStatus.PENDING
-                        : PaymentStatus.COD_PENDING_COLLECTION,
-                paymentMethod: input.dto.paymentMethod,
-                paymentExpiresAt:
-                    input.dto.paymentMethod === PaymentMethod.PAY2S
-                        ? new Date(Date.now() + PAY2S_ORDER_PAYMENT_TTL_MS)
-                        : null,
-                checkoutCartItemId: input.dto.cartItemId ?? null,
-                // Lưu nguồn gateway để audit; mọi nghiệp vụ order sau khi callback hợp lệ vẫn xử lý như payment thành công.
-                isSandbox:
-                    input.dto.paymentMethod === PaymentMethod.PAY2S &&
-                    this.paymentService.isSandboxMode(),
-                shippingAddressId: input.dto.shippingAddressId,
-                shippingAddress: input.address,
-                subtotal,
-                shippingFee: input.shippingFee,
-                shippingFeeBreakdown: input.shippingFeeBreakdown,
-                totalAmount: fromCents(
-                    toCents(subtotal) + toCents(input.shippingFee),
-                ),
-                note: input.dto.note?.trim() || null,
-                cancelReason: null,
-                cancelledAt: null,
-                idempotencyKey: input.idempotencyKey,
-                requestFingerprint: input.fingerprint,
-            });
-            const savedOrder = await repository.save(order);
-
-            const itemRepository = manager.getRepository(OrderItem);
-            const orderItems = input.items.map((item) =>
-                itemRepository.create({
-                    orderId: savedOrder.id,
-                    productId: item.productId,
-                    variantId: item.variantId,
-                    categoryId: item.categoryId,
-                    // Reservation cũ có thể thiếu trường; null giữ backward compatibility và không đoán brand từ catalog.
-                    brandId: item.brandId ?? null,
-                    sellerShopId: item.sellerShopId,
-                    sellerOwnerId: item.sellerOwnerId,
-                    sku: item.sku,
-                    productName: item.productName,
-                    variantName: item.variantName,
-                    imageUrl: item.imageUrl,
-                    unitPrice: item.unitPrice,
-                    quantity: item.quantity,
-                    lineTotal: fromCents(
-                        toCents(item.unitPrice) * BigInt(item.quantity),
-                    ),
-                    packageWeightGrams: item.packageWeightGrams,
-                    packageLengthCm: String(item.packageLengthCm),
-                    packageWidthCm: String(item.packageWidthCm),
-                    packageHeightCm: String(item.packageHeightCm),
-                }),
-            );
-            await itemRepository.save(orderItems);
-
-            const historyRepository = manager.getRepository(OrderStatusHistory);
-            await historyRepository.save(
-                historyRepository.create({
-                    orderId: savedOrder.id,
-                    fromStatus: null,
-                    toStatus:
-                        input.dto.paymentMethod === PaymentMethod.PAY2S
-                            ? OrderStatus.PENDING
-                            : OrderStatus.CONFIRMED,
-                    reason:
-                        input.dto.paymentMethod === PaymentMethod.PAY2S
-                            ? 'Checkout Pay2S đang chờ xác nhận thanh toán.'
-                            : 'Checkout COD đã xác nhận và giữ tồn kho thành công.',
-                }),
-            );
-
-            savedOrder.items = orderItems;
-            return savedOrder;
-        });
-    }
-
     // Group item theo seller shop và cộng quote riêng để không làm lộ hoặc cộng nhầm doanh thu shop khác.
     private async calculateShipping(
         items: CheckoutQuoteItem[],
@@ -1274,10 +1202,53 @@ export class OrderCommandService {
         return fromCents(toCents(value) * BigInt(quantity));
     }
 
-    // Fingerprint giúp cùng idempotency key không bị tái sử dụng cho địa chỉ hoặc phương thức khác.
+    // Chuẩn hóa lựa chọn để cùng idempotency key không thể đổi địa chỉ, phương thức hoặc tập item.
     private createFingerprint(dto: CreateCodOrderDto): string {
         const base = `${dto.shippingAddressId}|${dto.paymentMethod}|${dto.note?.trim() ?? ''}`;
-        return dto.cartItemId ? `${base}|${dto.cartItemId}` : base;
+        const selectedIds = this.resolveCartItemIds(
+            dto.cartItemId,
+            dto.cartItemIds,
+        );
+        if (!selectedIds) return base;
+        if (dto.cartItemIds?.length)
+            return `${base}|items:${selectedIds.join(',')}`;
+        return `${base}|${selectedIds[0]}`;
+    }
+
+    // Từ chối payload trộn kiểu đơn lẻ với danh sách và chuẩn hóa thứ tự ID cho quote, lưu order và retry.
+    // Giới hạn số item cùng với DTO để request nội bộ không tạo vòng lặp hoặc cart query quá lớn.
+    // Kết quả undefined có nghĩa checkout toàn bộ active cart; danh sách khác rỗng luôn là selection chính xác.
+    private resolveCartItemIds(
+        cartItemId?: string,
+        cartItemIds?: string[],
+    ): string[] | undefined {
+        if (cartItemId && cartItemIds?.length) {
+            throw new BadRequestException(
+                'Chỉ gửi cartItemId hoặc cartItemIds, không gửi cả hai.',
+            );
+        }
+        if (cartItemIds) {
+            if (
+                cartItemIds.length === 0 ||
+                cartItemIds.length > 100 ||
+                new Set(cartItemIds).size !== cartItemIds.length
+            ) {
+                throw new BadRequestException(
+                    'Danh sách sản phẩm checkout không hợp lệ.',
+                );
+            }
+            return [...cartItemIds].sort();
+        }
+        return cartItemId ? [cartItemId] : undefined;
+    }
+
+    // Giới hạn số dòng để một cleanup outbox vừa với body limit nội bộ của Cart Service và xử lý trong một transaction.
+    private assertCartCheckoutSize(itemCount: number): void {
+        if (itemCount > MAX_CART_CHECKOUT_ITEMS) {
+            throw new BadRequestException(
+                'Giỏ hàng có quá nhiều mặt hàng để thanh toán cùng lúc. Hãy chia nhỏ lựa chọn.',
+            );
+        }
     }
 
     // Kiểm tra context do Gateway inject trước khi chạm vào database hoặc service downstream.

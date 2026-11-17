@@ -19,7 +19,6 @@ import { OrderStatus } from '@/database/order/enums/order-status.enum';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
 import { PaymentMethod } from '@/database/order/enums/payment-method.enum';
 import { Pay2sGatewayService } from '@/modules/order/application/services/payment/checkout/pay2s-gateway.service';
-import { CartClient } from '@/modules/order/application/clients/cart.client';
 import { OrderEventsService } from '@/modules/order/application/services/order/order-events.service';
 import { ProductClient } from '@/modules/order/application/clients/product.client';
 import { SELLER_WALLET_REPOSITORY } from '@/modules/order/application/contracts/seller-wallet.repository';
@@ -64,7 +63,6 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         private readonly dataSource: DataSource,
         private readonly config: ConfigService,
         private readonly gateway: Pay2sGatewayService,
-        private readonly cartClient: CartClient,
         private readonly orderEvents: OrderEventsService,
         private readonly productClient: ProductClient,
         @Inject(SELLER_WALLET_REPOSITORY)
@@ -1017,7 +1015,8 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
             await this.releaseOrderReservation(order);
     }
 
-    // IPN thành công mới mở side effects; repository/client tự bảo vệ idempotency cho callback lặp.
+    // Chỉ IPN thành công mới ghi nhận side effects tài chính và event; Cart được xử lý riêng bởi durable outbox.
+    // Callback không gọi Cart trực tiếp để timeout dependency không làm mất khả năng retry cleanup.
     private async runPaidSideEffects(orderId: string): Promise<void> {
         const order = await this.dataSource.getRepository(Order).findOne({
             where: { id: orderId },
@@ -1037,14 +1036,6 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
             .catch((error: unknown) =>
                 this.logger.error(
                     `Không phát được event tạo order sau Pay2S order ${order.id}.`,
-                    error instanceof Error ? error.stack : undefined,
-                ),
-            );
-        await this.cartClient
-            .checkoutCart(order.ownerId, order.checkoutCartItemId ?? undefined)
-            .catch((error: unknown) =>
-                this.logger.error(
-                    `Không dọn được giỏ sau Pay2S order ${order.id}.`,
                     error instanceof Error ? error.stack : undefined,
                 ),
             );

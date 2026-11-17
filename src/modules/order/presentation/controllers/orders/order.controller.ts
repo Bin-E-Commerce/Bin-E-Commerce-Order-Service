@@ -59,7 +59,7 @@ export class OrderController {
         return this.deliveryConfirmationService.confirm(ownerId, orderId, dto);
     }
 
-    // Tính phí từ cart/address server-side; cartItemId tùy chọn để Mua ngay chỉ quote một dòng hàng.
+    // Quote toàn cart hoặc đúng tập ID đã chọn; Order Service yêu cầu Cart Service xác minh membership trước tính phí.
     @Post('quote')
     quote(
         @Headers('x-user-id') ownerId: string,
@@ -70,6 +70,7 @@ export class OrderController {
             dto.shippingAddressId,
             dto.paymentMethod,
             dto.cartItemId,
+            dto.cartItemIds,
         );
     }
 

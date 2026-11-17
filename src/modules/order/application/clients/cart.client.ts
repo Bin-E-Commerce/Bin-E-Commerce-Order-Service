@@ -8,7 +8,10 @@ import {
     CheckoutResourceNotFoundError,
     OrderDependencyUnavailableError,
 } from '@/modules/order/application/errors/order.errors';
-import type { ActiveCartResponse } from '@/modules/order/application/types/order/external-contracts.type';
+import type {
+    ActiveCartResponse,
+    CartCheckoutItemSelection,
+} from '@/modules/order/application/types/order/external-contracts.type';
 
 // Đóng gói URL, token và mapping lỗi của Cart Service ở một adapter duy nhất.
 @Injectable()
@@ -26,12 +29,14 @@ export class CartClient {
     }
 
     // Lấy cart active đúng owner; endpoint không tự tạo cart rỗng để checkout không che lỗi nghiệp vụ.
-    // itemId có mặt khi Mua ngay; Cart Service sẽ xác thực ownership rồi chỉ trả đúng dòng đó.
+    // Sau khi chọn ID, kiểm tra response đúng chính xác tập đó để service cũ không âm thầm trả toàn cart.
     async getActiveCart(
         ownerId: string,
-        itemId?: string,
+        itemIds?: string[],
     ): Promise<ActiveCartResponse> {
-        const query = itemId ? `?itemId=${encodeURIComponent(itemId)}` : '';
+        const query = itemIds?.length
+            ? `?itemIds=${encodeURIComponent(itemIds.join(','))}`
+            : '';
         const response = await this.request<ActiveCartResponse>(
             `/api/v1/internal/carts/active${query}`,
             'GET',
@@ -44,6 +49,19 @@ export class CartClient {
         }
         if (!response.ok)
             throw new OrderDependencyUnavailableError('Cart Service');
+        if (itemIds?.length) {
+            const expectedIds = new Set(itemIds);
+            const returnedIds = response.data?.items?.map((item) => item.id);
+            // Fail closed khi Cart Service chưa hỗ trợ selection hoặc trả dư/thiếu item.
+            if (
+                !returnedIds ||
+                returnedIds.length !== expectedIds.size ||
+                new Set(returnedIds).size !== expectedIds.size ||
+                returnedIds.some((itemId) => !expectedIds.has(itemId))
+            ) {
+                throw new OrderDependencyUnavailableError('Cart Service');
+            }
+        }
         return response.data;
     }
 
@@ -61,11 +79,65 @@ export class CartClient {
             throw new OrderDependencyUnavailableError('Cart Service');
     }
 
+    // Gửi snapshot số lượng cùng order ID để Cart dọn đúng phần đã mua và nhận diện retry idempotently.
+    async checkoutCartItems(
+        ownerId: string,
+        orderId: string,
+        items: CartCheckoutItemSelection[],
+    ): Promise<void> {
+        const response = await this.request<{ status: string }>(
+            '/api/v1/internal/carts/checkout-items',
+            'POST',
+            ownerId,
+            { orderId, items },
+        );
+        if (!response.ok)
+            throw new OrderDependencyUnavailableError('Cart Service');
+    }
+
+    // Đóng cart full legacy chỉ khi Cart xác nhận chưa có thay đổi kể từ lúc order được tạo.
+    async checkoutLegacyCartBefore(
+        ownerId: string,
+        orderId: string,
+        checkoutAllBefore: string,
+    ): Promise<void> {
+        const response = await this.request<{ status: string }>(
+            '/api/v1/internal/carts/checkout-items',
+            'POST',
+            ownerId,
+            { orderId, checkoutAllBefore },
+        );
+        if (!response.ok)
+            throw new OrderDependencyUnavailableError('Cart Service');
+    }
+
+    // Giữ đường lui cho Pay2S order cũ chỉ lưu ID; request vẫn mang orderId chống cleanup lặp.
+    async checkoutCartItemIds(
+        ownerId: string,
+        orderId: string,
+        itemIds: string[],
+        checkoutAllBefore?: string,
+    ): Promise<void> {
+        const response = await this.request<{ status: string }>(
+            '/api/v1/internal/carts/checkout-items',
+            'POST',
+            ownerId,
+            {
+                orderId,
+                itemIds,
+                ...(checkoutAllBefore ? { checkoutAllBefore } : {}),
+            },
+        );
+        if (!response.ok)
+            throw new OrderDependencyUnavailableError('Cart Service');
+    }
+
     // Thực hiện request nội bộ và trả cả status để application service quyết định lỗi nghiệp vụ.
     private async request<T>(
         path: string,
         method: 'GET' | 'POST',
         ownerId: string,
+        body?: unknown,
     ): Promise<{ ok: boolean; status: number; data: T }> {
         try {
             const response = await fetch(`${this.targetBase}${path}`, {
@@ -75,7 +147,9 @@ export class CartClient {
                     accept: 'application/json',
                     'x-user-id': ownerId,
                     'x-internal-service-token': this.internalToken,
+                    ...(body ? { 'content-type': 'application/json' } : {}),
                 },
+                ...(body ? { body: JSON.stringify(body) } : {}),
             });
             const data = (await response.json().catch(() => ({}))) as T;
             return { ok: response.ok, status: response.status, data };

@@ -2,6 +2,10 @@
 // Client chỉ được gửi địa chỉ, phương thức thanh toán và ghi chú; giá, item và tổng tiền do server tính.
 
 import {
+    ArrayMaxSize,
+    ArrayNotEmpty,
+    ArrayUnique,
+    IsArray,
     IsEnum,
     IsOptional,
     IsString,
@@ -26,4 +30,12 @@ export class CreateCodOrderDto {
     @IsOptional()
     @IsUUID('4', { message: 'cartItemId phải là UUID hợp lệ.' })
     cartItemId?: string;
+
+    @IsOptional()
+    @IsArray()
+    @ArrayNotEmpty()
+    @ArrayMaxSize(100)
+    @ArrayUnique()
+    @IsUUID('4', { each: true, message: 'cartItemIds phải chứa UUID hợp lệ.' })
+    cartItemIds?: string[];
 }
