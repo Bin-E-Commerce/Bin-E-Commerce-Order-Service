@@ -194,7 +194,9 @@ describe('Pay2sGatewayService', () => {
                     status: true,
                     transactions: [
                         {
+                            id: 33069896,
                             transaction_id: 'BANK-TRANS-1',
+                            checksum: 'P2S-CHECKSUM-1',
                             transaction_date: '2026-11-15 10:00:00',
                             account_number: '123456',
                             amount: 120000,
@@ -203,13 +205,24 @@ describe('Pay2sGatewayService', () => {
                             type: 'IN',
                         },
                         {
+                            id: '33069175',
                             transaction_id: 'BANK-TRANS-2',
+                            checksum: 'P2S-CHECKSUM-2',
                             transaction_date: '2026-11-15 10:01:00',
                             account_number: '123456',
                             amount: 120000,
                             description: 'Refund',
                             bank: 'MBB',
                             type: 'OUT',
+                        },
+                        {
+                            transaction_id: 'BANK-TRANS-WITHOUT-P2S-ID',
+                            transaction_date: '2026-11-15 10:02:00',
+                            account_number: '123456',
+                            amount: 120000,
+                            description: 'Thanh toan don BIN-1',
+                            bank: 'MBB',
+                            type: 'IN',
                         },
                     ],
                 }),
@@ -236,7 +249,9 @@ describe('Pay2sGatewayService', () => {
         );
         expect(result).toEqual([
             {
-                transactionId: 'BANK-TRANS-1',
+                historyTransactionId: '33069896',
+                bankTransactionId: 'BANK-TRANS-1',
+                checksum: 'P2S-CHECKSUM-1',
                 transactionDate: '2026-11-15 10:00:00',
                 accountNumber: '123456',
                 amount: 120000,
@@ -245,7 +260,9 @@ describe('Pay2sGatewayService', () => {
                 type: 'IN',
             },
             {
-                transactionId: 'BANK-TRANS-2',
+                historyTransactionId: '33069175',
+                bankTransactionId: 'BANK-TRANS-2',
+                checksum: 'P2S-CHECKSUM-2',
                 transactionDate: '2026-11-15 10:01:00',
                 accountNumber: '123456',
                 amount: 120000,

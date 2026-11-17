@@ -16,6 +16,10 @@ import {
     unique: true,
     where: '"provider_transaction_id" IS NOT NULL',
 })
+@Index('uq_payment_attempts_pay2s_history_id', ['pay2sHistoryId'], {
+    unique: true,
+    where: '"pay2s_history_id" IS NOT NULL',
+})
 @Index('idx_payment_attempts_order_status', ['orderId', 'status'])
 @Index('uq_payment_attempts_pending_order', ['orderId'], {
     unique: true,
@@ -54,6 +58,30 @@ export class PaymentAttempt {
         nullable: true,
     })
     providerTransactionId!: string | null;
+
+    @Column({
+        name: 'pay2s_history_id',
+        type: 'varchar',
+        length: 64,
+        nullable: true,
+    })
+    pay2sHistoryId!: string | null;
+
+    @Column({
+        name: 'pay2s_bank_transaction_id',
+        type: 'varchar',
+        length: 120,
+        nullable: true,
+    })
+    pay2sBankTransactionId!: string | null;
+
+    @Column({
+        name: 'pay2s_history_checksum',
+        type: 'varchar',
+        length: 64,
+        nullable: true,
+    })
+    pay2sHistoryChecksum!: string | null;
 
     @Column({
         name: 'refund_request_id',

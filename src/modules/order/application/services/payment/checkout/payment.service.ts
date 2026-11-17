@@ -10,7 +10,7 @@ import {
     ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DataSource, In, MoreThanOrEqual } from 'typeorm';
+import { DataSource } from 'typeorm';
 import type { Repository } from 'typeorm';
 import { Order } from '@/database/order/entities/order.entity';
 import { OrderStatusHistory } from '@/database/order/entities/order-status-history.entity';
@@ -34,6 +34,8 @@ import type {
 } from '@/modules/order/application/types/payments/pay2s.types';
 import { PAY2S_ORDER_PAYMENT_TTL_MS } from '@/modules/order/application/constants/payments/pay2s.constants';
 
+const PAY2S_HISTORY_IPN_MATCH_WINDOW_MS = 30_000;
+
 type PaymentReturnResponse =
     | { status: 'PAID'; orderId: string }
     | { status: 'WALLET_DEPOSIT_PAID'; depositId: string }
@@ -42,6 +44,7 @@ type PaymentReturnResponse =
               | 'FAILED'
               | 'CANCELLED'
               | 'REFUND_PENDING'
+              | 'REFUND_FAILED'
               | 'REFUNDED'
               | 'PENDING'
               | 'WALLET_DEPOSIT_FAILED'
@@ -176,6 +179,9 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
                     providerRequestId: null,
                     providerOrderInfo: null,
                     providerTransactionId: null,
+                    pay2sHistoryId: null,
+                    pay2sBankTransactionId: null,
+                    pay2sHistoryChecksum: null,
                     status: 'PENDING',
                     environment: this.getEnvironment(),
                     amount: currentOrder.totalAmount,
@@ -410,8 +416,12 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         if (!payload.transId.trim()) return { success: false };
 
         await this.processVerifiedSuccessfulPayment(attempt, {
-            transactionId: payload.transId,
+            providerTransactionId: payload.transId,
+            historyTransactionId: null,
+            bankTransactionId: null,
+            historyChecksum: null,
             orderInfo: payload.orderInfo,
+            amount: payload.amount,
             receivedAt: this.readPay2sResponseTime(payload.responseTime),
             providerResponse: this.redactCallback(payload),
         });
@@ -419,7 +429,7 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Redirect phải qua chữ ký và khớp merchant reference, amount với attempt đã lưu.
-    // Chỉ IPN/đối soát được báo PAID; redirect thất bại chỉ đóng attempt để lần retry tạo link mới.
+    // Chỉ IPN/lịch sử đối soát được báo PAID; redirect thất bại chỉ đóng attempt để lần retry tạo link mới.
     // Khi kết quả đã được chốt ở database, trạng thái đó ưu tiên hơn mã redirect đến muộn.
     // transId tùy chọn nhưng nếu có thì phải khớp bằng chứng đã lưu; mismatch trả UNVERIFIED.
     async processPay2sReturn(
@@ -454,10 +464,23 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         if (!this.isAmountEqual(payload.amount, attempt.amount))
             return { status: 'UNVERIFIED' };
         if (attempt.status === 'PAID') {
-            // IPN đã chốt trạng thái; Return có thể khớp giao dịch gốc hoặc khoản trùng đã được ghi vào hàng hoàn cùng order.
+            // Nếu history chốt trước IPN, Return đã ký chỉ được ghép theo nội dung và thời điểm cùng khoản thu.
+            const historyConfirmedPayment =
+                !attempt.providerTransactionId &&
+                Boolean(attempt.pay2sHistoryId) &&
+                Boolean(attempt.confirmedAt) &&
+                this.normalizePay2sOrderInfo(payload.orderInfo) ===
+                    this.normalizePay2sOrderInfo(
+                        attempt.providerOrderInfo ?? '',
+                    ) &&
+                this.isPay2sTimestampNear(
+                    attempt.confirmedAt,
+                    this.readPay2sResponseTime(payload.responseTime),
+                );
             if (
                 payload.transId &&
-                attempt.providerTransactionId !== payload.transId
+                attempt.providerTransactionId !== payload.transId &&
+                !historyConfirmedPayment
             ) {
                 const recordedDuplicate = await this.dataSource
                     .getRepository(PaymentAttempt)
@@ -473,6 +496,8 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         }
         if (attempt.status === 'REFUND_PENDING')
             return { status: 'REFUND_PENDING' };
+        if (attempt.status === 'REFUND_FAILED')
+            return { status: 'REFUND_FAILED' };
         if (attempt.status === 'REFUNDED') return { status: 'REFUNDED' };
 
         // Redirect Pay2S đã ký xác nhận lần thử thất bại/hủy; đóng attempt cũ nhưng giữ order để khách thanh toán lại.
@@ -487,6 +512,8 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
                 return { status: 'PAID', orderId: attempt.orderId };
             if (currentAttemptStatus === 'REFUND_PENDING')
                 return { status: 'REFUND_PENDING' };
+            if (currentAttemptStatus === 'REFUND_FAILED')
+                return { status: 'REFUND_FAILED' };
             if (currentAttemptStatus === 'REFUNDED')
                 return { status: 'REFUNDED' };
 
@@ -537,7 +564,7 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         );
     }
 
-    // Đối soát tối đa một lần mỗi phút, chỉ ở LIVE; khớp mã nội dung + số tiền trước khi dùng API lịch sử làm bằng chứng thu tiền.
+    // Đối soát mỗi phút ở LIVE; history ID chống quét lặp riêng, IPN được ghép theo thời điểm.
     private async reconcilePay2sTransactionHistory(): Promise<void> {
         const nowMs = Date.now();
         if (
@@ -564,52 +591,74 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
             // Giới hạn số order gần đây để một batch không giữ database connection trong lúc provider chậm.
             const attempts = await this.dataSource
                 .getRepository(PaymentAttempt)
-                .find({
-                    where: {
-                        environment: 'LIVE',
-                        status: In([
-                            'PENDING',
-                            'FAILED',
-                            'EXPIRED',
-                            'PAID',
-                            'REFUND_PENDING',
-                            'REFUND_FAILED',
-                            'REFUNDED',
-                        ]),
-                        createdAt: MoreThanOrEqual(
-                            new Date(nowMs - 48 * 60 * 60_000),
-                        ),
-                    },
-                    order: { createdAt: 'ASC' },
-                    take: 500,
-                });
+                .createQueryBuilder('attempt')
+                .addSelect('attempt.providerResponse')
+                .where('attempt.environment = :environment', {
+                    environment: 'LIVE',
+                })
+                .andWhere('attempt.status IN (:...statuses)', {
+                    statuses: [
+                        'PENDING',
+                        'FAILED',
+                        'EXPIRED',
+                        'PAID',
+                        'REFUND_PENDING',
+                        'REFUND_FAILED',
+                        'REFUNDED',
+                    ],
+                })
+                .andWhere('attempt.created_at >= :createdAfter', {
+                    createdAfter: new Date(nowMs - 48 * 60 * 60_000),
+                })
+                .orderBy('attempt.created_at', 'ASC')
+                .take(500)
+                .getMany();
             if (attempts.length === 0) return;
 
+            const correlatedHistoryAttempts =
+                this.findHistoryMatchesForProviderTransactions(
+                    attempts,
+                    transactions,
+                );
             for (const transaction of transactions) {
                 if (transaction.type !== 'IN') continue;
-                const attempt = this.findHistoryPaymentAttempt(
-                    attempts,
-                    transaction,
-                );
-                if (!attempt) continue;
                 const receivedAt = this.parsePay2sHistoryDate(
                     transaction.transactionDate,
                 );
                 if (!receivedAt) {
                     this.logger.warn(
-                        `Bỏ qua giao dịch lịch sử Pay2S sai ngày giờ. transactionId=${transaction.transactionId}`,
+                        `Bỏ qua giao dịch lịch sử Pay2S sai ngày giờ. bankTransactionId=${transaction.bankTransactionId}`,
                     );
                     continue;
                 }
+                const correlatedAttemptId = correlatedHistoryAttempts.get(
+                    transaction.historyTransactionId,
+                );
+                const attempt = correlatedAttemptId
+                    ? (attempts.find(
+                          (candidate) => candidate.id === correlatedAttemptId,
+                      ) ?? null)
+                    : this.findHistoryPaymentAttempt(
+                          attempts,
+                          transaction,
+                          receivedAt,
+                      );
+                if (!attempt) continue;
 
-                // Cùng bộ xử lý với IPN đảm bảo giao dịch history không ghi nhận tiền hoặc side effect lần hai.
+                // Lịch sử lưu ID riêng; chỉ một row gần nhất được gắn vào IPN đã ghi nhận.
                 await this.processVerifiedSuccessfulPayment(attempt, {
-                    transactionId: transaction.transactionId,
-                    orderInfo: attempt.providerOrderInfo ?? '',
+                    providerTransactionId: null,
+                    historyTransactionId: transaction.historyTransactionId,
+                    bankTransactionId: transaction.bankTransactionId,
+                    historyChecksum: transaction.checksum,
+                    historyMatchesAttempt: correlatedAttemptId === attempt.id,
+                    orderInfo: transaction.description,
+                    amount: transaction.amount,
                     receivedAt,
                     providerResponse: {
                         source: 'PAY2S_TRANSACTION_HISTORY',
-                        transactionId: transaction.transactionId,
+                        bankTransactionId: transaction.bankTransactionId,
+                        historyChecksum: transaction.checksum,
                         transactionDate: transaction.transactionDate,
                         accountNumber: transaction.accountNumber,
                         amount: transaction.amount,
@@ -627,17 +676,134 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         }
     }
 
-    // Chọn attempt đang mở trước; nếu order đã chốt thì chọn attempt đã PAID để phát hiện khoản chuyển trùng.
+    // Ghép lịch sử với IPN chỉ khi đơn, số tiền và thời điểm cùng khớp; mỗi giao dịch chỉ ghép một lần.
+    private findHistoryMatchesForProviderTransactions(
+        attempts: PaymentAttempt[],
+        transactions: Pay2sBankTransaction[],
+    ): Map<string, string> {
+        const possibleMatches = transactions.flatMap((transaction) => {
+            if (transaction.type !== 'IN') return [];
+            const receivedAt = this.parsePay2sHistoryDate(
+                transaction.transactionDate,
+            );
+            const normalizedDescription = this.normalizePay2sOrderInfo(
+                transaction.description,
+            );
+            if (!receivedAt || !normalizedDescription) return [];
+
+            const providerMatches = attempts.flatMap((attempt) => {
+                const normalizedOrderInfo = this.normalizePay2sOrderInfo(
+                    attempt.providerOrderInfo ?? '',
+                );
+                const source = attempt.providerResponse?.source;
+                if (
+                    !attempt.providerTransactionId ||
+                    attempt.pay2sHistoryId ||
+                    source === 'PAY2S_TRANSACTION_HISTORY' ||
+                    !attempt.confirmedAt ||
+                    ![
+                        'PAID',
+                        'REFUND_PENDING',
+                        'REFUND_FAILED',
+                        'REFUNDED',
+                    ].includes(attempt.status) ||
+                    !normalizedOrderInfo ||
+                    !normalizedDescription.includes(normalizedOrderInfo) ||
+                    !this.isAmountEqual(transaction.amount, attempt.amount)
+                )
+                    return [];
+
+                const deltaMs = Math.abs(
+                    attempt.confirmedAt.getTime() - receivedAt.getTime(),
+                );
+                if (deltaMs > PAY2S_HISTORY_IPN_MATCH_WINDOW_MS) return [];
+                return [
+                    {
+                        historyId: transaction.historyTransactionId,
+                        attemptId: attempt.id,
+                        deltaMs,
+                        priority: 0,
+                    },
+                ];
+            });
+
+            // Dự phòng một attempt chưa chốt để IPN đến giữa lúc đọc và khóa vẫn được ghép an toàn.
+            const fallbackAttempt = this.findHistoryPaymentAttempt(
+                attempts,
+                transaction,
+                receivedAt,
+            );
+            if (
+                !fallbackAttempt ||
+                fallbackAttempt.providerTransactionId ||
+                fallbackAttempt.pay2sHistoryId ||
+                !['PENDING', 'FAILED', 'EXPIRED'].includes(
+                    fallbackAttempt.status,
+                )
+            )
+                return providerMatches;
+
+            return [
+                ...providerMatches,
+                {
+                    historyId: transaction.historyTransactionId,
+                    attemptId: fallbackAttempt.id,
+                    deltaMs: Math.max(
+                        0,
+                        receivedAt.getTime() -
+                            fallbackAttempt.createdAt.getTime(),
+                    ),
+                    priority: 1,
+                },
+            ];
+        });
+
+        // Ghép IPN trước, rồi ghép attempt đang mở; không tái sử dụng cùng attempt hoặc ID lịch sử.
+        possibleMatches.sort(
+            (left, right) =>
+                left.priority - right.priority || left.deltaMs - right.deltaMs,
+        );
+        const matches = new Map<string, string>();
+        const usedAttempts = new Set<string>();
+        for (const match of possibleMatches) {
+            if (
+                matches.has(match.historyId) ||
+                usedAttempts.has(match.attemptId)
+            )
+                continue;
+            matches.set(match.historyId, match.attemptId);
+            usedAttempts.add(match.attemptId);
+        }
+        return matches;
+    }
+
+    // Hai nguồn Pay2S chỉ được coi là cùng khoản thu khi timestamp nằm trong cửa sổ hẹp đã đối chiếu production.
+    private isPay2sTimestampNear(left: Date | null, right: Date): boolean {
+        return (
+            left instanceof Date &&
+            !Number.isNaN(left.getTime()) &&
+            Math.abs(left.getTime() - right.getTime()) <=
+                PAY2S_HISTORY_IPN_MATCH_WINDOW_MS
+        );
+    }
+
+    // Chọn theo cửa sổ thời gian của attempt để giao dịch cũ không bị gán sang lần thử mới đang PENDING.
     private findHistoryPaymentAttempt(
         attempts: PaymentAttempt[],
         transaction: Pay2sBankTransaction,
+        receivedAt: Date,
     ): PaymentAttempt | null {
         const normalizedDescription = this.normalizePay2sOrderInfo(
             transaction.description,
         );
         const matches = attempts.filter((attempt) => {
             const orderInfo = attempt.providerOrderInfo;
+            // Row lịch sử giả do phiên bản cũ tạo không thể làm nguồn đối soát lần nữa.
+            const isLegacyHistoryRefund =
+                attempt.providerResponse?.source ===
+                    'PAY2S_TRANSACTION_HISTORY' && !attempt.pay2sHistoryId;
             if (
+                isLegacyHistoryRefund ||
                 !orderInfo ||
                 !this.isAmountEqual(transaction.amount, attempt.amount)
             )
@@ -648,12 +814,50 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
                 normalizedDescription.includes(normalizedOrderInfo)
             );
         });
-        return (
-            matches.find((attempt) => attempt.status === 'PENDING') ??
-            matches.find((attempt) => attempt.status === 'PAID') ??
-            matches.at(-1) ??
-            null
+
+        // Ưu tiên attempt có hiệu lực tại thời điểm chuyển; trong khoảng chồng lấn, attempt PENDING mới nhất là đích hiện tại.
+        const attemptsInPaymentWindow = matches.filter(
+            (attempt) =>
+                attempt.createdAt instanceof Date &&
+                attempt.expiresAt instanceof Date &&
+                receivedAt >= attempt.createdAt &&
+                receivedAt <= attempt.expiresAt,
         );
+        const pendingInWindow = attemptsInPaymentWindow
+            .filter((attempt) => attempt.status === 'PENDING')
+            .sort(
+                (left, right) =>
+                    right.createdAt.getTime() - left.createdAt.getTime(),
+            )[0];
+        if (pendingInWindow) return pendingInWindow;
+
+        const paidInWindow = attemptsInPaymentWindow.find((attempt) =>
+            ['PAID', 'REFUND_PENDING', 'REFUND_FAILED', 'REFUNDED'].includes(
+                attempt.status,
+            ),
+        );
+        if (paidInWindow) return paidInWindow;
+
+        const closedInWindow = attemptsInPaymentWindow
+            .filter((attempt) => ['FAILED', 'EXPIRED'].includes(attempt.status))
+            .sort(
+                (left, right) =>
+                    right.createdAt.getTime() - left.createdAt.getTime(),
+            )[0];
+        if (closedInWindow) return closedInWindow;
+
+        // Giao dịch sau hạn gắn với lần thử gần nhất đã bắt đầu; giao dịch trước mọi lần thử không được tự nhận vơ.
+        const latestStartedAttempt = matches
+            .filter(
+                (attempt) =>
+                    attempt.createdAt instanceof Date &&
+                    receivedAt >= attempt.createdAt,
+            )
+            .sort(
+                (left, right) =>
+                    right.createdAt.getTime() - left.createdAt.getTime(),
+            )[0];
+        return latestStartedAttempt ?? null;
     }
 
     // Chuẩn hóa khoảng trắng và dấu câu để nội dung chuyển khoản vẫn khớp chính xác mã Pay2S duy nhất.
@@ -1031,7 +1235,8 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         });
     }
 
-    // Khóa cùng order/attempt cho IPN và lịch sử để chỉ một giao dịch được chốt đơn; khoản đến trùng/đến muộn đi vào hàng hoàn.
+    // Khóa order/attempt để IPN, lịch sử và thao tác hủy không ghi đè nhau.
+    // ID Pay2S chuẩn ngăn xử lý lặp; khoản thu riêng/đến muộn mới vào hàng hoàn.
     private async processVerifiedSuccessfulPayment(
         attempt: PaymentAttempt,
         transaction: Pay2sVerifiedTransaction,
@@ -1047,21 +1252,118 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
                 throw new NotFoundException('Không tìm thấy đơn hàng Pay2S.');
 
             const attemptRepository = manager.getRepository(PaymentAttempt);
-            const lockedAttempt = await attemptRepository.findOne({
-                where: { id: attempt.id },
-                lock: { mode: 'pessimistic_write' },
-            });
+            // providerResponse mặc định select:false; lấy kèm lúc khóa để nối IPN/lịch sử không làm mất audit payload.
+            const lockedAttempt = await attemptRepository
+                .createQueryBuilder('attempt')
+                .addSelect('attempt.providerResponse')
+                .where('attempt.id = :attemptId', { attemptId: attempt.id })
+                .setLock('pessimistic_write')
+                .getOne();
             if (!lockedAttempt)
                 throw new NotFoundException('Không tìm thấy giao dịch Pay2S.');
 
-            // Mã giao dịch là khóa idempotency toàn hệ thống, kể cả khi Pay2S gửi cùng khoản thu qua một attempt khác.
-            const existingTransaction = await attemptRepository.findOne({
-                where: { providerTransactionId: transaction.transactionId },
-            });
+            // History ID chống quét lặp độc lập; không hỏi database bằng provider ID null vì sẽ trùng mọi row null.
+            const existingHistory = transaction.historyTransactionId
+                ? await attemptRepository.findOne({
+                      where: {
+                          pay2sHistoryId: transaction.historyTransactionId,
+                      },
+                  })
+                : null;
+            if (existingHistory)
+                return existingHistory.orderId === order.id
+                    ? 'duplicate'
+                    : 'duplicate-transaction-conflict';
+
+            // Chỉ IPN transId là provider ID; mã ngân hàng và history ID có khóa riêng.
+            const existingTransaction = transaction.providerTransactionId
+                ? await attemptRepository.findOne({
+                      where: {
+                          providerTransactionId:
+                              transaction.providerTransactionId,
+                      },
+                  })
+                : null;
             if (existingTransaction)
                 return existingTransaction.orderId === order.id
                     ? 'duplicate'
                     : 'duplicate-transaction-conflict';
+
+            // Lịch sử có thể đến sau IPN; ghép row vào attempt đã PAID thay vì sinh một khoản hoàn giả.
+            const normalizedStoredOrderInfo = this.normalizePay2sOrderInfo(
+                lockedAttempt.providerOrderInfo ?? '',
+            );
+            const normalizedIncomingOrderInfo = this.normalizePay2sOrderInfo(
+                transaction.orderInfo,
+            );
+            const historyConfirmsProviderPayment =
+                transaction.historyMatchesAttempt === true &&
+                Boolean(lockedAttempt.providerTransactionId) &&
+                Boolean(transaction.historyTransactionId) &&
+                Boolean(transaction.bankTransactionId) &&
+                normalizedStoredOrderInfo.length >= 8 &&
+                normalizedIncomingOrderInfo.includes(
+                    normalizedStoredOrderInfo,
+                ) &&
+                this.isAmountEqual(transaction.amount, lockedAttempt.amount) &&
+                this.isPay2sTimestampNear(
+                    lockedAttempt.confirmedAt,
+                    transaction.receivedAt,
+                );
+            if (historyConfirmsProviderPayment) {
+                lockedAttempt.pay2sHistoryId = transaction.historyTransactionId;
+                lockedAttempt.pay2sBankTransactionId =
+                    transaction.bankTransactionId;
+                lockedAttempt.pay2sHistoryChecksum =
+                    transaction.historyChecksum;
+                lockedAttempt.providerResponse = {
+                    ...(lockedAttempt.providerResponse ?? {}),
+                    pay2sHistory: {
+                        historyTransactionId: transaction.historyTransactionId,
+                        bankTransactionId: transaction.bankTransactionId,
+                        checksum: transaction.historyChecksum,
+                        receivedAt: transaction.receivedAt.toISOString(),
+                    },
+                };
+                await attemptRepository.save(lockedAttempt);
+                return 'history-linked';
+            }
+
+            // Nếu history chạy trước IPN, gắn transId thật vào đúng history attempt theo số tiền/nội dung/thời điểm.
+            const ipnConfirmsHistoryPayment =
+                Boolean(transaction.providerTransactionId) &&
+                !transaction.historyTransactionId &&
+                !lockedAttempt.providerTransactionId &&
+                Boolean(lockedAttempt.pay2sHistoryId) &&
+                [
+                    'PAID',
+                    'REFUND_PENDING',
+                    'REFUND_FAILED',
+                    'REFUNDED',
+                ].includes(lockedAttempt.status) &&
+                this.isAmountEqual(transaction.amount, lockedAttempt.amount) &&
+                normalizedStoredOrderInfo.length >= 8 &&
+                normalizedIncomingOrderInfo.length >= 8 &&
+                (normalizedStoredOrderInfo.includes(
+                    normalizedIncomingOrderInfo,
+                ) ||
+                    normalizedIncomingOrderInfo.includes(
+                        normalizedStoredOrderInfo,
+                    )) &&
+                this.isPay2sTimestampNear(
+                    lockedAttempt.confirmedAt,
+                    transaction.receivedAt,
+                );
+            if (ipnConfirmsHistoryPayment) {
+                lockedAttempt.providerTransactionId =
+                    transaction.providerTransactionId;
+                lockedAttempt.providerResponse = {
+                    ...(lockedAttempt.providerResponse ?? {}),
+                    ipnConfirmation: transaction.providerResponse,
+                };
+                await attemptRepository.save(lockedAttempt);
+                return 'history-linked';
+            }
 
             if (
                 [
@@ -1105,8 +1407,16 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
                 paidBeforeExpiry &&
                 (lockedAttempt.status === 'PENDING' || canRecoverFailedAttempt);
 
-            lockedAttempt.providerTransactionId = transaction.transactionId;
-            lockedAttempt.providerOrderInfo = transaction.orderInfo;
+            lockedAttempt.providerTransactionId =
+                transaction.providerTransactionId;
+            lockedAttempt.pay2sHistoryId = transaction.historyTransactionId;
+            lockedAttempt.pay2sBankTransactionId =
+                transaction.bankTransactionId;
+            lockedAttempt.pay2sHistoryChecksum = transaction.historyChecksum;
+            // Giữ nội dung trong giới hạn cột; payload đầy đủ vẫn được lưu để admin tra soát.
+            lockedAttempt.providerOrderInfo =
+                lockedAttempt.providerOrderInfo ??
+                transaction.orderInfo.slice(0, 180);
             lockedAttempt.providerResponse = {
                 ...transaction.providerResponse,
                 ...(anotherAttemptPaid
@@ -1197,7 +1507,7 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         return Number.isNaN(receivedAt.getTime()) ? new Date() : receivedAt;
     }
 
-    // Lưu khoản Pay2S thứ hai vào hàng REFUND_PENDING riêng; transaction ID duy nhất giúp callback lặp không nhân hồ sơ hoàn.
+    // Lưu khoản Pay2S thứ hai; khóa bằng IPN ID hoặc history ID tùy nguồn để callback/cron lặp không nhân hồ sơ.
     private async recordDuplicatePayment(
         repository: Repository<PaymentAttempt>,
         originalAttempt: PaymentAttempt,
@@ -1205,9 +1515,23 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
     ): Promise<
         'duplicate' | 'duplicate-payment' | 'duplicate-transaction-conflict'
     > {
-        const existingTransaction = await repository.findOne({
-            where: { providerTransactionId: transaction.transactionId },
-        });
+        const existingHistory = transaction.historyTransactionId
+            ? await repository.findOne({
+                  where: { pay2sHistoryId: transaction.historyTransactionId },
+              })
+            : null;
+        if (existingHistory)
+            return existingHistory.orderId === originalAttempt.orderId
+                ? 'duplicate'
+                : 'duplicate-transaction-conflict';
+
+        const existingTransaction = transaction.providerTransactionId
+            ? await repository.findOne({
+                  where: {
+                      providerTransactionId: transaction.providerTransactionId,
+                  },
+              })
+            : null;
         if (existingTransaction)
             return existingTransaction.orderId === originalAttempt.orderId
                 ? 'duplicate'
@@ -1217,8 +1541,12 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
             orderId: originalAttempt.orderId,
             merchantReference: this.gateway.createMerchantReference('DUP'),
             providerRequestId: null,
-            providerOrderInfo: transaction.orderInfo,
-            providerTransactionId: transaction.transactionId,
+            // Giới hạn field tìm kiếm trong schema; providerResponse vẫn giữ description đầy đủ.
+            providerOrderInfo: transaction.orderInfo.slice(0, 180),
+            providerTransactionId: transaction.providerTransactionId,
+            pay2sHistoryId: transaction.historyTransactionId,
+            pay2sBankTransactionId: transaction.bankTransactionId,
+            pay2sHistoryChecksum: transaction.historyChecksum,
             refundRequestId: null,
             status: 'REFUND_PENDING',
             environment: originalAttempt.environment,
@@ -1239,9 +1567,20 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
         } catch (error) {
             // Callback lặp đồng thời có thể thua unique transaction ID; đọc lại để ACK đúng lần đã commit.
             if ((error as { code?: string }).code !== '23505') throw error;
-            const concurrentTransaction = await repository.findOne({
-                where: { providerTransactionId: transaction.transactionId },
-            });
+            const concurrentTransaction = transaction.historyTransactionId
+                ? await repository.findOne({
+                      where: {
+                          pay2sHistoryId: transaction.historyTransactionId,
+                      },
+                  })
+                : transaction.providerTransactionId
+                  ? await repository.findOne({
+                        where: {
+                            providerTransactionId:
+                                transaction.providerTransactionId,
+                        },
+                    })
+                  : null;
             if (!concurrentTransaction) throw error;
             return concurrentTransaction.orderId === originalAttempt.orderId
                 ? 'duplicate'

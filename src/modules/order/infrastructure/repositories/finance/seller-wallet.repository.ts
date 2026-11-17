@@ -863,7 +863,7 @@ export class SellerWalletRepository
         };
     }
 
-    // Tạo màn admin bằng dữ liệu tổng hợp và trang ledger; chi tiết số tài khoản chỉ trả qua endpoint quyền payout.
+    // Chỉ tổng hợp số dư dương đã khả dụng; tiền seller đang chờ và refund chờ được báo riêng.
     async getAdminFinance(
         page: number,
         pageSize: number,
@@ -872,7 +872,54 @@ export class SellerWalletRepository
         const [totals] = (await manager.query(`
             SELECT
                 COALESCE((SELECT SUM(amount) FROM platform_finance_ledger WHERE kind NOT IN ('CUSTOMER_RETURN_SHIPPING_RECEIVABLE','SHIPPING_FUND_ALLOCATION','SHIPPING_FUND_REFUND')), 0)::text AS platform_balance,
-                COALESCE((SELECT SUM(pending_balance + available_balance) FROM seller_wallets), 0)::text AS seller_payable,
+                -- Không cộng tiền đang trong kỳ chờ hoặc bù nợ shop này vào số dư khả dụng của shop khác.
+                COALESCE((SELECT SUM(GREATEST(available_balance, 0)) FROM seller_wallets), 0)::text AS seller_payable,
+                -- Ba nguồn này khớp hàng đợi refund; giữ tổng chờ riêng để không lẫn vào số dư seller đã chốt.
+                COALESCE((
+                    SELECT SUM(pending_refunds.amount)
+                    FROM (
+                        SELECT attempt.amount
+                        FROM payment_attempts attempt
+                        WHERE attempt.status = 'REFUND_PENDING'
+                          -- Bỏ false positive cũ chỉ sau khi attempt gốc đã xác nhận cùng mã ngân hàng.
+                          AND NOT (
+                              COALESCE(
+                                  attempt.provider_response ->> 'source',
+                                  ''
+                              ) = 'PAY2S_TRANSACTION_HISTORY'
+                              AND attempt.pay2s_history_id IS NULL
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM payment_attempts paid_attempt
+                                  WHERE paid_attempt.order_id = attempt.order_id
+                                    AND paid_attempt.id <> attempt.id
+                                    AND paid_attempt.status IN (
+                                        'PAID', 'REFUND_PENDING', 'REFUND_FAILED', 'REFUNDED'
+                                    )
+                                    AND paid_attempt.pay2s_history_id IS NOT NULL
+                                    AND paid_attempt.pay2s_bank_transaction_id = COALESCE(
+                                        attempt.provider_response ->> 'bankTransactionId',
+                                        attempt.provider_response ->> 'transactionId',
+                                        attempt.provider_transaction_id
+                                    )
+                                    AND paid_attempt.amount = attempt.amount
+                                    AND paid_attempt.confirmed_at IS NOT NULL
+                                    AND attempt.confirmed_at IS NOT NULL
+                                    AND ABS(EXTRACT(EPOCH FROM (
+                                        paid_attempt.confirmed_at - attempt.confirmed_at
+                                    ))) <= 30
+                              )
+                          )
+                        UNION ALL
+                        SELECT request.refund_amount AS amount
+                        FROM order_return_requests request
+                        WHERE request.status = 'REFUND_PENDING'
+                        UNION ALL
+                        SELECT issue.refund_amount AS amount
+                        FROM order_delivery_issues issue
+                        WHERE issue.refund_status = 'REFUND_PENDING'
+                    ) pending_refunds
+                ), 0)::text AS pending_refund_balance,
                 COALESCE((SELECT SUM(reserved_balance) FROM seller_wallets), 0)::text AS reserved_withdrawals,
                 COALESCE((SELECT SUM(amount) FROM platform_finance_ledger WHERE kind IN ('SHIPPING_FUND_ALLOCATION','SHIPPING_FUND_REFUND')), 0)::text AS shipping_fund_balance,
                 COALESCE((SELECT SUM(amount) FROM platform_finance_ledger WHERE kind = 'CUSTOMER_RETURN_SHIPPING_RECEIVABLE'), 0)::text AS customer_return_shipping_receivable,
@@ -881,6 +928,7 @@ export class SellerWalletRepository
         `)) as Array<{
             platform_balance: string;
             seller_payable: string;
+            pending_refund_balance: string;
             reserved_withdrawals: string;
             shipping_fund_balance: string;
             customer_return_shipping_receivable: string;
@@ -907,6 +955,7 @@ export class SellerWalletRepository
         return {
             platformBalance: totals.platform_balance,
             sellerPayableBalance: totals.seller_payable,
+            pendingRefundBalance: totals.pending_refund_balance,
             reservedWithdrawalBalance: totals.reserved_withdrawals,
             shippingFundBalance: totals.shipping_fund_balance,
             customerReturnShippingReceivable:
@@ -916,10 +965,12 @@ export class SellerWalletRepository
             ledger: ledgerRows.map((row) => this.toPlatformLedgerRecord(row)),
             withdrawals: withdrawals.map((row) => this.toWithdrawalRecord(row)),
             // Dashboard cần mã shop để ghi rõ nguồn nạp; không cần gửi thông tin hồ sơ seller.
-            deposits: deposits.map((row): AdminWalletDepositRecord => ({
-                ...this.toDepositRecord(row),
-                shopId: row.shopId,
-            })),
+            deposits: deposits.map(
+                (row): AdminWalletDepositRecord => ({
+                    ...this.toDepositRecord(row),
+                    shopId: row.shopId,
+                }),
+            ),
             totalLedger,
             page,
             pageSize,
@@ -1084,6 +1135,7 @@ export class SellerWalletRepository
         const normalizedStatus =
             status && allowedStatuses.includes(status) ? status : null;
         const normalizedSearch = search?.trim() || null;
+        // Chỉ ẩn hồ sơ lịch sử cũ khi đúng mã ngân hàng đã được gắn vào attempt thanh toán thành công.
         const sources = `
             SELECT attempt.id, 'PAYMENT_ATTEMPT'::text AS "sourceType",
                    order_row.id AS "orderId", order_row.order_number AS "orderNumber",
@@ -1101,7 +1153,10 @@ export class SellerWalletRepository
                            ELSE 'Thanh toán Pay2S đến sau khi đơn đã đóng'
                        END
                    ) AS reason,
-                   attempt.provider_transaction_id AS "providerTransactionId",
+                   COALESCE(
+                       attempt.provider_transaction_id,
+                       attempt.pay2s_bank_transaction_id
+                   ) AS "providerTransactionId",
                    attempt.refund_bank_code AS "refundBankCode",
                    attempt.refund_bank_name AS "refundBankName",
                    attempt.refund_account_holder AS "refundAccountHolder",
@@ -1116,6 +1171,36 @@ export class SellerWalletRepository
             FROM payment_attempts attempt
             INNER JOIN orders order_row ON order_row.id = attempt.order_id
             WHERE attempt.status IN ('REFUND_PENDING', 'REFUND_FAILED', 'REFUNDED')
+              -- Giữ khoản thu trùng thật; chỉ loại row history cũ đã liên kết chính xác với giao dịch gốc.
+              AND NOT (
+                  attempt.status = 'REFUND_PENDING'
+                  AND COALESCE(
+                      attempt.provider_response ->> 'source',
+                      ''
+                  ) = 'PAY2S_TRANSACTION_HISTORY'
+                  AND attempt.pay2s_history_id IS NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM payment_attempts paid_attempt
+                      WHERE paid_attempt.order_id = attempt.order_id
+                        AND paid_attempt.id <> attempt.id
+                        AND paid_attempt.status IN (
+                            'PAID', 'REFUND_PENDING', 'REFUND_FAILED', 'REFUNDED'
+                        )
+                        AND paid_attempt.pay2s_history_id IS NOT NULL
+                        AND paid_attempt.pay2s_bank_transaction_id = COALESCE(
+                            attempt.provider_response ->> 'bankTransactionId',
+                            attempt.provider_response ->> 'transactionId',
+                            attempt.provider_transaction_id
+                        )
+                        AND paid_attempt.amount = attempt.amount
+                        AND paid_attempt.confirmed_at IS NOT NULL
+                        AND attempt.confirmed_at IS NOT NULL
+                        AND ABS(EXTRACT(EPOCH FROM (
+                            paid_attempt.confirmed_at - attempt.confirmed_at
+                        ))) <= 30
+                  )
+              )
             UNION ALL
             SELECT request.id, 'ORDER_RETURN'::text AS "sourceType",
                    order_row.id AS "orderId", order_row.order_number AS "orderNumber",

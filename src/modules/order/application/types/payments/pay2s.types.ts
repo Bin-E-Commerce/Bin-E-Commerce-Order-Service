@@ -3,9 +3,13 @@
 
 export type Pay2sEnvironment = 'LIVE' | 'SANDBOX';
 
-// Giao dịch ngân hàng đã xác thực bằng API lịch sử Pay2S để đối soát khi IPN bị lỡ.
+// History ID, mã ngân hàng và IPN transId là ba định danh riêng trong Pay2S.
 export interface Pay2sBankTransaction {
-    transactionId: string;
+    // ID dòng trong API lịch sử, dùng riêng để chống quét lặp.
+    historyTransactionId: string;
+    // ID giao dịch gốc từ ngân hàng, giữ riêng để admin tra soát/chuyển hoàn.
+    bankTransactionId: string;
+    checksum: string | null;
     transactionDate: string;
     accountNumber: string;
     amount: number;
@@ -14,9 +18,14 @@ export interface Pay2sBankTransaction {
     type: 'IN' | 'OUT';
 }
 
-// Dữ liệu thanh toán đã được xác minh từ IPN hoặc API lịch sử, trước khi cập nhật order.
+// Một sự kiện đến từ IPN hoặc lịch sử; không nhập nhằng ID giữa hai nguồn.
 export interface Pay2sVerifiedTransaction {
-    transactionId: string;
+    providerTransactionId: string | null;
+    historyTransactionId: string | null;
+    bankTransactionId: string | null;
+    historyChecksum: string | null;
+    historyMatchesAttempt?: boolean;
+    amount: string | number;
     orderInfo: string;
     providerResponse: Record<string, unknown>;
     receivedAt: Date;

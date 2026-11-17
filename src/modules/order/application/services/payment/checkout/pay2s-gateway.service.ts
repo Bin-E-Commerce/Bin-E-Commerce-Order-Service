@@ -226,14 +226,34 @@ export class Pay2sGatewayService implements OnModuleInit {
                 'Pay2S trả dữ liệu lịch sử giao dịch không hợp lệ.',
             );
 
-        // Bỏ qua row sai kiểu và chỉ chuyển các field cần thiết vào tầng nghiệp vụ.
+        // ID dòng lịch sử và transaction_id phía ngân hàng tách biệt với IPN transId.
         return body.transactions.flatMap((value) => {
             if (!value || typeof value !== 'object' || Array.isArray(value))
                 return [];
             const row = value as Record<string, unknown>;
             const amount = Number(row.amount);
+            const historyTransactionId =
+                typeof row.id === 'string'
+                    ? row.id.trim()
+                    : typeof row.id === 'number' &&
+                        Number.isSafeInteger(row.id) &&
+                        row.id > 0
+                      ? String(row.id)
+                      : '';
+            const bankTransactionId =
+                typeof row.transaction_id === 'string'
+                    ? row.transaction_id.trim()
+                    : '';
+            const checksum =
+                typeof row.checksum === 'string' && row.checksum.length <= 64
+                    ? row.checksum
+                    : null;
+            // Giới hạn đúng kích thước cột và không dùng mã ngân hàng thay thế IPN ID.
             if (
-                typeof row.transaction_id !== 'string' ||
+                !historyTransactionId ||
+                historyTransactionId.length > 64 ||
+                !bankTransactionId ||
+                bankTransactionId.length > 120 ||
                 typeof row.transaction_date !== 'string' ||
                 typeof row.account_number !== 'string' ||
                 typeof row.description !== 'string' ||
@@ -244,7 +264,9 @@ export class Pay2sGatewayService implements OnModuleInit {
                 return [];
             return [
                 {
-                    transactionId: row.transaction_id,
+                    historyTransactionId,
+                    bankTransactionId,
+                    checksum,
                     transactionDate: row.transaction_date,
                     accountNumber: row.account_number,
                     amount,

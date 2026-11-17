@@ -109,7 +109,10 @@ export interface PlatformFinanceLedgerRecord {
 
 export interface AdminFinanceSnapshot {
     platformBalance: string;
+    // Chỉ gồm số dư dương đã khả dụng; không gồm tiền đang chờ hoặc bù chéo nợ giữa các shop.
     sellerPayableBalance: string;
+    // Tổng các hồ sơ REFUND_PENDING từ ba nguồn, hiển thị riêng và không cộng vào sellerPayableBalance.
+    pendingRefundBalance: string;
     reservedWithdrawalBalance: string;
     shippingFundBalance: string;
     customerReturnShippingReceivable: string;
