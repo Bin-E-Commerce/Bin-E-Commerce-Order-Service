@@ -863,7 +863,9 @@ export class SellerWalletRepository
         };
     }
 
-    // Chỉ tổng hợp số dư dương đã khả dụng; tiền seller đang chờ và refund chờ được báo riêng.
+    // Tạo snapshot admin; page/pageSize chỉ phân trang ledger.
+    // Available và pending tách biệt; tiền hàng chưa hoàn tất chưa thể rút.
+    // Refund được tổng hợp riêng; hàm chỉ đọc và lỗi nếu query không trả snapshot.
     async getAdminFinance(
         page: number,
         pageSize: number,
@@ -874,6 +876,8 @@ export class SellerWalletRepository
                 COALESCE((SELECT SUM(amount) FROM platform_finance_ledger WHERE kind NOT IN ('CUSTOMER_RETURN_SHIPPING_RECEIVABLE','SHIPPING_FUND_ALLOCATION','SHIPPING_FUND_REFUND')), 0)::text AS platform_balance,
                 -- Không cộng tiền đang trong kỳ chờ hoặc bù nợ shop này vào số dư khả dụng của shop khác.
                 COALESCE((SELECT SUM(GREATEST(available_balance, 0)) FROM seller_wallets), 0)::text AS seller_payable,
+                -- Dùng số dư pending như trang seller; không cộng tổng giá trị đơn hàng.
+                COALESCE((SELECT SUM(pending_balance) FROM seller_wallets), 0)::text AS seller_pending,
                 -- Ba nguồn này khớp hàng đợi refund; giữ tổng chờ riêng để không lẫn vào số dư seller đã chốt.
                 COALESCE((
                     SELECT SUM(pending_refunds.amount)
@@ -928,6 +932,7 @@ export class SellerWalletRepository
         `)) as Array<{
             platform_balance: string;
             seller_payable: string;
+            seller_pending: string;
             pending_refund_balance: string;
             reserved_withdrawals: string;
             shipping_fund_balance: string;
@@ -955,6 +960,7 @@ export class SellerWalletRepository
         return {
             platformBalance: totals.platform_balance,
             sellerPayableBalance: totals.seller_payable,
+            sellerPendingBalance: totals.seller_pending,
             pendingRefundBalance: totals.pending_refund_balance,
             reservedWithdrawalBalance: totals.reserved_withdrawals,
             shippingFundBalance: totals.shipping_fund_balance,
@@ -965,12 +971,10 @@ export class SellerWalletRepository
             ledger: ledgerRows.map((row) => this.toPlatformLedgerRecord(row)),
             withdrawals: withdrawals.map((row) => this.toWithdrawalRecord(row)),
             // Dashboard cần mã shop để ghi rõ nguồn nạp; không cần gửi thông tin hồ sơ seller.
-            deposits: deposits.map(
-                (row): AdminWalletDepositRecord => ({
-                    ...this.toDepositRecord(row),
-                    shopId: row.shopId,
-                }),
-            ),
+            deposits: deposits.map((row): AdminWalletDepositRecord => ({
+                ...this.toDepositRecord(row),
+                shopId: row.shopId,
+            })),
             totalLedger,
             page,
             pageSize,
