@@ -19,6 +19,7 @@ import { OrderDeliveryConfirmationStatus } from '@/database/delivery/enums/order
 import { OrderDeliveryIssueStatus } from '@/database/delivery/enums/order-delivery-issue-status.enum';
 import { OrderDeliveryIssueReason } from '@/database/delivery/enums/order-delivery-issue-reason.enum';
 import { OrderFulfillmentStatus } from '@/database/order/enums/order-fulfillment-status.enum';
+import { PaymentMethod } from '@/database/order/enums/payment-method.enum';
 import { PaymentStatus } from '@/database/order/enums/payment-status.enum';
 import { OrderRepository } from '@/modules/order/infrastructure/repositories/orders/order.repository';
 import { OrderResponseMapper } from '@/modules/order/application/services/order/order-response-mapper.service';
@@ -69,10 +70,12 @@ export class OrderDeliveryConfirmationService {
         private readonly sellerWalletRepository?: SellerWalletRepositoryPort,
     ) {}
 
-    // Ghi nhận DELIVERED từ Shipping, mở cửa sổ xác nhận ba ngày và cửa sổ hoàn bảy ngày tính từ mốc giao.
-    // Event có thể được gửi lại nhiều lần nên chỉ request đầu tiên được đổi trạng thái; các lần sau trả về order hiện tại.
+    // Ghi nhận giao thành công từ Shipping và mở deadline xác nhận cùng cửa sổ hoàn hàng từ thời điểm giao.
+    // Với COD, shipper báo giao thành công đồng nghĩa khách đã trả tiền; khoản seller được ghi vào pending ngay.
+    // Event lặp giữ trạng thái idempotent nhưng vẫn thử bù ledger COD nếu lần ghi ví trước đó gặp lỗi.
     async markDelivered(orderId: string, occurredAt: string): Promise<void> {
         let changed = false;
+        let shouldCreditCodPending = false;
         await this.dataSource.transaction(async (manager) => {
             const order = await manager
                 .getRepository(Order)
@@ -81,11 +84,28 @@ export class OrderDeliveryConfirmationService {
                 .setLock('pessimistic_write')
                 .getOne();
             if (!order) return;
+
+            const isAlreadyDelivered = [
+                OrderFulfillmentStatus.COMPLETED,
+                OrderFulfillmentStatus.DELIVERED,
+                OrderFulfillmentStatus.RETURN_REFUND,
+            ].includes(order.fulfillmentStatus);
             if (
-                order.fulfillmentStatus === OrderFulfillmentStatus.COMPLETED ||
-                order.fulfillmentStatus === OrderFulfillmentStatus.DELIVERED ||
-                order.fulfillmentStatus ===
-                    OrderFulfillmentStatus.RETURN_REFUND ||
+                order.paymentMethod === PaymentMethod.COD &&
+                order.paymentStatus === PaymentStatus.COD_PENDING_COLLECTION &&
+                isAlreadyDelivered
+            ) {
+                // Sửa đơn đã có trạng thái giao từ bản cũ nhưng chưa ghi nhận COD shipper đã thu.
+                order.paymentStatus = PaymentStatus.PAID;
+                await manager.getRepository(Order).save(order);
+            }
+            shouldCreditCodPending =
+                order.paymentMethod === PaymentMethod.COD &&
+                order.paymentStatus === PaymentStatus.PAID &&
+                isAlreadyDelivered;
+
+            if (
+                isAlreadyDelivered ||
                 order.deliveryConfirmationStatus ===
                     OrderDeliveryConfirmationStatus.ISSUE_REPORTED
             ) {
@@ -105,12 +125,24 @@ export class OrderDeliveryConfirmationService {
                 deliveredAt.getTime() + AUTO_CONFIRMATION_DELAY_MS,
             );
             order.deliveryConfirmedAt = null;
+            if (
+                order.paymentMethod === PaymentMethod.COD &&
+                order.paymentStatus === PaymentStatus.COD_PENDING_COLLECTION
+            ) {
+                // Carrier chỉ báo giao thành công sau khi đã thu khoản COD từ khách.
+                order.paymentStatus = PaymentStatus.PAID;
+            }
+            shouldCreditCodPending =
+                order.paymentMethod === PaymentMethod.COD &&
+                order.paymentStatus === PaymentStatus.PAID;
             await manager.getRepository(Order).save(order);
             changed = true;
         });
 
         if (changed)
             await this.orderEvents.publishDeliveryAwaitingConfirmation(orderId);
+        if (shouldCreditCodPending)
+            await this.sellerWalletRepository?.creditOrderPending(orderId);
     }
 
     // Đồng bộ mọi mốc vận chuyển về Order Service để danh sách, tab và màn hình chi tiết cùng dùng một trạng thái nghiệp vụ.
@@ -205,6 +237,7 @@ export class OrderDeliveryConfirmationService {
             }
 
             if (dto.decision === DeliveryConfirmationDecision.RECEIVED) {
+                // Hoàn tất chỉ xác nhận khách chấp nhận hàng; COD đã chuyển sang PAID ở sự kiện giao thành công.
                 order.fulfillmentStatus = OrderFulfillmentStatus.COMPLETED;
                 order.paymentStatus = PaymentStatus.PAID;
                 order.deliveryConfirmationStatus =

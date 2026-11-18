@@ -144,7 +144,7 @@ export class AdminFinanceController {
         );
     }
 
-    // Trả các đơn COD đã hoàn tất nhưng chưa remittance; trang admin chỉ nhận dữ liệu cần để đối soát và không đọc hồ sơ khách.
+    // Trả COD đã giao thành công nhưng chưa remittance; ngày giao là mốc đối soát, độc lập với xác nhận hoàn tất của khách.
     @Get('cod-remittances')
     async getPendingCodRemittances(
         @Headers('x-user-permissions') permissionsHeader: string,
@@ -445,7 +445,7 @@ export class AdminFinanceController {
         return { reconciled: true };
     }
 
-    // Lưu mã giao dịch và chỉ mở credit ví sau khi order hoàn tất, COD đã được khách trả.
+    // Lưu mã giao dịch khi nền tảng nhận COD; seller vẫn chỉ được giải ngân theo điều kiện hoàn tất và hết hạn trả hàng.
     @Post('cod-remittances/:orderId/confirmation')
     async confirmCodRemittance(
         @Headers('x-user-id') adminId: string,

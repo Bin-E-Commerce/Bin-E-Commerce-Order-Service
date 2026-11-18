@@ -129,7 +129,7 @@ export class SellerWalletRepository
             .execute();
     }
 
-    // Ghi tiền hàng vào pending sau khi Pay2S được xác nhận hoặc khách đã trả COD; COD vẫn chờ remittance trước khi release.
+    // Ghi tiền hàng vào pending sau khi Pay2S được xác nhận hoặc shipper xác nhận đã thu COD; khoản này vẫn bị giữ đến khi đủ điều kiện release.
     async creditOrderPending(orderId: string): Promise<void> {
         await this.dataSource.transaction(async (manager) =>
             this.creditOrderPendingInTransaction(manager, orderId),
@@ -1072,7 +1072,7 @@ export class SellerWalletRepository
         };
     }
 
-    // Chỉ liệt kê COD đã hoàn tất và được đánh dấu đã thu nhưng chưa có remittance; phân trang để màn admin không quét toàn bộ lịch sử.
+    // Liệt kê COD đã giao nhưng chưa remittance; completedAt làm mốc dự phòng cho đơn cũ thiếu deliveredAt.
     async listPendingCodRemittances(
         page: number,
         pageSize: number,
@@ -1085,29 +1085,35 @@ export class SellerWalletRepository
                 'order.id',
                 'order.orderNumber',
                 'order.totalAmount',
+                'order.deliveredAt',
                 'order.completedAt',
                 'order.createdAt',
             ])
             .where('order.paymentMethod = :paymentMethod', {
                 paymentMethod: PaymentMethod.COD,
             })
-            .andWhere('order.paymentStatus = :paymentStatus', {
-                paymentStatus: PaymentStatus.PAID,
-            })
-            .andWhere('order.fulfillmentStatus = :fulfillmentStatus', {
-                fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
-            })
+            .andWhere(
+                '(order.deliveredAt IS NOT NULL OR order.fulfillmentStatus IN (:...deliveredStatuses))',
+                {
+                    deliveredStatuses: [
+                        OrderFulfillmentStatus.DELIVERED,
+                        OrderFulfillmentStatus.COMPLETED,
+                        OrderFulfillmentStatus.RETURN_REFUND,
+                    ],
+                },
+            )
             .andWhere('order.codRemittedAt IS NULL');
         if (search) {
             const searchPattern = `%${search}%`;
-            // Tìm trong nhóm đơn đã thu, giao xong và chưa đối soát.
+            // Tìm trong nhóm đơn COD đã giao nhưng chưa xác nhận tiền chuyển về nền tảng.
             query.andWhere(
                 '(order.orderNumber ILIKE :search OR CAST(order.id AS text) ILIKE :search)',
                 { search: searchPattern },
             );
         }
         const [orders, total] = await query
-            .orderBy('order.completedAt', 'ASC')
+            .orderBy('order.deliveredAt', 'ASC')
+            .addOrderBy('order.completedAt', 'ASC')
             .addOrderBy('order.createdAt', 'ASC')
             .skip((page - 1) * pageSize)
             .take(pageSize)
@@ -1118,8 +1124,8 @@ export class SellerWalletRepository
                 orderId: order.id,
                 orderNumber: order.orderNumber,
                 amount: order.totalAmount,
-                completedAt: (
-                    order.completedAt ?? order.createdAt
+                deliveredAt: (
+                    order.deliveredAt ?? order.completedAt ?? order.createdAt
                 ).toISOString(),
                 createdAt: order.createdAt.toISOString(),
             })),
@@ -2260,7 +2266,9 @@ export class SellerWalletRepository
         });
     }
 
-    // Chỉ xác nhận COD sau khi order hoàn tất và khoản thu đã được ghi rõ bằng chứng từ admin.
+    // deliveredAt chứng minh carrier đã giao COD; xác nhận hoàn tất của khách là một trạng thái riêng.
+    // Mã tham chiếu được lưu idempotent: retry cùng mã được chấp nhận, còn mã khác bị từ chối để giữ audit.
+    // Tiền COD vào ledger nền tảng sau khi admin xác nhận; khoản seller vẫn pending cho tới khi đủ điều kiện release.
     async confirmCodRemittance(
         orderId: string,
         adminId: string,
@@ -2275,11 +2283,10 @@ export class SellerWalletRepository
                 throw new BadRequestException('Không tìm thấy đơn hàng.');
             if (
                 order.paymentMethod !== PaymentMethod.COD ||
-                order.paymentStatus !== PaymentStatus.PAID ||
-                order.fulfillmentStatus !== OrderFulfillmentStatus.COMPLETED
+                !(order.deliveredAt || order.completedAt)
             ) {
                 throw new ConflictException(
-                    'Chỉ xác nhận COD đã thu và đơn đã hoàn tất.',
+                    'Chỉ đối soát COD sau khi shipper xác nhận giao thành công.',
                 );
             }
             const normalizedReference = reference.trim();
@@ -2290,15 +2297,69 @@ export class SellerWalletRepository
                     throw new ConflictException(
                         'Đơn này đã được đối soát với mã giao dịch khác.',
                     );
-                return;
+            } else {
+                order.codRemittedAt = new Date();
+                order.codRemittanceReference = normalizedReference;
+                order.codRemittanceConfirmedBy = adminId;
             }
-            order.codRemittedAt = new Date();
-            order.codRemittanceReference = normalizedReference;
-            order.codRemittanceConfirmedBy = adminId;
+            if (order.paymentStatus === PaymentStatus.COD_PENDING_COLLECTION) {
+                // Sửa đơn cũ đã giao trước khi phiên bản mới ghi nhận COD đã thu tại webhook.
+                order.paymentStatus = PaymentStatus.PAID;
+            }
             await manager.getRepository(Order).save(order);
+            await this.ensureCodRemittanceLedgerInTransaction(manager, order);
             await this.creditOrderPendingInTransaction(manager, orderId);
         });
         await this.releaseCompletedOrder(orderId);
+    }
+
+    // Ghi COD thực nhận và phân bổ phí ship trong cùng transaction, kể cả khi đơn đang chờ hoàn khách.
+    // Source key bảo vệ retry; helper chỉ cập nhật sổ nền tảng và không tăng số dư khả dụng của seller.
+    private async ensureCodRemittanceLedgerInTransaction(
+        manager: EntityManager,
+        order: Order,
+    ): Promise<void> {
+        const ledgerRepository = manager.getRepository(PlatformFinanceLedger);
+        const remittanceSourceKey = `cod-remittance:${order.id}`;
+        if (
+            !(await ledgerRepository.exist({
+                where: { sourceKey: remittanceSourceKey },
+            }))
+        ) {
+            await ledgerRepository.save({
+                kind: 'COD_REMITTANCE',
+                amount: order.totalAmount,
+                sourceKey: remittanceSourceKey,
+                shopId: null,
+                orderId: order.id,
+                returnRequestId: null,
+                reference: order.codRemittanceReference ?? order.orderNumber,
+                settlementBatchId: null,
+                createdBy: order.codRemittanceConfirmedBy,
+            });
+        }
+
+        // Phí ship được phân bổ sang quỹ riêng, tránh cộng lại vào tiền COD thực nhận.
+        const shippingFee = toCents(order.shippingFee);
+        const shippingSourceKey = `shipping-fund:allocation:${order.id}`;
+        if (
+            shippingFee > 0n &&
+            !(await ledgerRepository.exist({
+                where: { sourceKey: shippingSourceKey },
+            }))
+        ) {
+            await ledgerRepository.save({
+                kind: 'SHIPPING_FUND_ALLOCATION',
+                amount: fromCents(shippingFee),
+                sourceKey: shippingSourceKey,
+                shopId: null,
+                orderId: order.id,
+                returnRequestId: null,
+                reference: order.orderNumber,
+                settlementBatchId: null,
+                createdBy: order.codRemittanceConfirmedBy,
+            });
+        }
     }
 
     // Đảo đúng phần tiền hàng đã ghi cho shop; khoản nợ phát sinh được giữ âm thay vì làm mất dấu hoàn tiền đã trả khách.

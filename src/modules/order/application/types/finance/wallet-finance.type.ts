@@ -39,12 +39,12 @@ export interface AdminWalletWithdrawalRecord extends WalletWithdrawalRecord {
     recipientConfirmedAt: string | null;
 }
 
-// Dữ liệu tối thiểu để admin xác nhận COD đã thu, không trả thông tin cá nhân của khách.
+// Dữ liệu tối thiểu để admin đối soát COD sau khi shipper báo giao thành công.
 export interface AdminCodRemittanceRecord {
     orderId: string;
     orderNumber: string;
     amount: string;
-    completedAt: string;
+    deliveredAt: string;
     createdAt: string;
 }
 

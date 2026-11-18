@@ -93,7 +93,7 @@ export class Order {
     })
     deliveryConfirmedAt!: Date | null;
 
-    // COD chỉ được xem là PAID sau khi mô phỏng giao thành công và thu tiền.
+    // COD chỉ được xem là PAID khi carrier xác nhận giao thành công và đã thu tiền từ khách.
     @Column({
         name: 'payment_status',
         type: 'enum',
