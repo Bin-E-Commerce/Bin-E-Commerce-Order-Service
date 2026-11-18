@@ -12,7 +12,10 @@ import { WalletWithdrawalRequest } from '@/database/payment/entities/wallet-with
 import { PlatformFinanceLedger } from '@/database/payment/entities/platform-finance-ledger.entity';
 import { WalletFinanceNotificationOutboxEntity } from '@/database/integration/entities/wallet-finance-notification-outbox.entity';
 import { OrderReturnRequest } from '@/database/returns/entities/order-return-request.entity';
-import { OrderReturnStatus } from '@/database/returns/enums/order-return-status.enum';
+import {
+    ACTIVE_ORDER_RETURN_STATUSES,
+    OrderReturnStatus,
+} from '@/database/returns/enums/order-return-status.enum';
 import { SellerWalletRepository } from '@/modules/order/infrastructure/repositories/finance/seller-wallet.repository';
 
 describe('SellerWalletRepository completed-order release', () => {
@@ -50,7 +53,19 @@ describe('SellerWalletRepository completed-order release', () => {
         expect(queryMock.mock.calls[1]![0]).toEqual(
             expect.stringContaining('order_row.cod_remitted_at IS NOT NULL'),
         );
-        expect(queryMock.mock.calls[1]![1]).toEqual(['order-1']);
+        expect(queryMock.mock.calls[1]![0]).toContain(
+            'order_row.return_window_until <= NOW()',
+        );
+        expect(queryMock.mock.calls[1]![0]).toContain(
+            'return_request.status = ANY($2::order_return_status_enum[])',
+        );
+        expect(queryMock.mock.calls[1]![0]).toContain(
+            'FOR UPDATE OF order_row, ledger SKIP LOCKED',
+        );
+        expect(queryMock.mock.calls[1]![1]).toEqual([
+            'order-1',
+            ACTIVE_ORDER_RETURN_STATUSES,
+        ]);
     });
 
     // Sau xác nhận COD, query reconcile ghi pending còn query release áp dụng predicate remittance cho đúng order.
@@ -89,7 +104,65 @@ describe('SellerWalletRepository completed-order release', () => {
         expect(queryMock.mock.calls[1]![0]).toEqual(
             expect.stringContaining('order_row.cod_remitted_at IS NOT NULL'),
         );
-        expect(queryMock.mock.calls[1]![1]).toEqual(['order-1']);
+        expect(queryMock.mock.calls[1]![1]).toEqual([
+            'order-1',
+            ACTIVE_ORDER_RETURN_STATUSES,
+        ]);
+    });
+
+    // Worker recheck sau khi khóa order giữ pending nếu một return active vừa commit trong lúc worker đợi lock.
+    it('keeps seller proceeds pending while an active return exists', async () => {
+        const orderRepository = {
+            findOne: jest.fn().mockResolvedValue({
+                id: 'order-1',
+                paymentMethod: PaymentMethod.PAY2S,
+                paymentStatus: PaymentStatus.PAID,
+                fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
+                returnWindowUntil: new Date(Date.now() - 60_000),
+                codRemittedAt: null,
+            }),
+        };
+        const returnRequestRepository = {
+            exist: jest.fn().mockResolvedValue(true),
+        };
+        const walletRepository = { findOne: jest.fn() };
+        const queryMock = jest
+            .fn()
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([
+                {
+                    id: 'ledger-1',
+                    shop_id: 'shop-1',
+                    order_id: 'order-1',
+                    amount: '10000.00',
+                    source_key: 'sale:order-1:shop-1',
+                },
+            ]);
+        const manager = {
+            getRepository: jest.fn((entity: Function) => {
+                if (entity === Order) return orderRepository;
+                if (entity === OrderReturnRequest)
+                    return returnRequestRepository;
+                if (entity === SellerWallet) return walletRepository;
+                if (entity === SellerWalletLedger)
+                    return { exist: jest.fn().mockResolvedValue(false) };
+                return undefined;
+            }),
+            query: queryMock,
+        } as unknown as EntityManager;
+        const repository = new SellerWalletRepository(
+            createDataSource(manager),
+        );
+
+        await repository.releaseCompletedOrder('order-1');
+
+        expect(returnRequestRepository.exist).toHaveBeenCalledWith({
+            where: {
+                orderId: 'order-1',
+                status: expect.anything(),
+            },
+        });
+        expect(walletRepository.findOne).not.toHaveBeenCalled();
     });
 });
 

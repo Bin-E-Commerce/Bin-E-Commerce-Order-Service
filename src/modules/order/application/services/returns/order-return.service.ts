@@ -98,19 +98,12 @@ export class OrderReturnService {
         @Optional() private readonly authClient?: AuthClient,
     ) {}
 
-    // Tạo một request cho đúng một shop; UI nhiều shop phải gọi lại endpoint theo từng nhóm item.
-    // Chỉ nhận đơn DELIVERED vì COMPLETED nghĩa là khách đã xác nhận hoàn thành và đóng quyền bắt đầu return mới.
-    // Kiểm tra application layer giúp phản hồi nhanh khi quy trình hoàn đang mở.
-    // Unique partial index ở database xử lý trường hợp hai request chạy đồng thời sau cùng một lần kiểm tra.
+    // Xác thực sớm trước khi gọi dịch vụ ngân hàng và vận chuyển để request hết hạn không tốn I/O.
+    // Trước lúc lưu, transaction khóa lại order rồi kiểm tra lần nữa để không đua với worker giải phóng tiền seller.
+    // Một request chỉ thuộc một shop; unique partial index vẫn là hàng rào cuối cho hai lần gửi đồng thời.
     async create(ownerId: string, orderId: string, dto: CreateOrderReturnDto) {
         const order = await this.orders.findOwnedById(ownerId, orderId);
         if (!order) throw new NotFoundException('Không tìm thấy đơn hàng.');
-        if (order.fulfillmentStatus !== OrderFulfillmentStatus.DELIVERED)
-            throw new ConflictException(
-                'Đơn hàng chưa đủ điều kiện hoàn hàng.',
-            );
-        if (order.returnWindowUntil && order.returnWindowUntil < new Date())
-            throw new ConflictException('Đã hết thời hạn hoàn hàng.');
         this.validateEvidence(dto);
         const itemMap = new Map(
             (order.items ?? []).map((item) => [item.id, item]),
@@ -141,6 +134,23 @@ export class OrderReturnService {
                 );
             return existing;
         }
+        this.assertReturnWindowOpen(order);
+        // Chỉ một lần hoàn thành công được phép áp dụng cho mỗi dòng sản phẩm, kể cả request cũ đã kết thúc.
+        const completedReturns = await this.repository.find({
+            where: {
+                orderId,
+                ownerId,
+                status: OrderReturnStatus.REFUNDED,
+            },
+            select: { itemIds: true },
+        });
+        const alreadyRefundedItemIds = new Set(
+            completedReturns.flatMap((request) => request.itemIds),
+        );
+        if (itemIds.some((itemId) => alreadyRefundedItemIds.has(itemId)))
+            throw new ConflictException(
+                'Sản phẩm trong đơn đã được hoàn tiền trước đó.',
+            );
         // OTHER chỉ được giữ cho request lịch sử đã tồn tại; không cho tạo return mới bỏ qua danh sách lý do chuẩn.
         if (dto.reason === OrderReturnReason.OTHER)
             throw new BadRequestException(
@@ -226,6 +236,16 @@ export class OrderReturnService {
             if (this.dataSource) {
                 // Commit request cùng event; lỗi ghi outbox sẽ rollback cả hai để không mất thông báo Seller.
                 saved = await this.dataSource.transaction(async (manager) => {
+                    const lockedOrder = await manager
+                        .getRepository(Order)
+                        .findOne({
+                            where: { id: orderId, ownerId },
+                            lock: { mode: 'pessimistic_write' },
+                        });
+                    if (!lockedOrder)
+                        throw new NotFoundException('Không tìm thấy đơn hàng.');
+                    // Quote có thể hoàn tất sát hạn; kiểm tra lại sau khi lấy khóa trước khi tạo request.
+                    this.assertReturnWindowOpen(lockedOrder);
                     const created = await manager
                         .getRepository(OrderReturnRequest)
                         .save(request);
@@ -240,7 +260,14 @@ export class OrderReturnService {
                     return created;
                 });
             } else {
-                // Adapter legacy không cấp transaction vẫn lưu request và thử enqueue event sau khi lưu.
+                // Adapter legacy chưa có row lock nên đọc lại deadline sát lúc lưu; production dùng transaction ở nhánh trên.
+                const latestOrder = await this.orders.findOwnedById(
+                    ownerId,
+                    orderId,
+                );
+                if (!latestOrder)
+                    throw new NotFoundException('Không tìm thấy đơn hàng.');
+                this.assertReturnWindowOpen(latestOrder);
                 saved = await this.repository.save(request);
             }
         } catch (error) {
@@ -266,6 +293,24 @@ export class OrderReturnService {
         // Gửi mô tả của Customer trong event đầu tiên để notification/email cho Seller có đủ ngữ cảnh xử lý.
         await this.publishCreatedRequest(saved, order.orderNumber, ownerId);
         return saved;
+    }
+
+    // Chỉ nhận order đã giao hoặc đã hoàn tất trong thời hạn lưu theo deliveredAt; dữ liệu thiếu hạn bị từ chối an toàn.
+    private assertReturnWindowOpen(order: Order): void {
+        if (
+            order.fulfillmentStatus !== OrderFulfillmentStatus.DELIVERED &&
+            order.fulfillmentStatus !== OrderFulfillmentStatus.COMPLETED
+        ) {
+            throw new ConflictException(
+                'Đơn hàng chưa đủ điều kiện hoàn hàng.',
+            );
+        }
+        if (!order.returnWindowUntil)
+            throw new ConflictException(
+                'Đơn hàng chưa đủ điều kiện hoàn hàng.',
+            );
+        if (order.returnWindowUntil.getTime() <= Date.now())
+            throw new ConflictException('Đã hết thời hạn hoàn hàng.');
     }
 
     // Customer đọc các request trong order của chính mình; request cũ chưa có phí sẽ được bổ sung quote một lần.

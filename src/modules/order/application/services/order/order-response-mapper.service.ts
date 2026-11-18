@@ -72,6 +72,7 @@ export class OrderResponseMapper {
             warnings,
             createdAt: order.createdAt.toISOString(),
             completedAt: order.completedAt?.toISOString() ?? null,
+            returnWindowUntil: order.returnWindowUntil?.toISOString() ?? null,
             deliveryConfirmation: {
                 status:
                     order.deliveryConfirmationStatus ??

@@ -29,7 +29,7 @@ describe('OrderReturnService', () => {
         id: 'order-1',
         ownerId: 'customer-1',
         orderNumber: 'BIN-0001',
-        // Ca tạo return mới dùng DELIVERED vì khách chưa xác nhận hoàn thành đơn.
+        // Request mới dùng deadline phát sinh từ deliveredAt; cả DELIVERED và COMPLETED đều còn quyền trong hạn.
         fulfillmentStatus: OrderFulfillmentStatus.DELIVERED,
         returnWindowUntil: new Date(Date.now() + 86_400_000),
         shippingFee: '30000.00',
@@ -121,6 +121,7 @@ describe('OrderReturnService', () => {
             auth,
         );
         orders.findOwnedById.mockResolvedValue(order);
+        returns.find.mockResolvedValue([] as never);
         const savedRequest = {} as OrderReturnRequest;
         (returns as any).create = jest.fn((value: OrderReturnRequest) =>
             Object.assign(savedRequest, value),
@@ -160,6 +161,65 @@ describe('OrderReturnService', () => {
                 codAmount: 0,
             }),
         );
+    });
+
+    // Khách đã bấm hoàn thành vẫn được mở return cho tới deadline tính từ lúc carrier giao thành công.
+    it('creates a return for a completed order while its return window is open', async () => {
+        orders.findOwnedById.mockResolvedValue({
+            ...orderData,
+            fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
+        } as never);
+
+        await service.create('customer-1', 'order-1', {
+            itemIds: ['item-1'],
+            savedRefundBankAccountId: refundBankAccountId,
+            reason: OrderReturnReason.CHANGE_OF_MIND,
+        });
+
+        expect(returns.save).toHaveBeenCalledWith(
+            expect.objectContaining({
+                orderId: 'order-1',
+                status: OrderReturnStatus.REQUESTED,
+            }),
+        );
+    });
+
+    // Hết deadline thì từ chối trước khi xác minh ngân hàng hoặc gọi quote vận chuyển.
+    it('rejects a completed-order return after the return window closes', async () => {
+        orders.findOwnedById.mockResolvedValue({
+            ...orderData,
+            fulfillmentStatus: OrderFulfillmentStatus.COMPLETED,
+            returnWindowUntil: new Date(Date.now() - 1),
+        } as never);
+
+        await expect(
+            service.create('customer-1', 'order-1', {
+                itemIds: ['item-1'],
+                savedRefundBankAccountId: refundBankAccountId,
+                reason: OrderReturnReason.CHANGE_OF_MIND,
+            }),
+        ).rejects.toThrow('Đã hết thời hạn hoàn hàng.');
+
+        expect(shipping.calculateQuote).not.toHaveBeenCalled();
+        expect(returns.save).not.toHaveBeenCalled();
+    });
+
+    // Request mới không thể hoàn lại cùng dòng hàng sau khi một request trước đã REFUNDED.
+    it('rejects an item that has already been refunded', async () => {
+        returns.find.mockResolvedValue([
+            { itemIds: ['item-1'] } as OrderReturnRequest,
+        ] as never);
+
+        await expect(
+            service.create('customer-1', 'order-1', {
+                itemIds: ['item-1'],
+                savedRefundBankAccountId: refundBankAccountId,
+                reason: OrderReturnReason.CHANGE_OF_MIND,
+            }),
+        ).rejects.toThrow('đã được hoàn tiền trước đó');
+
+        expect(shipping.calculateQuote).not.toHaveBeenCalled();
+        expect(returns.save).not.toHaveBeenCalled();
     });
 
     // Khách đổi ý không được hoàn phí shop giao ban đầu; estimate chỉ trừ phí khách → shop.

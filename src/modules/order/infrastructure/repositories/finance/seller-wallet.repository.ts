@@ -64,6 +64,7 @@ import {
     type WalletFinanceEventName,
 } from '@common/kafka/events';
 import { buildWalletFinanceEvent } from '@/modules/order/application/utils/finance/build-wallet-finance-event.util';
+import { ORDER_RETURN_WINDOW_MS } from '@/modules/order/application/constants/order-return-window.constant';
 import {
     createWithdrawalTransferMemo,
     createWithdrawalTransferMemoCode,
@@ -1458,13 +1459,19 @@ export class SellerWalletRepository
                 order.paymentStatus = PaymentStatus.REFUND_PENDING;
                 await orderRepository.save(order);
             } else {
-                // Khi admin xác minh giao hàng thành công, khách có ba ngày để xác nhận và mở lại cửa sổ hoàn.
+                // Khi admin xác minh giao hàng, mốc đó bắt đầu lại cả thời hạn xác nhận ba ngày lẫn thời hạn hoàn bảy ngày.
+                const deliveredAt = new Date();
                 order.fulfillmentStatus = OrderFulfillmentStatus.DELIVERED;
+                order.deliveredAt = deliveredAt;
+                order.returnWindowUntil = new Date(
+                    deliveredAt.getTime() + ORDER_RETURN_WINDOW_MS,
+                );
                 order.deliveryConfirmationStatus =
                     OrderDeliveryConfirmationStatus.PENDING;
                 order.deliveryConfirmationMethod = null;
                 order.deliveryConfirmationDeadline = new Date(
-                    Date.now() + DELIVERY_ISSUE_RECONFIRMATION_DELAY_MS,
+                    deliveredAt.getTime() +
+                        DELIVERY_ISSUE_RECONFIRMATION_DELAY_MS,
                 );
                 order.deliveryConfirmedAt = null;
                 order.completedAt = null;
@@ -3214,7 +3221,9 @@ export class SellerWalletRepository
         }
     }
 
-    // Chuyển pending sang available khi đơn hoàn tất và COD đã remittance; job lặp an toàn nhờ source key của ledger.
+    // Chuyển pending sang available sau hạn hoàn, khi không còn return mở và COD đã remittance.
+    // Worker lấy khóa order cùng ledger rồi kiểm tra lại request đang mở để không giải phóng tiền giữa lúc khách gửi hoàn.
+    // Source key của ledger giúp retry và nhiều replica không cộng available balance hai lần.
     private async releaseEligibleBalances(
         transactionManager?: EntityManager,
         onlyOrderId?: string,
@@ -3243,6 +3252,13 @@ export class SellerWalletRepository
                       AND order_row.fulfillment_status = 'COMPLETED'
                       AND order_row.payment_status = 'PAID'
                       AND (order_row.payment_method <> 'COD' OR order_row.cod_remitted_at IS NOT NULL)
+                      AND order_row.return_window_until <= NOW()
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM order_return_requests return_request
+                          WHERE return_request.order_id = order_row.id
+                            AND return_request.status = ANY($2::order_return_status_enum[])
+                      )
                       AND ledger.amount + COALESCE((
                           SELECT SUM(reversal.amount)
                           FROM seller_wallet_ledger reversal
@@ -3258,9 +3274,9 @@ export class SellerWalletRepository
                       AND ($1::uuid IS NULL OR order_row.id = $1)
                     ORDER BY order_row.return_window_until ASC
                     LIMIT 50
-                    FOR UPDATE OF ledger SKIP LOCKED
+                    FOR UPDATE OF order_row, ledger SKIP LOCKED
                 `,
-                [onlyOrderId ?? null],
+                [onlyOrderId ?? null, ACTIVE_ORDER_RETURN_STATUSES],
             )) as Array<{
                 id: string;
                 shop_id: string;
@@ -3269,6 +3285,33 @@ export class SellerWalletRepository
                 source_key: string;
             }>;
             for (const entry of dueLedger) {
+                const order = await manager.getRepository(Order).findOne({
+                    where: { id: entry.order_id },
+                    lock: { mode: 'pessimistic_write' },
+                });
+                if (
+                    !order ||
+                    order.fulfillmentStatus !==
+                        OrderFulfillmentStatus.COMPLETED ||
+                    order.paymentStatus !== PaymentStatus.PAID ||
+                    !order.returnWindowUntil ||
+                    order.returnWindowUntil.getTime() > Date.now() ||
+                    (order.paymentMethod === PaymentMethod.COD &&
+                        !order.codRemittedAt)
+                ) {
+                    continue;
+                }
+                // Query lần hai chạy sau khi lấy khóa order nên nhìn thấy request vừa commit nếu worker phải chờ transaction tạo return.
+                const hasActiveReturn = await manager
+                    .getRepository(OrderReturnRequest)
+                    .exist({
+                        where: {
+                            orderId: order.id,
+                            status: In([...ACTIVE_ORDER_RETURN_STATUSES]),
+                        },
+                    });
+                if (hasActiveReturn) continue;
+
                 const sourceKey = `release:${entry.source_key}`;
                 const ledgerRepository =
                     manager.getRepository(SellerWalletLedger);

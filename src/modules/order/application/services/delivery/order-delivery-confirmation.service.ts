@@ -31,6 +31,7 @@ import {
     DeliveryConfirmationDecision,
     DeliveryConfirmationDto,
 } from '@/modules/order/presentation/dto/orders/delivery-confirmation.dto';
+import { ORDER_RETURN_WINDOW_MS } from '@/modules/order/application/constants/order-return-window.constant';
 
 const AUTO_CONFIRMATION_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
 
@@ -68,7 +69,7 @@ export class OrderDeliveryConfirmationService {
         private readonly sellerWalletRepository?: SellerWalletRepositoryPort,
     ) {}
 
-    // Ghi nhận DELIVERED từ Shipping, mở cửa sổ ba ngày và phát event sau khi transaction commit.
+    // Ghi nhận DELIVERED từ Shipping, mở cửa sổ xác nhận ba ngày và cửa sổ hoàn bảy ngày tính từ mốc giao.
     // Event có thể được gửi lại nhiều lần nên chỉ request đầu tiên được đổi trạng thái; các lần sau trả về order hiện tại.
     async markDelivered(orderId: string, occurredAt: string): Promise<void> {
         let changed = false;
@@ -94,6 +95,9 @@ export class OrderDeliveryConfirmationService {
             const deliveredAt = this.parseOccurredAt(occurredAt);
             order.fulfillmentStatus = OrderFulfillmentStatus.DELIVERED;
             order.deliveredAt = deliveredAt;
+            order.returnWindowUntil = new Date(
+                deliveredAt.getTime() + ORDER_RETURN_WINDOW_MS,
+            );
             order.deliveryConfirmationStatus =
                 OrderDeliveryConfirmationStatus.PENDING;
             order.deliveryConfirmationMethod = null;

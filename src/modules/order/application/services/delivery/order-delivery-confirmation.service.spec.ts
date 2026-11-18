@@ -137,7 +137,7 @@ describe('OrderDeliveryConfirmationService', () => {
         );
     });
 
-    // Ghi nhận delivered chỉ một lần và phát event nhắc customer xác nhận.
+    // Ghi nhận delivered mở cửa sổ xác nhận ba ngày và thời hạn hoàn bảy ngày từ thời điểm carrier giao.
     it('should mark an order as delivered and open confirmation window', async () => {
         // Arrange
         const order = {
@@ -154,6 +154,9 @@ describe('OrderDeliveryConfirmationService', () => {
         expect(order.fulfillmentStatus).toBe(OrderFulfillmentStatus.DELIVERED);
         expect(order.deliveryConfirmationDeadline).toEqual(
             new Date('2026-09-03T10:00:00.000Z'),
+        );
+        expect(order.returnWindowUntil).toEqual(
+            new Date('2026-09-07T10:00:00.000Z'),
         );
         expect(
             mockOrderEvents.publishDeliveryAwaitingConfirmation,
