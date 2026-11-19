@@ -86,7 +86,10 @@ export class OrderResponseMapper {
     }
 
     // Map summary Seller chỉ lấy item thuộc shop đã được repository lọc sẵn và tính tổng bằng tiền snapshot.
-    toSellerListItem(order: Order): SellerOrderListItemResponse {
+    toSellerListItem(
+        order: Order,
+        hasReturnRequest = false,
+    ): SellerOrderListItemResponse {
         const items = order.items ?? [];
         return {
             id: order.id,
@@ -94,6 +97,7 @@ export class OrderResponseMapper {
             status: order.status,
             fulfillmentStatus:
                 order.fulfillmentStatus ?? this.legacyFulfillment(order.status),
+            hasReturnRequest,
             paymentStatus:
                 order.paymentStatus ?? PaymentStatus.COD_PENDING_COLLECTION,
             paymentMethod: order.paymentMethod,
@@ -115,6 +119,7 @@ export class OrderResponseMapper {
     }
 
     // Map detail Seller mà không trả ownerId, SKU hoặc item của shop khác dù entity có thể chứa toàn bộ order.
+    // Trạng thái xác nhận và mốc hoàn tất giúp UI khôi phục lịch sử giao khi fulfillment đang dùng cho hậu mãi.
     toSellerResponse(order: Order): SellerOrderResponse {
         const items = order.items ?? [];
         return {
@@ -123,6 +128,9 @@ export class OrderResponseMapper {
             status: order.status,
             fulfillmentStatus:
                 order.fulfillmentStatus ?? this.legacyFulfillment(order.status),
+            deliveryConfirmationStatus:
+                order.deliveryConfirmationStatus ??
+                OrderDeliveryConfirmationStatus.PENDING,
             paymentStatus:
                 order.paymentStatus ?? PaymentStatus.COD_PENDING_COLLECTION,
             paymentMethod: order.paymentMethod,
@@ -157,6 +165,7 @@ export class OrderResponseMapper {
                     createdAt: history.createdAt.toISOString(),
                 })),
             createdAt: order.createdAt.toISOString(),
+            completedAt: order.completedAt?.toISOString() ?? null,
         };
     }
 

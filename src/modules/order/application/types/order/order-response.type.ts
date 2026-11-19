@@ -95,6 +95,7 @@ export interface SellerOrderListItemResponse {
     orderNumber: string;
     status: OrderStatus;
     fulfillmentStatus?: OrderFulfillmentStatus;
+    hasReturnRequest: boolean;
     paymentStatus?: PaymentStatus;
     paymentMethod: PaymentMethod;
     isSandbox: boolean;
@@ -126,7 +127,7 @@ export interface SellerOrderListResponse {
     counts: SellerOrderTabCounts;
 }
 
-// Số lượng theo từng bước Seller; returnRefund chỉ gồm yêu cầu Seller còn phải duyệt hoặc kiểm tra.
+// Số lượng theo từng bước Seller; returnRefund gồm mọi order từng có yêu cầu hoàn của shop.
 export interface SellerOrderTabCounts {
     all: number;
     toShip: number;
@@ -143,6 +144,7 @@ export interface SellerOrderResponse {
     orderNumber: string;
     status: OrderStatus;
     fulfillmentStatus: OrderFulfillmentStatus;
+    deliveryConfirmationStatus: OrderDeliveryConfirmationStatus;
     paymentStatus: PaymentStatus;
     paymentMethod: PaymentMethod;
     isSandbox: boolean;
@@ -155,6 +157,7 @@ export interface SellerOrderResponse {
     cancelledAt: string | null;
     statusHistory: OrderStatusHistoryResponse[];
     createdAt: string;
+    completedAt: string | null;
 }
 
 // Item Seller được loại bỏ sellerShopId và SKU nội bộ vì shop scope đã được kiểm tra ở server.

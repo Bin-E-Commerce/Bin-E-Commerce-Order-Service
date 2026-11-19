@@ -410,6 +410,57 @@ export class OrderReturnService {
         });
         if (!request)
             throw new NotFoundException('Không tìm thấy yêu cầu hoàn hàng.');
+        // Retry sau timeout chỉ tự bù phần transition đã lưu; event ID ổn định chống gửi thông báo trùng.
+        const isRetryingApprovedReview =
+            status === OrderReturnStatus.APPROVED &&
+            request.status === OrderReturnStatus.AWAITING_SHIPMENT &&
+            Boolean(request.returnShippingPayer) &&
+            Boolean(request.reviewedAt);
+        if (isRetryingApprovedReview) {
+            const order = await this.orders.findOwnedById(
+                request.ownerId,
+                request.orderId,
+            );
+            if (!order)
+                throw new NotFoundException('Không tìm thấy đơn hàng gốc.');
+            await this.moveOrderToReturnRefund(order);
+            await this.publish(
+                request,
+                order.orderNumber,
+                request.ownerId,
+                'return.approved',
+            );
+            return this.toSellerSafeRequest(request);
+        }
+        const isRetryingRejectedReview =
+            status === OrderReturnStatus.REJECTED &&
+            request.status === OrderReturnStatus.REJECTED;
+        if (isRetryingRejectedReview) {
+            const order = await this.orders.findOwnedById(
+                request.ownerId,
+                request.orderId,
+            );
+            if (
+                order?.fulfillmentStatus ===
+                OrderFulfillmentStatus.RETURN_REFUND
+            ) {
+                if (!this.returnRequestCancellationRepository)
+                    throw new ConflictException(
+                        'Chức năng đồng bộ trạng thái yêu cầu hoàn hàng chưa sẵn sàng.',
+                    );
+                await this.returnRequestCancellationRepository.restoreDeliveryAfterRejectedRequest(
+                    request.ownerId,
+                    request.id,
+                );
+            }
+            await this.publish(
+                request,
+                order?.orderNumber ?? '',
+                request.ownerId,
+                'return.rejected',
+            );
+            return this.toSellerSafeRequest(request);
+        }
         // Dữ liệu cũ OTHER có thể đã được duyệt trước migration nhưng chưa chọn payer;
         // chỉ mở lại đúng trạng thái AWAITING_SHIPMENT này để seller phân loại, không hồi sinh các return đã chạy vận chuyển.
         const isLegacyOtherAwaitingReview =
@@ -489,13 +540,32 @@ export class OrderReturnService {
         request.reviewNote = reviewNote || null;
         request.reviewedAt = new Date();
         request.sellerUserId = currentUser.userId;
-        const saved = await this.repository.save(request);
         const order = await this.orders.findOwnedById(
             request.ownerId,
             request.orderId,
         );
+        // Mọi request bị từ chối khi order đang ở RETURN_REFUND phải qua adapter để giữ lịch sử giao và kiểm tra return song song.
+        if (
+            status === OrderReturnStatus.REJECTED &&
+            order?.fulfillmentStatus === OrderFulfillmentStatus.RETURN_REFUND &&
+            !this.returnRequestCancellationRepository
+        ) {
+            throw new ConflictException(
+                'Chức năng đồng bộ trạng thái yêu cầu hoàn hàng chưa sẵn sàng.',
+            );
+        }
+        const saved = await this.repository.save(request);
         if (status === OrderReturnStatus.APPROVED && order) {
             await this.moveOrderToReturnRefund(order);
+        } else if (
+            status === OrderReturnStatus.REJECTED &&
+            order?.fulfillmentStatus === OrderFulfillmentStatus.RETURN_REFUND
+        ) {
+            // Adapter chỉ khôi phục khi hết mọi return active và suy ra mốc trước đó từ delivery confirmation.
+            await this.returnRequestCancellationRepository?.restoreDeliveryAfterRejectedRequest(
+                request.ownerId,
+                request.id,
+            );
         }
         await this.publish(
             saved,
@@ -895,7 +965,7 @@ export class OrderReturnService {
 
     // Từ chối yêu cầu khi phí carrier sau lúc tạo nhãn vượt giá trị món khách hoàn.
     // Shipping Service phải hủy vận đơn trước khi gọi; transaction khóa request/order để callback retry không tạo phí hoặc trạng thái trùng.
-    // Sau khi từ chối, order quay về DELIVERED/COMPLETED thay vì bị kẹt trong nhóm Trả hàng/Hoàn tiền.
+    // Sau khi từ chối, chỉ trả order về mốc giao gốc khi không còn return active khác giữ luồng hậu mãi.
     async rejectForReturnShippingCostLimit(
         returnId: string,
         carrierFee: string,
@@ -907,6 +977,40 @@ export class OrderReturnService {
         }
 
         const fee = this.roundVnd(toCents(carrierFee));
+        // Fallback chỉ giữ khả năng chạy ở module legacy chưa wire adapter; production dùng adapter để khóa và kiểm tra request song song.
+        const restoreLegacyDeliveryStage = (order: Order | null): boolean => {
+            if (
+                !order ||
+                order.fulfillmentStatus !== OrderFulfillmentStatus.RETURN_REFUND
+            ) {
+                return false;
+            }
+
+            // ISSUE_REPORTED là phản hồi chưa chốt nhận hàng nên không được suy thành COMPLETED từ mốc cũ.
+            const hasUnresolvedIssue =
+                order.deliveryConfirmationStatus ===
+                OrderDeliveryConfirmationStatus.ISSUE_REPORTED;
+            const wasDeliveryConfirmed =
+                !hasUnresolvedIssue &&
+                ([
+                    OrderDeliveryConfirmationStatus.CONFIRMED,
+                    OrderDeliveryConfirmationStatus.AUTO_CONFIRMED,
+                ].includes(order.deliveryConfirmationStatus) ||
+                    Boolean(order.completedAt));
+
+            if (wasDeliveryConfirmed) {
+                order.fulfillmentStatus = OrderFulfillmentStatus.COMPLETED;
+            } else {
+                // Khi chưa xác nhận hoặc issue bị từ chối, khách quay lại đúng bước chờ xác nhận.
+                order.fulfillmentStatus = OrderFulfillmentStatus.DELIVERED;
+                order.deliveryConfirmationStatus =
+                    OrderDeliveryConfirmationStatus.PENDING;
+                order.deliveryConfirmationMethod = null;
+                order.deliveryConfirmedAt = null;
+                order.completedAt = null;
+            }
+            return true;
+        };
         const result = await this.dataSource.transaction(async (manager) => {
             const requestRepository = manager.getRepository(OrderReturnRequest);
             const request = await requestRepository.findOne({
@@ -929,19 +1033,14 @@ export class OrderReturnService {
                     lock: { mode: 'pessimistic_write' },
                 });
                 if (
-                    order?.fulfillmentStatus ===
-                    OrderFulfillmentStatus.RETURN_REFUND
+                    order &&
+                    !this.returnRequestCancellationRepository &&
+                    restoreLegacyDeliveryStage(order)
                 ) {
-                    const wasConfirmed = [
-                        OrderDeliveryConfirmationStatus.CONFIRMED,
-                        OrderDeliveryConfirmationStatus.AUTO_CONFIRMED,
-                    ].includes(order.deliveryConfirmationStatus);
-                    order.fulfillmentStatus = wasConfirmed
-                        ? OrderFulfillmentStatus.COMPLETED
-                        : OrderFulfillmentStatus.DELIVERED;
                     await orderRepository.save(order);
                 }
-                return { request, order, shouldPublish: false };
+                // ID event theo request/status ổn định nên retry reinsert an toàn, kể cả lần trước lỗi trước khi tạo outbox.
+                return { request, order, shouldPublish: true };
             }
             if (request.status !== OrderReturnStatus.AWAITING_SHIPMENT)
                 throw new ConflictException(
@@ -971,22 +1070,26 @@ export class OrderReturnService {
                 lock: { mode: 'pessimistic_write' },
             });
             if (
-                order?.fulfillmentStatus ===
-                OrderFulfillmentStatus.RETURN_REFUND
+                order &&
+                !this.returnRequestCancellationRepository &&
+                restoreLegacyDeliveryStage(order)
             ) {
-                const wasConfirmed = [
-                    OrderDeliveryConfirmationStatus.CONFIRMED,
-                    OrderDeliveryConfirmationStatus.AUTO_CONFIRMED,
-                ].includes(order.deliveryConfirmationStatus);
-                order.fulfillmentStatus = wasConfirmed
-                    ? OrderFulfillmentStatus.COMPLETED
-                    : OrderFulfillmentStatus.DELIVERED;
                 await manager.getRepository(Order).save(order);
             }
             return { request: saved, order, shouldPublish: true };
         });
 
-        // Chỉ lần đầu chuyển trạng thái mới phát event; callback retry không gửi thông báo trùng.
+        // Adapter khôi phục trạng thái trong transaction riêng và giữ RETURN_REFUND nếu còn return active của shop khác.
+        if (
+            result.request.status === OrderReturnStatus.REJECTED &&
+            this.returnRequestCancellationRepository
+        ) {
+            await this.returnRequestCancellationRepository.restoreDeliveryAfterRejectedRequest(
+                result.request.ownerId,
+                result.request.id,
+            );
+        }
+        // Mỗi lần gọi đều thử đưa event vào outbox; eventId ổn định theo request/status làm retry idempotent.
         if (result.shouldPublish)
             await this.publish(
                 result.request,

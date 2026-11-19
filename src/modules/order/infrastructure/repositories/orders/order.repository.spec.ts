@@ -96,4 +96,70 @@ describe('OrderRepository', () => {
             returnRefund: 0,
         });
     });
+
+    // Yêu cầu hoàn bị từ chối vẫn thuộc lịch sử hoàn của shop và không quay lại tab Hoàn thành.
+    it('should filter seller return history independently of fulfillment status', () => {
+        const queryBuilder = {
+            where: jest.fn().mockReturnThis(),
+            andWhere: jest.fn().mockReturnThis(),
+        };
+        const repository = {
+            createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+        } as unknown as Repository<Order>;
+        target = new OrderRepository(
+            repository,
+            {} as Repository<OrderReturnRequest>,
+        );
+
+        const createFilter = Reflect.get(target, 'createSellerFilterQuery') as (
+            shopId: string,
+            query: { stage: OrderFulfillmentStatus },
+        ) => unknown;
+        createFilter.call(target, 'shop-1', {
+            stage: OrderFulfillmentStatus.RETURN_REFUND,
+        });
+        expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+            expect.stringContaining('seller_return.shop_id = :shopId'),
+        );
+
+        queryBuilder.andWhere.mockClear();
+        createFilter.call(target, 'shop-1', {
+            stage: OrderFulfillmentStatus.COMPLETED,
+        });
+        expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+            expect.stringContaining('NOT EXISTS'),
+        );
+    });
+
+    // Badge tab hoàn đếm order đã có yêu cầu bất kể trạng thái duyệt, đúng cùng tập với danh sách.
+    it('should count seller return orders from the scoped order query', async () => {
+        const queryBuilder = {
+            select: jest.fn().mockReturnThis(),
+            addSelect: jest.fn().mockReturnThis(),
+            where: jest.fn().mockReturnThis(),
+            andWhere: jest.fn().mockReturnThis(),
+            setParameters: jest.fn().mockReturnThis(),
+            getRawOne: jest.fn().mockResolvedValue({
+                total: '2',
+                completed: '1',
+                returnRefund: '1',
+            }),
+        };
+        const repository = {
+            createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+        } as unknown as Repository<Order>;
+        target = new OrderRepository(
+            repository,
+            {} as Repository<OrderReturnRequest>,
+        );
+
+        const counts = await target.countSellerTabs('shop-1');
+        expect(counts.returnRefund).toBe(1);
+        expect(counts.completed).toBe(1);
+        expect(
+            queryBuilder.addSelect.mock.calls.find(
+                (call) => call[1] === 'returnRefund',
+            )?.[0],
+        ).toContain('seller_return.shop_id = :shopId');
+    });
 });

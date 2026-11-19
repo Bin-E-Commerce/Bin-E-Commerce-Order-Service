@@ -1125,7 +1125,9 @@ export class SellerWalletRepository
                 orderNumber: order.orderNumber,
                 amount: order.totalAmount,
                 deliveredAt: (
-                    order.deliveredAt ?? order.completedAt ?? order.createdAt
+                    order.deliveredAt ??
+                    order.completedAt ??
+                    order.createdAt
                 ).toISOString(),
                 createdAt: order.createdAt.toISOString(),
             })),
@@ -3700,14 +3702,29 @@ export class SellerWalletRepository
             });
         if (hasActiveReturn) return false;
 
-        // Nếu khách chưa xác nhận nhận đơn thì giữ trạng thái DELIVERED; nếu đã xác nhận, order đủ điều kiện release phần còn lại.
-        const deliveryWasConfirmed = [
-            OrderDeliveryConfirmationStatus.CONFIRMED,
-            OrderDeliveryConfirmationStatus.AUTO_CONFIRMED,
-        ].includes(order.deliveryConfirmationStatus);
-        order.fulfillmentStatus = deliveryWasConfirmed
-            ? OrderFulfillmentStatus.COMPLETED
-            : OrderFulfillmentStatus.DELIVERED;
+        // ISSUE_REPORTED chưa chứng minh khách chấp nhận hàng; chỉ completion marker không có issue mới giữ trạng thái COMPLETED.
+        const hasUnresolvedIssue =
+            order.deliveryConfirmationStatus ===
+            OrderDeliveryConfirmationStatus.ISSUE_REPORTED;
+        const deliveryWasConfirmed =
+            !hasUnresolvedIssue &&
+            ([
+                OrderDeliveryConfirmationStatus.CONFIRMED,
+                OrderDeliveryConfirmationStatus.AUTO_CONFIRMED,
+            ].includes(order.deliveryConfirmationStatus) ||
+                Boolean(order.completedAt));
+
+        if (deliveryWasConfirmed) {
+            order.fulfillmentStatus = OrderFulfillmentStatus.COMPLETED;
+        } else {
+            // Request cuối đã kết thúc nhưng khách chưa xác nhận, vì vậy mở lại đúng bước xác nhận nhận hàng.
+            order.fulfillmentStatus = OrderFulfillmentStatus.DELIVERED;
+            order.deliveryConfirmationStatus =
+                OrderDeliveryConfirmationStatus.PENDING;
+            order.deliveryConfirmationMethod = null;
+            order.deliveryConfirmedAt = null;
+            order.completedAt = null;
+        }
         await manager.getRepository(Order).save(order);
         return true;
     }

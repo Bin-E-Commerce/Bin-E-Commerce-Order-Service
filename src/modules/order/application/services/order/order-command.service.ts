@@ -796,10 +796,20 @@ export class OrderCommandService {
             this.orderRepository.countSellerTabs(shopId),
         ]);
         const [orders, total] = pageResult;
+        // Đọc một lần cho cả trang, giữ trạng thái hiển thị theo lịch sử hoàn của đúng shop.
+        const returnOrderIds = new Set(
+            await this.orderRepository.findSellerReturnOrderIds(
+                shopId,
+                orders.map((order) => order.id),
+            ),
+        );
 
         return {
             items: orders.map((order) =>
-                this.responseMapper.toSellerListItem(order),
+                this.responseMapper.toSellerListItem(
+                    order,
+                    returnOrderIds.has(order.id),
+                ),
             ),
             total,
             page,

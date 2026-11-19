@@ -32,6 +32,13 @@ const SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES = [
     'REFUNDED',
 ] as const;
 
+// Tab hoàn của seller dựa trên lịch sử yêu cầu thuộc shop, không phụ thuộc kết quả duyệt hay fulfillment hiện tại.
+const SELLER_RETURN_EXISTS = `EXISTS (
+    SELECT 1 FROM order_return_requests seller_return
+    WHERE seller_return.order_id = "order"."id"
+      AND seller_return.shop_id = :shopId
+)`;
+
 // Các trạng thái này cho biết item đã đi vào quy trình hoàn thực tế; item bị từ chối hoặc customer tự hủy vẫn là một lượt bán hợp lệ.
 const RETURN_STATUSES_EXCLUDED_FROM_SALES = [
     OrderReturnStatus.AWAITING_SHIPMENT,
@@ -602,79 +609,70 @@ export class OrderRepository {
         };
     }
 
-    // Đếm order đã đủ điều kiện hiển thị trong Seller Center theo stage; Sandbox từng thu tiền vẫn nằm trong lịch sử shop.
+    // Đếm cùng tập order với bộ lọc Seller; một order có yêu cầu hoàn được tính đúng một lần ở tab hoàn.
     async countSellerTabs(shopId: string): Promise<SellerOrderTabCounts> {
-        const [row, actionableReturnRow] = await Promise.all([
-            this.repository
-                .createQueryBuilder('order')
-                .select('COUNT(*)', 'total')
-                .addSelect(
-                    'COUNT(*) FILTER (WHERE order.fulfillment_status = :toShip)',
-                    'toShip',
-                )
-                .addSelect(
-                    'COUNT(*) FILTER (WHERE order.fulfillment_status = :shipping)',
-                    'shipping',
-                )
-                .addSelect(
-                    'COUNT(*) FILTER (WHERE order.fulfillment_status = :delivered)',
-                    'delivered',
-                )
-                .addSelect(
-                    'COUNT(*) FILTER (WHERE order.fulfillment_status = :completed)',
-                    'completed',
-                )
-                .addSelect(
-                    'COUNT(*) FILTER (WHERE order.fulfillment_status = :cancelled)',
-                    'cancelled',
-                )
-                .where(
-                    `EXISTS (
+        const row = await this.repository
+            .createQueryBuilder('order')
+            .select('COUNT(*)', 'total')
+            .addSelect(
+                `COUNT(*) FILTER (WHERE order.fulfillment_status = :toShip AND NOT ${SELLER_RETURN_EXISTS})`,
+                'toShip',
+            )
+            .addSelect(
+                `COUNT(*) FILTER (WHERE order.fulfillment_status = :shipping AND NOT ${SELLER_RETURN_EXISTS})`,
+                'shipping',
+            )
+            .addSelect(
+                `COUNT(*) FILTER (WHERE order.fulfillment_status = :delivered AND NOT ${SELLER_RETURN_EXISTS})`,
+                'delivered',
+            )
+            .addSelect(
+                `COUNT(*) FILTER (WHERE order.fulfillment_status = :completed AND NOT ${SELLER_RETURN_EXISTS})`,
+                'completed',
+            )
+            .addSelect(
+                `COUNT(*) FILTER (WHERE order.fulfillment_status = :cancelled AND NOT ${SELLER_RETURN_EXISTS})`,
+                'cancelled',
+            )
+            .addSelect(
+                `COUNT(*) FILTER (WHERE ${SELLER_RETURN_EXISTS})`,
+                'returnRefund',
+            )
+            .where(
+                `EXISTS (
             SELECT 1
             FROM order_items seller_item
             WHERE seller_item.order_id = "order"."id"
               AND seller_item.seller_shop_id = :shopId
           )`,
-                    { shopId },
-                )
-                // Đơn đã hủy luôn giữ lịch sử kể cả khi callback tiền còn chờ; các sandbox khác cần bằng chứng đã thu/đang hoàn.
-                .andWhere(
-                    `(
+                { shopId },
+            )
+            // Đơn đã hủy luôn giữ lịch sử kể cả khi callback tiền còn chờ; các sandbox khác cần bằng chứng đã thu/đang hoàn.
+            .andWhere(
+                `(
                     order.is_sandbox = false OR order.status = 'CANCELLED' OR EXISTS (
                         SELECT 1 FROM payment_attempts paid_attempt
                         WHERE paid_attempt.order_id = "order"."id"
                           AND paid_attempt.status IN (:...sellerVisiblePaymentStatuses)
                     )
                 )`,
-                    {
-                        sellerVisiblePaymentStatuses:
-                            SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES,
-                    },
-                )
-                // Seller chỉ nhận đơn đã thanh toán hoặc COD đã xác nhận; PENDING chưa thể xử lý giao hàng.
-                .andWhere('order.status <> :pendingOrderStatus', {
-                    pendingOrderStatus: OrderStatus.PENDING,
-                })
-                .setParameters({
-                    toShip: OrderFulfillmentStatus.TO_SHIP,
-                    shipping: OrderFulfillmentStatus.SHIPPING,
-                    delivered: OrderFulfillmentStatus.DELIVERED,
-                    completed: OrderFulfillmentStatus.COMPLETED,
-                    cancelled: OrderFulfillmentStatus.CANCELLED,
-                })
-                .getRawOne<Record<string, string>>(),
-            this.returnRepository
-                .createQueryBuilder('return_request')
-                .select('COUNT(*)', 'count')
-                .where('return_request.shop_id = :shopId', { shopId })
-                .andWhere('return_request.status IN (:...actionableStatuses)', {
-                    actionableStatuses: [
-                        OrderReturnStatus.REQUESTED,
-                        OrderReturnStatus.RECEIVED,
-                    ],
-                })
-                .getRawOne<{ count: string }>(),
-        ]);
+                {
+                    sellerVisiblePaymentStatuses:
+                        SELLER_VISIBLE_SANDBOX_PAYMENT_STATUSES,
+                },
+            )
+            // Seller chỉ nhận đơn đã thanh toán hoặc COD đã xác nhận; PENDING chưa thể xử lý giao hàng.
+            .andWhere('order.status <> :pendingOrderStatus', {
+                pendingOrderStatus: OrderStatus.PENDING,
+            })
+            .setParameters({
+                toShip: OrderFulfillmentStatus.TO_SHIP,
+                shipping: OrderFulfillmentStatus.SHIPPING,
+                delivered: OrderFulfillmentStatus.DELIVERED,
+                completed: OrderFulfillmentStatus.COMPLETED,
+                cancelled: OrderFulfillmentStatus.CANCELLED,
+            })
+            .getRawOne<Record<string, string>>();
 
         return {
             all: Number(row?.total ?? 0),
@@ -683,8 +681,24 @@ export class OrderRepository {
             delivered: Number(row?.delivered ?? 0),
             completed: Number(row?.completed ?? 0),
             cancelled: Number(row?.cancelled ?? 0),
-            returnRefund: Number(actionableReturnRow?.count ?? 0),
+            returnRefund: Number(row?.returnRefund ?? 0),
         };
+    }
+
+    // Truy vấn gộp lịch sử hoàn cho các order trên trang hiện tại, luôn ràng buộc shop để không lộ yêu cầu của shop khác.
+    async findSellerReturnOrderIds(
+        shopId: string,
+        orderIds: string[],
+    ): Promise<string[]> {
+        // Trang rỗng không tạo câu IN rỗng; không lọc status vì yêu cầu bị từ chối cũng thuộc lịch sử tab hoàn.
+        if (orderIds.length === 0) return [];
+        const rows = await this.returnRepository
+            .createQueryBuilder('return_request')
+            .select('DISTINCT return_request.order_id', 'orderId')
+            .where('return_request.shop_id = :shopId', { shopId })
+            .andWhere('return_request.order_id IN (:...orderIds)', { orderIds })
+            .getRawMany<{ orderId: string }>();
+        return rows.map((row) => row.orderId);
     }
 
     // Lấy danh sách order có item thuộc shop bằng truy vấn hai bước để pagination không bị nhân bản bởi quan hệ 1-n.
@@ -922,10 +936,15 @@ export class OrderRepository {
             });
         }
 
-        if (query.stage) {
+        if (query.stage === OrderFulfillmentStatus.RETURN_REFUND) {
+            // Mọi kết quả duyệt vẫn giữ order ở tab hoàn để seller tra cứu lịch sử.
+            filterQuery.andWhere(SELLER_RETURN_EXISTS);
+        } else if (query.stage) {
+            // Sau khi có yêu cầu hoàn, order rời các tab vận hành khác kể cả khi trạng thái gốc vẫn COMPLETED.
             filterQuery.andWhere('order.fulfillment_status = :stage', {
                 stage: query.stage,
             });
+            filterQuery.andWhere(`NOT ${SELLER_RETURN_EXISTS}`);
         }
 
         const search = this.escapeLike(query.search?.trim() ?? '');

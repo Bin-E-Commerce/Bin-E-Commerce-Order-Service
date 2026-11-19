@@ -12,4 +12,10 @@ export interface ReturnRequestCancellationRepositoryPort {
         ownerId: string,
         returnId: string,
     ): Promise<ReturnRequestCancellationResult>;
+
+    // Shop từ chối request gắn với delivery issue thì mở lại bước xác nhận nếu không còn return khác đang chạy.
+    restoreDeliveryAfterRejectedRequest(
+        ownerId: string,
+        returnId: string,
+    ): Promise<void>;
 }

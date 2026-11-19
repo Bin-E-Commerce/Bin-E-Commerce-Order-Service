@@ -441,6 +441,9 @@ describe('OrderCommandService', () => {
             mockSellerOrderAccess.ensureCanRead.mockReturnValue(currentUser);
             mockSellerShopClient.getOwnedShopId.mockResolvedValue('shop-1');
             mockOrderRepository.findSellerPage.mockResolvedValue([[order], 1]);
+            mockOrderRepository.findSellerReturnOrderIds.mockResolvedValue([
+                order.id,
+            ]);
             mockOrderRepository.countSellerTabs.mockResolvedValue({
                 all: 4,
                 toShip: 1,
@@ -480,6 +483,13 @@ describe('OrderCommandService', () => {
             );
             expect(mockOrderRepository.countSellerTabs).toHaveBeenCalledWith(
                 'shop-1',
+            );
+            expect(
+                mockOrderRepository.findSellerReturnOrderIds,
+            ).toHaveBeenCalledWith('shop-1', [order.id]);
+            expect(mockResponseMapper.toSellerListItem).toHaveBeenCalledWith(
+                order,
+                true,
             );
         });
 
