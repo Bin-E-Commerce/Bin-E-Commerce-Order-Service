@@ -1039,8 +1039,8 @@ export class OrderReturnService {
                 ) {
                     await orderRepository.save(order);
                 }
-                // ID event theo request/status ổn định nên retry reinsert an toàn, kể cả lần trước lỗi trước khi tạo outbox.
-                return { request, order, shouldPublish: true };
+                // Event đã được ghi cùng transaction lúc từ chối; retry chỉ sửa bù trạng thái giao hàng legacy.
+                return { request, order };
             }
             if (request.status !== OrderReturnStatus.AWAITING_SHIPMENT)
                 throw new ConflictException(
@@ -1076,7 +1076,17 @@ export class OrderReturnService {
             ) {
                 await manager.getRepository(Order).save(order);
             }
-            return { request: saved, order, shouldPublish: true };
+
+            // Ghi trạng thái từ chối và event vào cùng transaction để retry không phát lặp hoặc làm mất event.
+            await this.publish(
+                saved,
+                order?.orderNumber ?? '',
+                request.ownerId,
+                'return.rejected',
+                undefined,
+                manager,
+            );
+            return { request: saved, order };
         });
 
         // Adapter khôi phục trạng thái trong transaction riêng và giữ RETURN_REFUND nếu còn return active của shop khác.
@@ -1089,14 +1099,6 @@ export class OrderReturnService {
                 result.request.id,
             );
         }
-        // Mỗi lần gọi đều thử đưa event vào outbox; eventId ổn định theo request/status làm retry idempotent.
-        if (result.shouldPublish)
-            await this.publish(
-                result.request,
-                result.order?.orderNumber ?? '',
-                result.request.ownerId,
-                'return.rejected',
-            );
         return result.request;
     }
 
